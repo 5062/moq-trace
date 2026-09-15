@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quic-trace"
+version = "0.1.0"
+description = "Capture and analyze QUIC transport traces."
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.4",
+    "pyarrow>=20",
+]
+
+[project.scripts]
+quic-trace = "quic_trace.cli:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "SIM", "W"]
+
+[tool.ruff.format]
+quote-style = "double"

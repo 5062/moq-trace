@@ -1,0 +1,15 @@
+[package]
+name = "quic-trace"
+description = "Typed transport instrumentation for QUIC implementations."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[features]
+default = []
+lttng = ["dep:quic-trace-lttng-sys"]
+
+[dependencies]
+quic-trace-lttng-sys = { workspace = true, optional = true }

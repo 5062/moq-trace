@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/quic-trace", "crates/quic-trace-lttng-sys"]
+resolver = "2"
+
+[workspace.package]
+authors = ["Luke Curley"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.dependencies]
+bindgen = { version = "0.73.2", default-features = false, features = ["runtime"] }
+cc = "1"
+pkg-config = "0.3"
+quic-trace = { version = "0.1.0", path = "crates/quic-trace", default-features = false }
+quic-trace-lttng-sys = { version = "0.1.0", path = "crates/quic-trace-lttng-sys" }

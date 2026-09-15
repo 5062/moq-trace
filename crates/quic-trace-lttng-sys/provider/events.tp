@@ -1,0 +1,136 @@
+#include "interface.h"
+
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, direction,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("rx", QUIC_TRACE_DIRECTION_RX)
+		lttng_ust_field_enum_value("tx", QUIC_TRACE_DIRECTION_TX)
+	)
+)
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, edge,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("start", QUIC_TRACE_EDGE_START)
+		lttng_ust_field_enum_value("done", QUIC_TRACE_EDGE_DONE)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, packet_space,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("initial", QUIC_TRACE_PACKET_SPACE_INITIAL)
+		lttng_ust_field_enum_value("handshake", QUIC_TRACE_PACKET_SPACE_HANDSHAKE)
+		lttng_ust_field_enum_value("zero_rtt", QUIC_TRACE_PACKET_SPACE_ZERO_RTT)
+		lttng_ust_field_enum_value("data", QUIC_TRACE_PACKET_SPACE_DATA)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, packet_phase,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("header_parse", QUIC_TRACE_PACKET_PHASE_HEADER_PARSE)
+		lttng_ust_field_enum_value("routing", QUIC_TRACE_PACKET_PHASE_ROUTING)
+		lttng_ust_field_enum_value("scheduling", QUIC_TRACE_PACKET_PHASE_SCHEDULING)
+		lttng_ust_field_enum_value("header_unprotect", QUIC_TRACE_PACKET_PHASE_HEADER_UNPROTECT)
+		lttng_ust_field_enum_value("payload_decrypt", QUIC_TRACE_PACKET_PHASE_PAYLOAD_DECRYPT)
+		lttng_ust_field_enum_value("frame_process", QUIC_TRACE_PACKET_PHASE_FRAME_PROCESS)
+		lttng_ust_field_enum_value("frame_encode", QUIC_TRACE_PACKET_PHASE_FRAME_ENCODE)
+		lttng_ust_field_enum_value("packet_encrypt", QUIC_TRACE_PACKET_PHASE_PACKET_ENCRYPT)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, packet_outcome,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("success", QUIC_TRACE_PACKET_OUTCOME_SUCCESS)
+		lttng_ust_field_enum_value("malformed", QUIC_TRACE_PACKET_OUTCOME_MALFORMED)
+		lttng_ust_field_enum_value("authentication_failed", QUIC_TRACE_PACKET_OUTCOME_AUTHENTICATION_FAILED)
+		lttng_ust_field_enum_value("dropped", QUIC_TRACE_PACKET_OUTCOME_DROPPED)
+		lttng_ust_field_enum_value("abandoned", QUIC_TRACE_PACKET_OUTCOME_ABANDONED)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, socket_outcome,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("success", QUIC_TRACE_SOCKET_OUTCOME_SUCCESS)
+		lttng_ust_field_enum_value("pending", QUIC_TRACE_SOCKET_OUTCOME_PENDING)
+		lttng_ust_field_enum_value("would_block", QUIC_TRACE_SOCKET_OUTCOME_WOULD_BLOCK)
+		lttng_ust_field_enum_value("connection_reset", QUIC_TRACE_SOCKET_OUTCOME_CONNECTION_RESET)
+		lttng_ust_field_enum_value("error", QUIC_TRACE_SOCKET_OUTCOME_ERROR)
+		lttng_ust_field_enum_value("abandoned", QUIC_TRACE_SOCKET_OUTCOME_ABANDONED)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_packet_start,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_quic_packet_start *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, connection_id, event->connection_id)
+		lttng_ust_field_enum(quic_trace, direction, uint8_t, direction, event->direction)
+		lttng_ust_field_integer(uint8_t, has_packet_number, event->has_packet_number)
+		lttng_ust_field_integer(uint64_t, packet_number, event->packet_number)
+		lttng_ust_field_integer(uint8_t, has_packet_space, event->has_packet_space)
+		lttng_ust_field_enum(quic_trace, packet_space, uint8_t, packet_space, event->packet_space)
+		lttng_ust_field_integer(uint8_t, has_byte_len, event->has_byte_len)
+		lttng_ust_field_integer(uint64_t, byte_len, event->byte_len)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_packet_end,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_quic_packet_end *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint8_t, has_packet_number, event->has_packet_number)
+		lttng_ust_field_integer(uint64_t, packet_number, event->packet_number)
+		lttng_ust_field_integer(uint8_t, has_packet_space, event->has_packet_space)
+		lttng_ust_field_enum(quic_trace, packet_space, uint8_t, packet_space, event->packet_space)
+		lttng_ust_field_integer(uint8_t, has_byte_len, event->has_byte_len)
+		lttng_ust_field_integer(uint64_t, byte_len, event->byte_len)
+		lttng_ust_field_enum(quic_trace, packet_outcome, uint8_t, outcome, event->outcome)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_packet_phase,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_quic_packet_phase *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, span_id, event->span_id)
+		lttng_ust_field_enum(quic_trace, packet_phase, uint8_t, phase, event->phase)
+		lttng_ust_field_enum(quic_trace, edge, uint8_t, edge, event->edge)
+		lttng_ust_field_integer(uint8_t, has_outcome, event->has_outcome)
+		lttng_ust_field_enum(quic_trace, packet_outcome, uint8_t, outcome, event->outcome)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_stream_frame,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_quic_stream_frame *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, stream_id, event->stream_id)
+		lttng_ust_field_integer(uint64_t, offset_start, event->offset_start)
+		lttng_ust_field_integer(uint64_t, offset_end, event->offset_end)
+		lttng_ust_field_enum(quic_trace, packet_outcome, uint8_t, outcome, event->outcome)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, udp_socket_start,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_udp_socket_start *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint8_t, has_connection_id, event->has_connection_id)
+		lttng_ust_field_integer(uint64_t, connection_id, event->connection_id)
+		lttng_ust_field_enum(quic_trace, direction, uint8_t, direction, event->direction)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, udp_socket_end,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_udp_socket_end *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_enum(quic_trace, socket_outcome, uint8_t, outcome, event->outcome)
+		lttng_ust_field_integer(uint64_t, buffers, event->buffers)
+		lttng_ust_field_integer(uint64_t, datagrams, event->datagrams)
+		lttng_ust_field_integer(uint64_t, bytes, event->bytes)
+	)
+)
