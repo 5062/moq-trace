@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pathlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 
 import pyarrow as pa
 
@@ -17,7 +17,9 @@ else:
 
 
 def _schema(**fields: pa.DataType) -> pa.Schema:
-    return pa.schema(tuple(fields.items()))
+    # `pid` comes from the LTTng `vpid` context rather than the provider payload,
+    # so it leads every schema and is filled in alongside the recorded fields.
+    return pa.schema((("pid", pa.uint64()), *fields.items()))
 
 
 SCHEMAS = {
@@ -110,6 +112,13 @@ SCHEMAS = {
 
 TRANSPORT_EVENTS = frozenset(name for name in SCHEMAS if name.startswith(("quic_", "udp_")))
 
+# LTTng userspace VPIDs are never 0, so 0 marks events from a recording taken
+# without the `vpid` context, where the process cannot be recovered.
+UNKNOWN_PID = 0
+
+# Filled in from the event context instead of the provider payload.
+CONTEXT_FIELDS = frozenset({"ctf_timestamp_ns", "pid"})
+
 
 class CtfError(RuntimeError):
     """The CTF input is incomplete or incompatible with the analyzer schema."""
@@ -134,9 +143,9 @@ def _scalar(value):
     return int(value)
 
 
-def _record(message, name: str) -> dict:
+def _record(message, name: str, pid: int) -> dict:
     payload = message.event.payload_field
-    expected = set(SCHEMAS[name].names) - {"ctf_timestamp_ns"}
+    expected = set(SCHEMAS[name].names) - CONTEXT_FIELDS
     missing = expected - set(payload)
     if missing:
         raise CtfError(f"moq_trace:{name} fields do not match the analyzer schema: missing={sorted(missing)}")
@@ -145,6 +154,7 @@ def _record(message, name: str) -> dict:
         for key in expected
     }
     record["ctf_timestamp_ns"] = int(message.default_clock_snapshot.ns_from_origin)
+    record["pid"] = pid
     return record
 
 
@@ -161,16 +171,22 @@ def _event_pid(event) -> int | None:
 
 def batches(
     input_path: pathlib.Path,
-    expected_pid: int | None = None,
+    expected_pids: Collection[int] | None = None,
     batch_size: int = 65_536,
 ) -> Iterator[tuple[str, pa.RecordBatch]]:
-    """Yield bounded, typed Arrow batches from one LTTng CTF trace."""
+    """Yield bounded, typed Arrow batches from one LTTng CTF trace.
+
+    One trace can hold several processes, so every row carries the `vpid` it was
+    recorded from. When `expected_pids` is given, an event from any other process
+    is an error: it means the recording is not the one the caller asked for.
+    """
 
     if bt2 is None:
         raise CtfError(
             "reading CTF traces requires the Babeltrace 2 Python bindings (the bt2 module); "
             "install the python3-bt2 system package or use the moq-trace Nix package"
         ) from _BT2_IMPORT_ERROR
+    allowed = None if expected_pids is None else frozenset(expected_pids)
 
     rows = {name: [] for name in SCHEMAS}
     discarded_events = 0
@@ -194,9 +210,17 @@ def batches(
             # A provider may add events before the analyzer learns them, and an
             # additive change must stay readable, so unknown names are skipped.
             continue
-        if expected_pid is not None and _event_pid(message.event) != expected_pid:
-            raise CtfError(f"expected relay VPID {expected_pid}, found {_event_pid(message.event)}")
-        rows[name].append(_record(message, name))
+        pid = _event_pid(message.event)
+        if pid is None:
+            if allowed is not None:
+                raise CtfError(
+                    f"event {provider}:{name} has no vpid context, so it cannot be matched against the "
+                    "expected processes; record the trace with `lttng add-context --type vpid`"
+                )
+            pid = UNKNOWN_PID
+        elif allowed is not None and pid not in allowed:
+            raise CtfError(f"event {provider}:{name} came from VPID {pid}, which is not in {sorted(allowed)}")
+        rows[name].append(_record(message, name, pid))
         event_count += 1
         if len(rows[name]) == batch_size:
             yield name, pa.RecordBatch.from_pylist(rows[name], schema=SCHEMAS[name])

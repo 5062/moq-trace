@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pathlib
 import tempfile
+from collections.abc import Collection, Sequence
 from typing import Literal
 
 import duckdb
@@ -90,19 +91,73 @@ def _define_lifecycle_views(connection: duckdb.DuckDBPyConnection) -> None:
 def _ingest(
     connection: duckdb.DuckDBPyConnection,
     input_path: pathlib.Path,
-    expected_pid: int | None,
-) -> None:
-    """Create one table per event type and stream the CTF rows into it."""
+    expected_pids: Collection[int] | None,
+) -> tuple[int, ...]:
+    """Stream every captured event into the `raw` schema and return its processes.
 
+    One trace can hold several processes, so the raw tables keep all of them and
+    each row carries the VPID it was recorded from. :func:`_select_process`
+    narrows the analysis to one of them afterwards.
+    """
+
+    connection.execute("CREATE SCHEMA raw")
     for name, schema in ctf.SCHEMAS.items():
         empty = pa.Table.from_batches([], schema=schema)
         connection.register("arrow_batch", empty)
-        connection.execute(f"CREATE TABLE {name} AS SELECT * FROM arrow_batch")
+        connection.execute(f"CREATE TABLE raw.{name} AS SELECT * FROM arrow_batch")
         connection.unregister("arrow_batch")
-    for name, batch in ctf.batches(input_path, expected_pid):
+    for name, batch in ctf.batches(input_path, expected_pids):
         connection.register("arrow_batch", batch)
-        connection.execute(f"INSERT INTO {name} SELECT * FROM arrow_batch")
+        connection.execute(f"INSERT INTO raw.{name} SELECT * FROM arrow_batch")
         connection.unregister("arrow_batch")
+    captured = _captured_pids(connection)
+    if expected_pids is not None:
+        missing = sorted(set(expected_pids) - set(captured))
+        if missing:
+            raise TraceError(
+                f"processes {missing} recorded no events; they must be built with tracing enabled "
+                "and tracked before they emit"
+            )
+    return captured
+
+
+def _captured_pids(connection: duckdb.DuckDBPyConnection) -> tuple[int, ...]:
+    """Return every process the capture recorded, in ascending order."""
+
+    union = " UNION ALL ".join(f"SELECT pid FROM raw.{name}" for name in ctf.SCHEMAS)
+    rows = connection.execute(f"SELECT DISTINCT pid FROM ({union}) ORDER BY pid").fetchall()
+    return tuple(int(row[0]) for row in rows)
+
+
+def _select_process(
+    connection: duckdb.DuckDBPyConnection,
+    pid: int | None,
+    captured: Sequence[int],
+) -> int:
+    """Publish the analysis tables as one captured process's slice of the trace.
+
+    Trace and span IDs are counted per process, so two processes allocate the same
+    values independently and a join on IDs alone would pair the wrong events.
+    Scoping every derived table to one process keeps those joins unambiguous.
+    """
+
+    if pid is None:
+        if len(captured) != 1:
+            raise TraceError(
+                f"the trace holds {len(captured)} processes ({', '.join(map(str, captured))}); "
+                "pass the process to analyze"
+            )
+        pid = captured[0]
+    elif pid not in captured:
+        raise TraceError(f"the trace does not contain process {pid}; it holds {list(captured)}")
+
+    connection.execute("CREATE TABLE analyzed_process(pid UBIGINT NOT NULL)")
+    connection.execute("INSERT INTO analyzed_process VALUES (?)", [pid])
+    for name in ctf.SCHEMAS:
+        connection.execute(
+            f"CREATE VIEW {name} AS SELECT * FROM raw.{name} WHERE pid = (SELECT pid FROM analyzed_process)"
+        )
+    return pid
 
 
 def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
@@ -565,11 +620,16 @@ def run(
     subscribers: int,
     warmup_seconds: float = 0.0,
     cooldown_seconds: float = 0.0,
-    expected_pid: int | None = None,
+    expected_pids: Collection[int] | None = None,
+    pid: int | None = None,
     transport_profile: TransportProfile = "generic",
     metadata: dict | None = None,
 ) -> None:
     """Analyze CTF into one atomically published DuckDB database.
+
+    One trace can hold a relay and the peers it serves, so `pid` names the process
+    this analysis describes and defaults to the only captured one. `expected_pids`
+    rejects a capture that reaches beyond the processes it should hold.
 
     The margins default to no trimming, so a capture is measured as it was taken.
     """
@@ -586,7 +646,8 @@ def run(
         database = staging / output.name
         connection = duckdb.connect(str(database))
         try:
-            _ingest(connection, input_path, expected_pid)
+            captured = _ingest(connection, input_path, expected_pids)
+            analyzed = _select_process(connection, pid, captured)
             _define_lifecycle_views(connection)
             _validate_raw(connection)
             origin = _select_window(
@@ -603,7 +664,10 @@ def run(
             _define_timelines(connection)
             _write_run_metadata(
                 connection,
-                dict(metadata or {}),
+                {
+                    "processes": {"analyzed_pid": analyzed, "captured_pids": list(captured)},
+                    **dict(metadata or {}),
+                },
                 object_size=object_size,
                 subscribers=subscribers,
                 warmup_seconds=warmup_seconds,

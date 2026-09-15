@@ -41,7 +41,7 @@ def _run_lttng(*args: str, capture_output: bool = False) -> subprocess.Completed
 
 
 class LttngSession:
-    """One discard-mode LTTng session scoped to the relay process."""
+    """One discard-mode LTTng session scoped to the processes it traces."""
 
     def __init__(self, output: pathlib.Path) -> None:
         self.name = f"moq-trace-{os.getpid()}-{uuid.uuid4().hex}"
@@ -66,7 +66,7 @@ class LttngSession:
             raise
 
     def wait_for_provider(self, pid: int, timeout: float = 10.0) -> None:
-        """Wait until the exact relay process has registered the provider."""
+        """Wait until one process has registered both trace providers."""
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -77,15 +77,25 @@ class LttngSession:
                 return
             time.sleep(0.05)
         raise CaptureError(
-            f"timed out waiting for MoQ and QUIC trace providers from relay PID {pid}; "
-            "the relay must be built with tracing enabled and link the same LTTng release as the lttng tools"
+            f"timed out waiting for MoQ and QUIC trace providers from process {pid}; "
+            "it must be built with tracing enabled and link the same LTTng release as the lttng tools"
         )
 
-    def start(self, pid: int) -> None:
-        """Restrict recording to one process and start the session."""
+    def track(self, pid: int) -> None:
+        """Add one more process to the recording.
+
+        LTTng adds VPID rules to the tracker, so a peer can be tracked the moment
+        it is spawned and its earliest events are still recorded.
+        """
+
+        _run_lttng("track", "--userspace", "--session", self.name, f"--vpid={pid}")
+
+    def start(self, pids: Sequence[int]) -> None:
+        """Restrict recording to the given processes and start the session."""
 
         _run_lttng("untrack", "--userspace", "--session", self.name, "--vpid", "--all")
-        _run_lttng("track", "--userspace", "--session", self.name, f"--vpid={pid}")
+        for pid in pids:
+            self.track(pid)
         _run_lttng(
             "add-context",
             "--userspace",

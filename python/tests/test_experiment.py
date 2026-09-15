@@ -12,11 +12,11 @@ from pydantic import ValidationError
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import capture  # noqa: E402
+from moq_trace import capture, experiment  # noqa: E402
 from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.capture import _provider_listed  # noqa: E402
 from moq_trace.config import ComparisonConfig, ExperimentConfig, SubscriberHost  # noqa: E402
-from moq_trace.experiment import ExperimentError, _validate_workload, commands  # noqa: E402
+from moq_trace.experiment import Commands, ExperimentError, _validate_workload, commands  # noqa: E402
 
 
 class ExperimentTests(unittest.TestCase):
@@ -137,10 +137,68 @@ class ExperimentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(capture, "_run_lttng") as run_lttng:
                 session = capture.LttngSession(pathlib.Path(directory) / "trace")
-                session.start(123)
+                session.start([123])
                 session.finish()
         enabled = [call.args[-1] for call in run_lttng.call_args_list if call.args[0] == "enable-event"]
         self.assertEqual(enabled, ["moq_trace:*", "quic_trace:*"])
+
+    def test_capture_tracks_every_process_it_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(capture, "_run_lttng") as run_lttng:
+                session = capture.LttngSession(pathlib.Path(directory) / "trace")
+                session.start([123])
+                session.track(456)
+                session.finish()
+        tracked = [call.args[-1] for call in run_lttng.call_args_list if call.args[0] == "track"]
+        self.assertEqual(tracked, ["--vpid=123", "--vpid=456"])
+
+    @staticmethod
+    def _processes():
+        """Stand in for ManagedProcess, handing out one PID per role."""
+
+        created = []
+
+        def start(name, command, cwd, log):
+            process = mock.Mock()
+            process.name = name
+            process.pid = 2000 + len(created)
+            created.append(process)
+            return process
+
+        return start
+
+    def _capture(self, config: ExperimentConfig) -> experiment.Capture:
+        command = Commands(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()),
+                mock.patch.object(experiment, "wait_for_log"),
+                mock.patch.object(experiment, "LttngSession") as session_class,
+            ):
+                capture_result = experiment._capture(config, command, pathlib.Path(directory))
+        self.session = session_class.return_value
+        return capture_result
+
+    def test_capture_records_local_peers(self) -> None:
+        config = ExperimentConfig(output=pathlib.Path("run"))
+        result = self._capture(config)
+
+        self.assertEqual(result.relay_pid, 2000)
+        self.assertEqual(result.pids, (2000, 2001, 2002))
+        self.assertEqual(self.session.start.call_args, mock.call([2000]))
+        self.assertEqual(self.session.track.call_args_list, [mock.call(2001), mock.call(2002)])
+
+    def test_capture_skips_a_remote_subscriber(self) -> None:
+        config = ExperimentConfig(
+            output=pathlib.Path("run"),
+            subscriber=SubscriberHost(ssh="relay@example.com"),
+            relay_url="https://relay.example.com:4443",
+        )
+        result = self._capture(config)
+
+        # The subscriber's local PID is the ssh client, which emits nothing.
+        self.assertEqual(result.pids, (2000, 2002))
+        self.assertEqual(self.session.track.call_args_list, [mock.call(2002)])
 
 
 if __name__ == "__main__":

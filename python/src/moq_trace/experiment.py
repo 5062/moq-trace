@@ -32,6 +32,15 @@ class Commands:
     subscriber: tuple[str, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class Capture:
+    """One CTF recording and the processes it holds."""
+
+    trace: pathlib.Path
+    relay_pid: int
+    pids: tuple[int, ...]
+
+
 def _bench_command(config: ExperimentConfig, url: str, binary: str) -> list[str]:
     return [
         binary,
@@ -123,7 +132,7 @@ def _validate_environment(config: ExperimentConfig) -> None:
             raise ExperimentError(f"relay CPU {config.relay_cpu} is unavailable to this process")
 
 
-def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) -> tuple[pathlib.Path, int]:
+def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) -> Capture:
     ctf = output / "trace"
     session = LttngSession(ctf)
     processes: list[ManagedProcess] = []
@@ -132,10 +141,16 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
         processes.append(relay)
         wait_for_log(output / "relay.log", relay, lambda value: "listening" in value, "listening", 15)
         session.wait_for_provider(relay.pid)
-        session.start(relay.pid)
+        session.start([relay.pid])
+        tracked = [relay.pid]
 
         subscriber = ManagedProcess("subscriber", command.subscriber, output, output / "subscriber.log")
         processes.append(subscriber)
+        # A remote subscriber runs behind ssh, so this process is the ssh client
+        # and recording it would capture none of the subscriber's own events.
+        if config.subscriber is None:
+            session.track(subscriber.pid)
+            tracked.append(subscriber.pid)
         connections = f"connections={config.subscribers}"
         wait_for_log(
             output / "subscriber.log",
@@ -147,6 +162,10 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
 
         publisher = ManagedProcess("publisher", command.publisher, output, output / "publisher.log")
         processes.append(publisher)
+        # Track on spawn rather than after readiness, so the connection setup that
+        # the lifecycle metrics start from is recorded.
+        session.track(publisher.pid)
+        tracked.append(publisher.pid)
         wait_for_log(
             output / "publisher.log",
             publisher,
@@ -170,7 +189,7 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
         relay.stop(True)
         processes.remove(relay)
         session.finish()
-        return ctf, relay.pid
+        return Capture(trace=ctf, relay_pid=relay.pid, pids=tuple(tracked))
     finally:
         for process in reversed(processes):
             process.close()
@@ -206,7 +225,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
         raise ExperimentError(f"run output already exists: {output}")
     output.mkdir(parents=True)
     command = commands(config)
-    ctf, relay_pid = _capture(config, command, output)
+    capture = _capture(config, command, output)
     metadata = {
         "protocol": PROTOCOL,
         "affinity": (
@@ -234,13 +253,14 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     }
     database = output / "analysis.duckdb"
     analyze(
-        ctf,
+        capture.trace,
         database,
         object_size=config.object_size,
         subscribers=config.subscribers,
         warmup_seconds=config.warmup_seconds,
         cooldown_seconds=config.cooldown_seconds,
-        expected_pid=relay_pid,
+        expected_pids=capture.pids,
+        pid=capture.relay_pid,
         transport_profile=config.transport_profile,
         metadata=metadata,
     )

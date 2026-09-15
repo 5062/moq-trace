@@ -38,7 +38,18 @@ def parser() -> argparse.ArgumentParser:
     analyze.add_argument("--subscribers", type=int, required=True)
     analyze.add_argument("--warmup-seconds", type=float, default=0.0)
     analyze.add_argument("--cooldown-seconds", type=float, default=0.0)
-    analyze.add_argument("--expected-pid", type=int)
+    analyze.add_argument(
+        "--pid",
+        type=int,
+        help="Process the analysis describes. Defaults to the only captured one.",
+    )
+    analyze.add_argument(
+        "--expected-pid",
+        type=int,
+        action="append",
+        metavar="PID",
+        help="Reject events from any process outside this set. Repeatable.",
+    )
     analyze.add_argument(
         "--transport-profile",
         choices=("generic", "quinn"),
@@ -70,7 +81,8 @@ def _run(args: argparse.Namespace) -> None:
             subscribers=args.subscribers,
             warmup_seconds=args.warmup_seconds,
             cooldown_seconds=args.cooldown_seconds,
-            expected_pid=args.expected_pid,
+            expected_pids=args.expected_pid,
+            pid=args.pid,
             transport_profile=args.transport_profile,
         )
         print(args.output.resolve())

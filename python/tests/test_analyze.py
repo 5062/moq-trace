@@ -18,6 +18,8 @@ from moq_trace.analyze import (  # noqa: E402
     _define_metrics,
     _define_timelines,
     _derive_samples,
+    _ingest,
+    _select_process,
     _select_window,
     _validate_raw,
     run,
@@ -32,21 +34,24 @@ class SqlAnalysisTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.connection = duckdb.connect(":memory:")
+        self.connection.execute("CREATE SCHEMA raw")
         for name, schema in ctf.SCHEMAS.items():
             self.connection.register("rows", pa.Table.from_batches([], schema=schema))
-            self.connection.execute(f"CREATE TABLE {name} AS SELECT * FROM rows")
+            self.connection.execute(f"CREATE TABLE raw.{name} AS SELECT * FROM rows")
             self.connection.unregister("rows")
+        _select_process(self.connection, 0, (0,))
         _define_lifecycle_views(self.connection)
 
     def tearDown(self) -> None:
         self.connection.close()
 
     def insert(self, table: str, **row) -> None:
+        row.setdefault("pid", 0)
         self.connection.register("rows", pa.Table.from_pylist([row], schema=ctf.SCHEMAS[table]))
-        self.connection.execute(f"INSERT INTO {table} SELECT * FROM rows")
+        self.connection.execute(f"INSERT INTO raw.{table} SELECT * FROM rows")
         self.connection.unregister("rows")
 
-    def object_start(self, trace_id: int, direction: str, connection_id: int) -> None:
+    def object_start(self, trace_id: int, direction: str, connection_id: int, pid: int = 0) -> None:
         self.insert(
             "moq_object_start",
             ctf_timestamp_ns=trace_id * 1_000,
@@ -62,6 +67,7 @@ class SqlAnalysisTests(unittest.TestCase):
             object_id=0,
             stream_id=connection_id * 10,
             stream_offset_start=0,
+            pid=pid,
         )
         self.insert(
             "moq_object_end",
@@ -71,9 +77,10 @@ class SqlAnalysisTests(unittest.TestCase):
             stream_offset_end=16,
             payload_bytes=16,
             outcome="success",
+            pid=pid,
         )
 
-    def packet(self, trace_id: int, direction: str, connection_id: int) -> None:
+    def packet(self, trace_id: int, direction: str, connection_id: int, pid: int = 0) -> None:
         self.insert(
             "quic_packet_start",
             ctf_timestamp_ns=trace_id * 1_000,
@@ -84,6 +91,7 @@ class SqlAnalysisTests(unittest.TestCase):
             packet_number=1,
             packet_space="data",
             byte_len=1200,
+            pid=pid,
         )
         self.insert(
             "quic_packet_end",
@@ -94,6 +102,7 @@ class SqlAnalysisTests(unittest.TestCase):
             packet_space="data",
             byte_len=1200,
             outcome="success",
+            pid=pid,
         )
         self.insert(
             "quic_stream_frame",
@@ -104,9 +113,10 @@ class SqlAnalysisTests(unittest.TestCase):
             offset_start=0,
             offset_end=16,
             outcome="success",
+            pid=pid,
         )
 
-    def phase(self, trace_id: int, phase: str, start: int, end: int) -> None:
+    def phase(self, trace_id: int, phase: str, start: int, end: int, pid: int = 0) -> None:
         for index, (edge, timestamp, outcome) in enumerate((("start", start, None), ("done", end, "success"))):
             self.insert(
                 "quic_packet_phase",
@@ -117,6 +127,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 phase=phase,
                 edge=edge,
                 outcome=outcome,
+                pid=pid,
             )
 
     def test_analysis_accepts_unused_incomplete_socket_operations(self) -> None:
@@ -128,10 +139,45 @@ class SqlAnalysisTests(unittest.TestCase):
     def test_analysis_accepts_nonconsecutive_groups(self) -> None:
         for trace_id, direction in ((1, "rx"), (2, "tx"), (3, "rx"), (4, "tx")):
             self.object_start(trace_id, direction, trace_id)
-        self.connection.execute("UPDATE moq_object_start SET logical_group = 9, group_id = 6 WHERE trace_id >= 3")
+        self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 9, group_id = 6 WHERE trace_id >= 3")
         _validate_raw(self.connection)
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 2)
+
+    def test_analysis_reads_only_the_analyzed_process(self) -> None:
+        """A peer in the same trace reuses IDs and must stay out of the analysis."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.object_start(1, "tx", 3, pid=9)
+        self.object_start(3, "rx", 1, pid=9)
+
+        # Trace IDs are counted per process, so process 9 reusing ID 1 is expected.
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone()[0], 4)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM moq_object_start").fetchone()[0], 2)
+
+        _validate_raw(self.connection)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+
+        # The peer contributes no inbound objects, so only the relay is measured.
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 1)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM object_lifecycles").fetchone()[0], 2)
+
+    def test_select_process_needs_a_pid_for_a_multi_process_trace(self) -> None:
+        with self.assertRaisesRegex(TraceError, "holds 2 processes"):
+            _select_process(self.connection, None, (0, 9))
+
+    def test_select_process_rejects_a_process_the_trace_lacks(self) -> None:
+        with self.assertRaisesRegex(TraceError, "does not contain process 9"):
+            _select_process(self.connection, 9, (0,))
+
+    def test_ingest_reports_an_expected_process_that_recorded_nothing(self) -> None:
+        """A peer built without tracing is caught here rather than silently skipped."""
+
+        self.object_start(1, "rx", 1)
+        with duckdb.connect(":memory:") as connection, mock.patch.object(ctf, "batches", self.batches):
+            with self.assertRaisesRegex(TraceError, r"processes \[9\] recorded no events"):
+                _ingest(connection, pathlib.Path("unused.ctf"), (0, 9))
 
     def test_coverage_requires_packets_for_selected_objects(self) -> None:
         self.object_start(1, "rx", 1)
@@ -174,11 +220,11 @@ class SqlAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(self.connection.execute("SELECT count(*) FROM timeline_selections").fetchone()[0], 3)
 
-    def batches(self, input_path, expected_pid=None, batch_size=65_536):
+    def batches(self, input_path, expected_pids=None, batch_size=65_536):
         """Yield the fixture tables where ingest would read batches from CTF."""
 
         for name in ctf.SCHEMAS:
-            yield name, self.connection.execute(f"SELECT * FROM {name}").arrow()
+            yield name, self.connection.execute(f"SELECT * FROM raw.{name}").arrow()
 
     def test_run_publishes_a_queryable_database(self) -> None:
         """The public entry point ingests and analyzes one trace into a run artifact."""
@@ -208,6 +254,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(metadata["window"]["warmup_seconds"], 0)
                 self.assertEqual(metadata["transport_profile"], "generic")
                 self.assertEqual(metadata["transport_capabilities"]["packet_phases"], ["routing", "scheduling"])
+                self.assertEqual(metadata["processes"], {"analyzed_pid": 0, "captured_pids": [0]})
                 self.assertEqual(
                     connection.execute("SELECT count(*) FROM metric_statistics").fetchone()[0],
                     9,
@@ -291,8 +338,10 @@ class SqlAnalysisTests(unittest.TestCase):
         self.phase(13, "routing", 110_000, 120_000)
         self.phase(13, "scheduling", 120_000, 130_000)
         for name in ctf.SCHEMAS:
-            self.connection.execute(f"UPDATE {name} SET timestamp_ns = timestamp_ns + 1000000000 WHERE trace_id >= 10")
-        self.connection.execute("UPDATE moq_object_start SET logical_group = 8, group_id = 5 WHERE trace_id >= 10")
+            self.connection.execute(
+                f"UPDATE raw.{name} SET timestamp_ns = timestamp_ns + 1000000000 WHERE trace_id >= 10"
+            )
+        self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 8, group_id = 5 WHERE trace_id >= 10")
         with tempfile.TemporaryDirectory() as directory:
             trimmed = pathlib.Path(directory) / "trimmed.duckdb"
             with mock.patch.object(ctf, "batches", self.batches):
@@ -392,24 +441,59 @@ class CtfRecordTests(unittest.TestCase):
 
         self.assertEqual(set(batches), {"moq_object_end"})
         self.assertEqual(batches["moq_object_end"].num_rows, 1)
+        # No vpid context means the process is unknown, never a real VPID.
+        self.assertEqual(batches["moq_object_end"].column("pid").to_pylist(), [ctf.UNKNOWN_PID])
+
+    def test_batches_rejects_events_from_an_unexpected_process(self) -> None:
+        """A recording that reaches beyond the expected processes is not read silently."""
+
+        class Message:
+            def __init__(self, pid: int) -> None:
+                self.event = mock.Mock()
+                self.event.name = "moq_trace:moq_object_end"
+                self.event.payload_field = {
+                    "timestamp_ns": 1,
+                    "trace_id": 2,
+                    "stream_offset_end": 3,
+                    "payload_bytes": 4,
+                    "outcome": mock.Mock(labels=("success",)),
+                }
+                self.event.common_context_field = {"vpid": pid}
+                self.default_clock_snapshot = mock.Mock(ns_from_origin=7)
+                self.count = None
+
+        bt2 = mock.Mock()
+        bt2._DiscardedEventsMessageConst = type("DiscardedEvents", (), {})
+        bt2._DiscardedPacketsMessageConst = type("DiscardedPackets", (), {})
+        bt2._EventMessageConst = Message
+        bt2.TraceCollectionMessageIterator = mock.Mock(return_value=iter([Message(42)]))
+
+        with mock.patch.object(ctf, "bt2", bt2):
+            accepted = dict(ctf.batches(pathlib.Path("unused.ctf"), (42,)))
+        self.assertEqual(accepted["moq_object_end"].column("pid").to_pylist(), [42])
+
+        bt2.TraceCollectionMessageIterator = mock.Mock(return_value=iter([Message(43)]))
+        with mock.patch.object(ctf, "bt2", bt2), self.assertRaisesRegex(ctf.CtfError, "came from VPID 43"):
+            list(ctf.batches(pathlib.Path("unused.ctf"), (42,)))
 
     def message(self, **payload):
         return mock.Mock(event=mock.Mock(payload_field=payload), default_clock_snapshot=mock.Mock(ns_from_origin=1))
 
     def test_ignores_additional_fields_without_decoding_them(self) -> None:
         message = self.message(timestamp_ns=2, trace_id=3, connection_id=4, direction=0, future_field=object())
-        record = ctf._record(message, "udp_socket_start")
+        record = ctf._record(message, "udp_socket_start", 9)
         self.assertEqual(set(record), set(ctf.SCHEMAS["udp_socket_start"].names))
+        self.assertEqual(record["pid"], 9)
 
     def test_optional_fields_respect_presence_flags(self) -> None:
         message = self.message(timestamp_ns=2, trace_id=3, connection_id=4, has_connection_id=0, direction=0)
-        self.assertIsNone(ctf._record(message, "udp_socket_start")["connection_id"])
+        self.assertIsNone(ctf._record(message, "udp_socket_start", 0)["connection_id"])
         message.event.payload_field["has_connection_id"] = 1
-        self.assertEqual(ctf._record(message, "udp_socket_start")["connection_id"], 4)
+        self.assertEqual(ctf._record(message, "udp_socket_start", 0)["connection_id"], 4)
 
     def test_requires_expected_fields(self) -> None:
         with self.assertRaisesRegex(ctf.CtfError, "missing=.*connection_id"):
-            ctf._record(self.message(timestamp_ns=2, trace_id=3, direction=0), "udp_socket_start")
+            ctf._record(self.message(timestamp_ns=2, trace_id=3, direction=0), "udp_socket_start", 0)
 
     def test_missing_babeltrace_bindings_have_an_actionable_error(self) -> None:
         with mock.patch.object(ctf, "bt2", None):

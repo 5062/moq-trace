@@ -82,6 +82,12 @@ both `moq_trace:*` and `quic_trace:*`, analyze an existing CTF directory, and
 render figures from the resulting DuckDB artifact. The CTF reader also accepts
 legacy transport events emitted under `moq_trace:*`.
 
+One recording can hold the relay and the peers it serves. Every row keeps the
+`vpid` it came from, and the analysis tables are one process's slice of that
+recording, so process-local trace and span IDs from different processes never
+meet. `analyze` picks the only process by default and needs `--pid` when the
+recording holds more than one.
+
 Analysis accepts implementation-independent transport traces by default. Use
 `--transport-profile quinn` when the capture must contain the Quinn `routing`
 and `scheduling` phases used by the packet processing metric. Cloudflare quiche

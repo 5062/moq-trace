@@ -21,6 +21,9 @@ in their MoQ and QUIC code.
 - Trace and span IDs are process-wide within the Rust facades. Analysis joins
   providers through object and transport metadata rather than assuming an ID
   from one provider is present in the other.
+- One capture can hold several processes. Every event carries the `vpid` it came
+  from, and the analysis publishes one process's slice, so process-local IDs from
+  a relay and a peer can never be paired with each other.
 - Keep implementation-specific types and control flow outside this repository.
 
 `moq-bench/` is the single, bounded exception to that boundary. It is an
