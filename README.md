@@ -19,6 +19,9 @@ boundaries being measured.
 - `crates/quic-trace-lttng-sys` owns the `quic_trace:*` transport provider.
 - `include` provides equivalent C++17 scoped APIs.
 - `python` captures relay workloads and builds combined DuckDB artifacts.
+- `moq-bench` provides implementation-independent MoQ client and server peers used
+  as a baseline and a fixture. It builds against the MoQ implementation under test,
+  so it sits outside the workspace; see `moq-bench/README.md`.
 
 The MoQ provider emits:
 

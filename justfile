@@ -16,3 +16,16 @@ fix:
     cargo fmt --all
     ruff check --fix python
     ruff format python
+
+# The measurement peers. They build against the sibling moq repository, so they are
+# excluded from the workspace and from `check`, which must pass on its own.
+moq-bench-build:
+    cargo build --manifest-path moq-bench/Cargo.toml --features lttng
+
+moq-bench-check:
+    cargo test --manifest-path moq-bench/Cargo.toml --all-features
+    cargo fmt --manifest-path moq-bench/Cargo.toml --all --check
+    cargo clippy --manifest-path moq-bench/Cargo.toml --all-targets --all-features -- -D warnings
+
+moq-bench-fix:
+    cargo fmt --manifest-path moq-bench/Cargo.toml --all

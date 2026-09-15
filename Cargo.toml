@@ -5,6 +5,10 @@ members = [
     "crates/quic-trace",
     "crates/quic-trace-lttng-sys",
 ]
+# The measurement peers depend on the MoQ implementation under test, which lives
+# in a sibling repository. Keeping them out of the workspace keeps
+# `just check` working from a standalone toolkit checkout.
+exclude = ["moq-bench"]
 resolver = "2"
 
 [workspace.package]

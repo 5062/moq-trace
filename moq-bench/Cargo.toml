@@ -1,0 +1,52 @@
+# The bench peers are their own workspace so `just check` still works from a
+# standalone toolkit checkout. They depend on the MoQ implementation under test,
+# which lives in the sibling moq repository, and the toolkit must not need that to
+# build.
+[workspace]
+
+[package]
+name = "moq-bench"
+description = "Implementation-independent MoQ reference client and server for trace measurements"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[[bin]]
+name = "moq-bench"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "moq-bench-server"
+path = "src/bin/server.rs"
+
+[features]
+default = []
+# Emit moq_trace:* and quic_trace:* LTTng events from both peers.
+lttng = ["moq-net/trace", "moq-native/trace"]
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+clap = { version = "4", features = ["derive", "env"] }
+humantime = "2.3"
+moq-native = { path = "../../moq-trace/rs/moq-native", default-features = false, features = [
+    "aws-lc-rs",
+    "quinn",
+] }
+moq-net = { path = "../../moq-trace/rs/moq-net" }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = "2"
+
+# Both peers must resolve the same transport sources the moq workspace uses.
+# Patches only apply at the workspace root, so an outside workspace has to repeat
+# them or it silently builds a different Quinn and web-transport than the relays.
+[patch.crates-io]
+moq-trace = { path = "../crates/moq-trace" }
+quinn = { git = "https://github.com/5062/quinn", branch = "moq-trace/quinn-0.11" }
+quinn-proto = { git = "https://github.com/5062/quinn", branch = "moq-trace/quinn-0.11" }
+web-transport-quinn = { git = "https://github.com/5062/web-transport", branch = "moq-trace/web-transport-quinn-v0.11.11" }
+web-transport-trait = { git = "https://github.com/5062/web-transport", branch = "moq-trace/web-transport-quinn-v0.11.11" }
