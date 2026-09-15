@@ -3,7 +3,6 @@ name = "quic-trace-lttng-sys"
 description = "Native LTTng-UST provider for quic-trace."
 authors.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 links = "quic_trace_provider"
