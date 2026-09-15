@@ -82,6 +82,12 @@ fn disabled_handle_is_noop() {
 }
 
 #[test]
+fn new_session_id_is_always_allocated() {
+    let handle = Handle::disabled().with_new_session_id();
+    assert!(handle.session_id.is_some());
+}
+
+#[test]
 fn disabled_object_phase_does_not_do_bookkeeping() {
     let handle = trace();
     handle.enable_only(backend::Tracepoint::Start);

@@ -116,6 +116,8 @@ class CtfError(RuntimeError):
 
 
 def _supported(provider: str, name: str) -> bool:
+    """Report whether a provider event maps onto a known analyzer schema."""
+
     if provider == "quic_trace":
         return name in TRANSPORT_EVENTS
     if provider == "moq_trace":
@@ -189,7 +191,9 @@ def batches(
         if provider not in ("moq_trace", "quic_trace"):
             continue
         if not _supported(provider, name):
-            raise CtfError(f"unsupported event {provider}:{name}")
+            # A provider may add events before the analyzer learns them, and an
+            # additive change must stay readable, so unknown names are skipped.
+            continue
         if expected_pid is not None and _event_pid(message.event) != expected_pid:
             raise CtfError(f"expected relay VPID {expected_pid}, found {_event_pid(message.event)}")
         rows[name].append(_record(message, name))

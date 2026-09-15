@@ -72,9 +72,7 @@ impl Handle {
 
     /// Return a clone that stamps object events with the next process-local session ID.
     pub fn with_new_session_id(mut self) -> Self {
-        if self.inner.is_some() {
-            self.session_id = Some(NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed));
-        }
+        self.session_id = Some(NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed));
         self
     }
 

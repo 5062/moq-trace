@@ -1,3 +1,5 @@
+"""Build the figures the renderer writes from a DuckDB trace artifact."""
+
 from __future__ import annotations
 
 import dataclasses

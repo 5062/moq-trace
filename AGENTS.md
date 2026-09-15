@@ -45,7 +45,9 @@ nix develop --command just check
 ```
 
 `just check` runs Rust tests with LTTng enabled, the combined Python analysis
-tests, both C++ facade smoke tests, and Python linting.
+tests, both C++ facade smoke tests, and Python linting. It also links a real
+binary to confirm the LTTng providers survive garbage collection and reach a
+capture, and consumes the installed CMake packages from separate prefixes.
 
 The bench peers are checked separately, because they need the sibling moq
 repository present for the implementation under test:

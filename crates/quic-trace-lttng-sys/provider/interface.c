@@ -4,7 +4,26 @@
 #define LTTNG_UST_TRACEPOINT_CREATE_PROBES
 #include "events.h"
 
-static void *const quic_trace_refs[] = {
+#if defined(__has_attribute)
+#	if __has_attribute(retain)
+#		define QUIC_TRACE_RETAIN __attribute__((retain))
+#	endif
+#endif
+
+#ifndef QUIC_TRACE_RETAIN
+#	define QUIC_TRACE_RETAIN
+#endif
+
+/*
+ * LTTng-UST discovers tracepoints through the linker-synthesized
+ * __start/__stop_lttng_ust_tracepoints_ptrs symbols. LLD does not treat those
+ * symbols as roots under --gc-sections (its default --start-stop-gc behaviour)
+ * and rustc links with LLD, so the section is collected and the provider
+ * registers nothing while `lttng list` still advertises every event. An
+ * exported, linker-retained reference to each pointer holds the section in
+ * place under both LLD and GNU ld.
+ */
+QUIC_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const quic_trace_tracepoints[] = {
 	&lttng_ust_tracepoint_ptr_quic_trace___quic_packet_start,
 	&lttng_ust_tracepoint_ptr_quic_trace___quic_packet_end,
 	&lttng_ust_tracepoint_ptr_quic_trace___quic_packet_phase,
@@ -13,9 +32,12 @@ static void *const quic_trace_refs[] = {
 	&lttng_ust_tracepoint_ptr_quic_trace___udp_socket_end,
 };
 
-void quic_trace_provider_init(void) {
-	(void)quic_trace_refs;
-}
+/*
+ * Tracepoints register from a constructor in the generated events.h. This entry
+ * point only gives instrumented code a symbol to reference so the linker keeps
+ * the provider object.
+ */
+void quic_trace_provider_init(void) {}
 
 bool quic_trace_quic_packet_start_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, quic_packet_start); }
 void quic_trace_quic_packet_start(const struct quic_trace_quic_packet_start *event) { lttng_ust_tracepoint(quic_trace, quic_packet_start, event); }

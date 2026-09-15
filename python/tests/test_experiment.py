@@ -101,15 +101,37 @@ class ExperimentTests(unittest.TestCase):
                 values=(1, 1),
             )
 
-    def test_provider_must_belong_to_exact_pid(self) -> None:
+    def test_provider_listing_uses_the_modern_lttng_format(self) -> None:
+        # Mirrors `lttng list --userspace` output from LTTng 2.15, trimmed to the
+        # entries the capture looks for.
+        bullet = chr(0x1F782)
         listing = (
-            "PID: 1234 - Name: other\n"
-            "  moq_trace:udp_socket_end\n"
-            "PID: 123 - Name: relay\n"
-            "  moq_trace:udp_socket_end_extra\n"
+            f"{bullet} User space tracepoints:\n"
+            f"  {bullet} Process 4242: `/opt/relay/moq-relay`\n"
+            f"    {bullet} `lttng_ust_lib:build_id` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
+            f"    {bullet} `moq_trace:moq_object_end` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
+            f"    {bullet} `quic_trace:udp_socket_end` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
+            f"  {bullet} Process 424: `/opt/relay/moq-relay-old`\n"
+            f"    {bullet} `moq_trace:moq_object_end_extra` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
         )
-        self.assertFalse(_provider_listed(listing, 123, "moq_trace:udp_socket_end"))
-        self.assertTrue(_provider_listed(listing, 1234, "moq_trace:udp_socket_end"))
+        self.assertTrue(_provider_listed(listing, 4242, "moq_trace:moq_object_end"))
+        self.assertTrue(_provider_listed(listing, 4242, "quic_trace:udp_socket_end"))
+        self.assertFalse(_provider_listed(listing, 4242, "quic_trace:quic_packet_start"))
+        self.assertFalse(_provider_listed(listing, 424, "moq_trace:moq_object_end"))
+
+    def test_provider_listing_uses_the_legacy_lttng_format(self) -> None:
+        listing = (
+            "UST events:\n"
+            "-------------\n"
+            "\n"
+            "PID: 1234 - Name: /opt/relay/moq-relay\n"
+            "      moq_trace:moq_object_end (loglevel: TRACE_DEBUG_LINE (13)) (type: tracepoint)\n"
+            "PID: 123 - Name: /opt/relay/other\n"
+            "      moq_trace:moq_object_end_extra (loglevel: TRACE_DEBUG_LINE (13)) (type: tracepoint)\n"
+        )
+        self.assertTrue(_provider_listed(listing, 1234, "moq_trace:moq_object_end"))
+        self.assertFalse(_provider_listed(listing, 123, "moq_trace:moq_object_end"))
+        self.assertFalse(_provider_listed(listing, 1234, "quic_trace:udp_socket_end"))
 
     def test_capture_enables_moq_and_quic_providers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -18,6 +18,9 @@ class CaptureError(RuntimeError):
 
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_MODERN_PROCESS = re.compile(r"\bProcess\s+(\d+)\b")
+_LEGACY_PROCESS = re.compile(r"^PID:\s*(\d+)\b")
+_EVENT = re.compile(r"(?<![\w:])([A-Za-z0-9_]+:[A-Za-z0-9_]+)(?![\w:])")
 
 
 def _run_lttng(*args: str, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
@@ -73,7 +76,10 @@ class LttngSession:
             ):
                 return
             time.sleep(0.05)
-        raise CaptureError(f"timed out waiting for MoQ and QUIC trace providers from relay PID {pid}")
+        raise CaptureError(
+            f"timed out waiting for MoQ and QUIC trace providers from relay PID {pid}; "
+            "the relay must be built with tracing enabled and link the same LTTng release as the lttng tools"
+        )
 
     def start(self, pid: int) -> None:
         """Restrict recording to one process and start the session."""
@@ -204,13 +210,38 @@ def wait_for_log(
     raise CaptureError(f"timed out after {timeout:g}s waiting for {description} in {path}")
 
 
+def _process_pid(line: str) -> int | None:
+    """Return the process ID a provider block header names, if it is one."""
+
+    for pattern in (_LEGACY_PROCESS, _MODERN_PROCESS):
+        match = pattern.search(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _event_name(line: str) -> str | None:
+    """Return the provider event a tracepoint entry names, if it is one."""
+
+    match = _EVENT.search(line)
+    return match.group(1) if match else None
+
+
 def _provider_listed(listing: str, pid: int, event: str) -> bool:
+    """Report whether `listing` shows `event` registered by `pid`.
+
+    LTTng 2.15 and later print one `Process <pid>:` block per provider, while
+    earlier releases print `PID: <pid> - Name: ...`. Both scope the tracepoint
+    entries that follow to the process they name.
+    """
+
     target = False
     for raw_line in listing.splitlines():
-        line = raw_line.strip()
-        if line.startswith("PID: "):
-            value = line.removeprefix("PID: ").split(maxsplit=1)[0]
-            target = value.isdigit() and int(value) == pid
-        elif target and line and line.split(maxsplit=1)[0] == event:
+        line = ANSI.sub("", raw_line).strip()
+        process = _process_pid(line)
+        if process is not None:
+            target = process == pid
+            continue
+        if target and _event_name(line) == event:
             return True
     return False

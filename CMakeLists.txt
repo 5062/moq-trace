@@ -86,14 +86,14 @@ if(BUILD_TESTING)
   add_test(NAME moq_trace_cpp_test COMMAND moq_trace_cpp_test)
 endif()
 
-install(TARGETS quic_trace_provider quic_trace_cpp EXPORT quic_trace_targets)
-install(TARGETS moq_trace_provider moq_trace_cpp EXPORT moq_trace_targets)
+install(TARGETS quic_trace_provider quic_trace_cpp EXPORT quic_trace_targets COMPONENT quic_trace)
+install(TARGETS moq_trace_provider moq_trace_cpp EXPORT moq_trace_targets COMPONENT moq_trace)
 install(FILES "${QUIC_PROVIDER_DIR}/interface.h" "${CMAKE_CURRENT_SOURCE_DIR}/include/quic_trace/trace.hpp"
-  DESTINATION include/quic_trace)
+  DESTINATION include/quic_trace COMPONENT quic_trace)
 install(FILES "${MOQ_PROVIDER_DIR}/interface.h" "${CMAKE_CURRENT_SOURCE_DIR}/include/moq_trace/trace.hpp"
-  DESTINATION include/moq_trace)
-install(EXPORT quic_trace_targets NAMESPACE quic_trace:: DESTINATION lib/cmake/quic_trace)
-install(EXPORT moq_trace_targets NAMESPACE moq_trace:: DESTINATION lib/cmake/moq_trace)
+  DESTINATION include/moq_trace COMPONENT moq_trace)
+install(EXPORT quic_trace_targets NAMESPACE quic_trace:: DESTINATION lib/cmake/quic_trace COMPONENT quic_trace)
+install(EXPORT moq_trace_targets NAMESPACE moq_trace:: DESTINATION lib/cmake/moq_trace COMPONENT moq_trace)
 configure_package_config_file(
   cmake/quic_traceConfig.cmake.in
   "${CMAKE_CURRENT_BINARY_DIR}/quic_traceConfig.cmake"
@@ -119,10 +119,12 @@ install(
     "${CMAKE_CURRENT_BINARY_DIR}/quic_traceConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/quic_traceConfigVersion.cmake"
   DESTINATION lib/cmake/quic_trace
+  COMPONENT quic_trace
 )
 install(
   FILES
     "${CMAKE_CURRENT_BINARY_DIR}/moq_traceConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/moq_traceConfigVersion.cmake"
   DESTINATION lib/cmake/moq_trace
+  COMPONENT moq_trace
 )

@@ -360,6 +360,39 @@ class CtfRecordTests(unittest.TestCase):
         self.assertTrue(ctf._supported("moq_trace", "moq_object_start"))
         self.assertFalse(ctf._supported("quic_trace", "moq_object_start"))
 
+    def test_unknown_provider_events_are_ignored(self) -> None:
+        """A provider may add events before the analyzer learns them."""
+
+        class Message:
+            def __init__(self, name: str, payload: dict) -> None:
+                self.event = mock.Mock()
+                self.event.name = name
+                self.event.payload_field = payload
+                self.event.common_context_field = None
+                self.default_clock_snapshot = mock.Mock(ns_from_origin=7)
+                self.count = None
+
+        known = {
+            "timestamp_ns": 1,
+            "trace_id": 2,
+            "stream_offset_end": 3,
+            "payload_bytes": 4,
+            "outcome": mock.Mock(labels=("success",)),
+        }
+        messages = [Message("moq_trace:moq_object_gc", {}), Message("moq_trace:moq_object_end", known)]
+
+        bt2 = mock.Mock()
+        bt2._DiscardedEventsMessageConst = type("DiscardedEvents", (), {})
+        bt2._DiscardedPacketsMessageConst = type("DiscardedPackets", (), {})
+        bt2._EventMessageConst = Message
+        bt2.TraceCollectionMessageIterator = mock.Mock(return_value=iter(messages))
+
+        with mock.patch.object(ctf, "bt2", bt2):
+            batches = dict(ctf.batches(pathlib.Path("unused.ctf")))
+
+        self.assertEqual(set(batches), {"moq_object_end"})
+        self.assertEqual(batches["moq_object_end"].num_rows, 1)
+
     def message(self, **payload):
         return mock.Mock(event=mock.Mock(payload_field=payload), default_clock_snapshot=mock.Mock(ns_from_origin=1))
 
