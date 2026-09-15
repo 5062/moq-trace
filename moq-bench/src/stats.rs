@@ -9,6 +9,7 @@ use tokio::time::Instant;
 /// Frame, byte, and group counters shared across a peer's tasks.
 #[derive(Default)]
 pub struct Stats {
+    connections: AtomicU64,
     frames_sent: AtomicU64,
     bytes_sent: AtomicU64,
     groups_sent: AtomicU64,
@@ -31,6 +32,16 @@ struct Counters {
 }
 
 impl Stats {
+    /// Count a session as live until the returned guard drops.
+    ///
+    /// The reporter logs this as `connections`, which is the counter a runner waits
+    /// on before it starts measuring: a peer that has not finished connecting would
+    /// publish an empty trace.
+    pub fn connection(&self) -> Gauge<'_> {
+        self.connections.fetch_add(1, Ordering::Relaxed);
+        Gauge(&self.connections)
+    }
+
     /// Record one emitted frame of `bytes` bytes.
     pub fn frame_sent(&self, bytes: usize) {
         self.frames_sent.fetch_add(1, Ordering::Relaxed);
@@ -60,9 +71,9 @@ impl Stats {
     }
 
     /// Count a subscription as live until the returned guard drops.
-    pub fn subscription(&self) -> Subscription<'_> {
+    pub fn subscription(&self) -> Gauge<'_> {
         self.subscriptions.fetch_add(1, Ordering::Relaxed);
-        Subscription(self)
+        Gauge(&self.subscriptions)
     }
 
     /// Log a counter line every `interval` until the task is dropped.
@@ -84,12 +95,13 @@ impl Stats {
             previous = current;
 
             tracing::info!(
+                connections = self.connections.load(Ordering::Relaxed),
+                subscriptions = self.subscriptions.load(Ordering::Relaxed),
                 send_fps = format!("{sent:.1}"),
                 recv_fps = format!("{recv:.1}"),
                 send_mbps = format!("{send_mbps:.2}"),
                 recv_mbps = format!("{recv_mbps:.2}"),
                 groups_recv = current.groups_recv,
-                subscriptions = self.subscriptions.load(Ordering::Relaxed),
                 mismatches,
                 "stats"
             );
@@ -108,12 +120,35 @@ impl Stats {
     }
 }
 
-/// A live subscription. Drops the count when the subscription ends, including when
-/// its task is aborted, so the reported gauge tracks reality.
-pub struct Subscription<'a>(&'a Stats);
+/// A live count. Drops the counter it was created for when the session or
+/// subscription ends, including when its task is aborted, so the reported gauge
+/// tracks reality rather than attempts.
+pub struct Gauge<'a>(&'a AtomicU64);
 
-impl Drop for Subscription<'_> {
+impl Drop for Gauge<'_> {
     fn drop(&mut self) {
-        self.0.subscriptions.fetch_sub(1, Ordering::Relaxed);
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The connection gauge counts live sessions. A runner gates on `connections=N`
+    /// before starting its window, so a session that already left must not hold the
+    /// count up.
+    #[test]
+    fn connection_gauge_tracks_live_sessions() {
+        let stats = Stats::default();
+        let first = stats.connection();
+        let second = stats.connection();
+        assert_eq!(stats.connections.load(Ordering::Relaxed), 2);
+
+        drop(first);
+        assert_eq!(stats.connections.load(Ordering::Relaxed), 1);
+
+        drop(second);
+        assert_eq!(stats.connections.load(Ordering::Relaxed), 0);
     }
 }

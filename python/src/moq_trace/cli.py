@@ -36,8 +36,18 @@ def parser() -> argparse.ArgumentParser:
     analyze.add_argument("--output", type=pathlib.Path, required=True)
     analyze.add_argument("--object-size", type=int, required=True)
     analyze.add_argument("--subscribers", type=int, required=True)
-    analyze.add_argument("--warmup-seconds", type=float, default=0.0)
-    analyze.add_argument("--cooldown-seconds", type=float, default=0.0)
+    analyze.add_argument(
+        "--warmup-seconds",
+        type=float,
+        default=0.0,
+        help="Trim this much from the front of the steady-state window (default: 0).",
+    )
+    analyze.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=0.0,
+        help="Trim this much from the back of the steady-state window (default: 0).",
+    )
     analyze.add_argument(
         "--pid",
         type=int,

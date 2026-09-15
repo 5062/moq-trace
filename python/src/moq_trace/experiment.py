@@ -16,7 +16,10 @@ from .capture import LttngSession, ManagedProcess, wait_for_log
 from .config import ComparisonConfig, ExperimentConfig
 from .render import render
 
-PROTOCOL = "moq-transport-19"
+# Pinned for every implementation, so a run cannot silently negotiate a version
+# that makes its trace incomparable with the rest of the matrix. Must match the
+# peers' own pin in `moq-bench/src/lib.rs`.
+PROTOCOL = "moq-transport-16"
 
 
 class ExperimentError(RuntimeError):
@@ -97,6 +100,8 @@ def commands(config: ExperimentConfig) -> Commands:
 
     subscriber_binary = config.subscriber.binary if config.subscriber is not None else bench_binary
     subscriber = _bench_command(config, config.relay_url or local_url, subscriber_binary)
+    # One session per subscriber, each taking a single subscription, so the relay
+    # emits `subscribers` copies of every group for the analysis to compare against.
     subscriber.extend(
         [
             "--name",
@@ -151,6 +156,9 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
         if config.subscriber is None:
             session.track(subscriber.pid)
             tracked.append(subscriber.pid)
+        # Both bench binaries report live sessions and subscriptions in their stats
+        # line, so the same readiness gate works for the reference peers and for the
+        # load generator in the moq repository.
         connections = f"connections={config.subscribers}"
         wait_for_log(
             output / "subscriber.log",

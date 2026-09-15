@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -62,6 +63,23 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(pathlib.Path(command.relay[0]), config.relay_bin.resolve())
         self.assertEqual(pathlib.Path(command.publisher[0]), config.bench_bin.resolve())
         self.assertEqual(pathlib.Path(command.subscriber[0]), config.bench_bin.resolve())
+
+    def test_default_binaries_are_absolute(self) -> None:
+        # Child processes run from the output directory, so a defaulted relative path
+        # would resolve against the wrong directory and never start.
+        config = ExperimentConfig(output=pathlib.Path("run"))
+
+        self.assertTrue(config.relay_bin.is_absolute())
+        self.assertTrue(config.bench_bin.is_absolute())
+        self.assertEqual(config.bench_bin.name, "moq-bench")
+
+    def test_protocol_matches_the_reference_peers(self) -> None:
+        # Both sides pin the version that every implementation has to negotiate, so a
+        # drift here either fails the handshake or changes the wire under the trace.
+        source = pathlib.Path(__file__).resolve().parents[2] / "moq-bench/src/lib.rs"
+        pinned = re.findall(r'VERSION: &str = "([^"]+)"', source.read_text())
+
+        self.assertEqual(pinned, [experiment.PROTOCOL])
 
     def test_remote_subscriber_requires_relay_url(self) -> None:
         with self.assertRaises(ValidationError):

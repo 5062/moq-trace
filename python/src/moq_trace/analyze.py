@@ -242,7 +242,15 @@ def _select_window(
     warmup_seconds: float,
     cooldown_seconds: float,
 ) -> int:
-    """Select the steady-state window and return the trace origin."""
+    """Select the steady-state window and return the trace origin.
+
+    The window opens at the first inbound object every subscriber received. A
+    capture starts with the relay, so its first objects can precede the
+    subscribers attaching: measured from there, a run would report objects with
+    missing copies that no subscriber was ever meant to get. The ``warmup``
+    margin then trims further from that steady-state opening, and ``cooldown``
+    trims the tail.
+    """
 
     warmup_ns = round(warmup_seconds * 1_000_000_000)
     cooldown_ns = round(cooldown_seconds * 1_000_000_000)
@@ -255,7 +263,25 @@ def _select_window(
     if bounds[0] is None:
         raise TraceError(f"trace has no completed {object_size}-byte inbound objects")
     origin, last = map(int, bounds)
-    start = min(origin + warmup_ns, 2**64 - 1)
+
+    steady = connection.execute(
+        """SELECT min(start_ns) FROM (
+             SELECT rx.start_ns
+             FROM object_lifecycles AS rx
+             JOIN object_lifecycles AS tx
+               ON tx.logical_group = rx.logical_group
+              AND tx.logical_frame = rx.logical_frame
+              AND tx.direction = 'tx' AND tx.outcome = 'success'
+             WHERE rx.direction = 'rx' AND rx.outcome = 'success' AND rx.payload_bytes = ?
+             GROUP BY rx.trace_id, rx.start_ns
+             HAVING count(*) = ?
+           )""",
+        [object_size, subscribers],
+    ).fetchone()[0]
+    if steady is None:
+        raise TraceError(f"trace has no {object_size}-byte inbound object copied to all {subscribers} subscribers")
+
+    start = min(int(steady) + warmup_ns, 2**64 - 1)
     end = max(last - cooldown_ns, 0)
     connection.execute(
         """CREATE TABLE selected_rx AS
@@ -631,7 +657,9 @@ def run(
     this analysis describes and defaults to the only captured one. `expected_pids`
     rejects a capture that reaches beyond the processes it should hold.
 
-    The margins default to no trimming, so a capture is measured as it was taken.
+    The window opens at the first inbound object every subscriber received, so a
+    capture that starts before the subscribers attach is measured from the steady
+    state. The margins default to no further trimming.
     """
 
     if object_size <= 0 or subscribers <= 0:

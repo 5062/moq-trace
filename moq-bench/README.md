@@ -10,7 +10,7 @@ relay policy that can vary between runs.
   shared origin and is served back to every subscriber of that path, including the
   publisher's own session. It has no auth, cluster, or cache.
 - `moq-bench` is a deterministic workload driver. It publishes synthetic broadcasts
-  and subscribes to announced ones over a single session.
+  and subscribes to announced ones over one or more sessions (`--connections`).
 
 Both speak only IETF MoQ Transport draft-16 (`moq-transport-16`). MoQ-lite and the
 other drafts are unreachable by construction, so a peer cannot silently negotiate a
@@ -28,6 +28,9 @@ The peers are a fixture and a baseline, never a comparison row.
   involved, so a broken peer does not present itself as a slow relay.
 - **Transport control.** A single client with `--broadcasts 1 --subscribe 1` sends
   and receives through one session, exercising both object directions.
+- **Subscriber fan-out.** One client with `--connections N --broadcasts 0
+  --subscribe 1` opens `N` sessions that each subscribe once, so a relay emits `N`
+  copies of every group without the runner needing `N` hosts.
 
 The peers are built from `moq-net`, so the client's MoQ codec is moq-dev's
 implementation. That is what makes it a usable constant, and it is also why a result
@@ -41,7 +44,7 @@ covers Quinn packets and sockets, so both peers register all nine events the Pyt
 capture looks for.
 
 ```sh
-cargo build --release --features lttng
+just moq-bench-build            # cargo build --release --features lttng
 lttng list --userspace   # moq_trace:* and quic_trace:* for the peer's PID
 ```
 
@@ -55,12 +58,31 @@ moq-bench/target/release/moq-bench-server --server-bind "[::]:4443" --tls-genera
 moq-bench/target/release/moq-bench \
   --client-connect https://localhost:4443 --client-tls-disable-verify \
   --broadcasts 1 --subscribe 1 --fps 50 --frame-size 16384 --duration 10s
+
+# Three subscriber sessions in one process, each taking one subscription.
+moq-bench/target/release/moq-bench \
+  --client-connect https://localhost:4443 --client-tls-disable-verify \
+  --connections 3 --broadcasts 0 --subscribe 1 --duration 10s
 ```
 
 The server accepts every flag `moq-native` defines for its server and the client
 accepts every client flag, because both flatten those configs. `--duration`,
 `--report`, `--fps`, `--frame-size`, and `--group-size` are the peers' own, and the
 server logs `listening` once its listener is bound so a runner can wait for it.
+
+`--connections`, `--broadcasts`, and `--subscribe` are scalars, not the ranges
+`rs/moq-bench` takes, and every count is per session: `--connections 3 --subscribe 1`
+is three sessions with one subscription each. Broadcasts publish under
+`<name>/<run>/<connection>/<index>`, and `--startup` spreads session establishment
+evenly over a window so a many-session client does not connect as one burst.
+
+## Counters
+
+The reporter logs `connections` and `subscriptions` as gauges of live sessions and
+live subscriptions, alongside the throughput pair, the frame rates, `groups_recv`,
+and `mismatches`. A runner waits for `connections=<N>` before it opens a window and
+for `subscriptions=<N>` before it measures, which are the same observables
+`rs/moq-bench` logs, so the same runner can drive either binary.
 
 ## Shape
 

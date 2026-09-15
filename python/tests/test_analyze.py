@@ -144,6 +144,32 @@ class SqlAnalysisTests(unittest.TestCase):
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 2)
 
+    def test_window_opens_where_every_subscriber_is_attached(self) -> None:
+        """An object published before the subscribers attach is ramp, not data."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(3, "rx", 3)
+        self.object_start(4, "tx", 4)
+        # Only the later object has a copy; the earlier one predates the subscriber.
+        self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 9 WHERE trace_id >= 3")
+        self.connection.execute("UPDATE raw.moq_object_start SET timestamp_ns = 150_000 WHERE trace_id = 3")
+
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+
+        self.assertEqual(
+            self.connection.execute("SELECT trace_id FROM selected_rx ORDER BY trace_id").fetchall(),
+            [(3,)],
+        )
+
+    def test_window_requires_an_object_for_every_subscriber(self) -> None:
+        # No inbound object reaches the subscriber, so there is no steady state to measure.
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 9 WHERE trace_id = 1")
+
+        with self.assertRaisesRegex(TraceError, "copied to all 1 subscribers"):
+            _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+
     def test_analysis_reads_only_the_analyzed_process(self) -> None:
         """A peer in the same trace reuses IDs and must stay out of the analysis."""
 

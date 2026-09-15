@@ -82,7 +82,9 @@ fix:
 # The measurement peers. They build against the sibling moq repository, so they are
 # excluded from the workspace and from `check`, which must pass on its own.
 moq-bench-build:
-    cargo build --manifest-path moq-bench/Cargo.toml --features lttng
+    # Release: a measurement must not carry a debug-built peer's overhead, and the
+    # experiment configuration defaults to this path.
+    cargo build --release --manifest-path moq-bench/Cargo.toml --features lttng
 
 moq-bench-check:
     cargo test --manifest-path moq-bench/Cargo.toml --all-features

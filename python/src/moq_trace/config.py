@@ -15,7 +15,11 @@ class StrictModel(BaseModel):
 
 
 class SubscriberHost(StrictModel):
-    """Optional remote host running the subscriber workload."""
+    """Optional remote host running the subscriber workload.
+
+    `binary` is resolved on that host, which is expected to have the peers installed
+    under a name on `PATH` rather than in a local build tree.
+    """
 
     ssh: str
     binary: str = "moq-bench"
@@ -25,9 +29,15 @@ class SubscriberHost(StrictModel):
 class ExperimentConfig(StrictModel):
     """Everything required to run one already-built relay workload."""
 
+    # Validators otherwise skip defaults, and a relative binary path only breaks once
+    # a child process runs from the output directory instead of the invoking one.
+    model_config = ConfigDict(validate_default=True)
+
     output: pathlib.Path
     relay_bin: pathlib.Path = pathlib.Path("moq-relay")
-    bench_bin: pathlib.Path = pathlib.Path("moq-bench")
+    # Defaults to the reference peers, which are the constant side of a measurement.
+    # `just moq-bench-build` writes it, and a run from the toolkit root picks it up.
+    bench_bin: pathlib.Path = pathlib.Path("moq-bench/target/release/moq-bench")
     relay_url: str | None = None
     subscriber: SubscriberHost | None = None
     relay_cpu: int | None = Field(default=None, ge=0)
