@@ -1,0 +1,17 @@
+[package]
+name = "moq-trace"
+description = "MoQ object instrumentation layered over quic-trace."
+authors = ["Luke Curley"]
+license = "MIT OR Apache-2.0"
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[features]
+default = []
+lttng = ["dep:moq-trace-lttng-sys", "quic-trace/lttng"]
+
+[dependencies]
+moq-trace-lttng-sys = { workspace = true, optional = true }
+quic-trace.workspace = true

@@ -1,21 +1,28 @@
-# quic-trace
+# moq-trace
 
-`quic-trace` is an implementation-independent toolkit for measuring QUIC
-packet, STREAM-frame, and UDP socket latency. Instrumented QUIC implementations
-emit the same typed events, allowing one capture and analysis pipeline to
-compare Quinn, Cloudflare quiche, and Google QUICHE.
+`moq-trace` measures latency across the MoQ relay stack. It records MoQ object
+lifecycles together with the QUIC packets, STREAM frames, and UDP operations
+that carry those objects. A shared analysis pipeline correlates the layers by
+connection ID, stream ID, and half-open stream byte ranges.
 
-Application protocols own their own event providers and analysis extensions.
-For example, the MoQ repository emits `moq_trace:*` object events and joins them
-to this toolkit's transport tables through connection IDs and half-open stream
-byte ranges.
+The repository owns the tracing contracts and tooling. Relay and QUIC
+implementation repositories retain the instrumentation calls at the code
+boundaries being measured.
 
 ## Repository layout
 
-- `crates/quic-trace` provides the zero-work Rust facade and scoped tokens.
-- `crates/quic-trace-lttng-sys` owns the `quic_trace:*` LTTng-UST provider.
-- `crates/quic-trace-lttng-sys/provider/trace.hpp` provides the C++17 facade.
-- `python` reads CTF traces and builds validated transport DuckDB artifacts.
+- `crates/moq-trace` provides the Rust MoQ facade and re-exports transport
+  instrumentation from `quic-trace`.
+- `crates/moq-trace-lttng-sys` owns the `moq_trace:*` object provider.
+- `crates/quic-trace` provides implementation-independent Rust transport
+  instrumentation.
+- `crates/quic-trace-lttng-sys` owns the `quic_trace:*` transport provider.
+- `include` provides equivalent C++17 scoped APIs.
+- `python` captures relay workloads and builds combined DuckDB artifacts.
+
+The MoQ provider emits:
+
+- `moq_object_start`, `moq_object_phase`, and `moq_object_end`
 
 The transport provider emits:
 
@@ -23,56 +30,63 @@ The transport provider emits:
 - `quic_stream_frame`
 - `udp_socket_start` and `udp_socket_end`
 
-Packet and phase tokens record `abandoned` when destroyed without an explicit
-terminal outcome. Stream ranges use `[offset_start, offset_end)`. Trace and span
-IDs are process-local and must be scoped by the captured process when combining
-traces from multiple hosts or processes.
+Lifecycle and phase tokens record `abandoned` when destroyed without an
+explicit terminal outcome. Stream ranges use `[offset_start, offset_end)`.
+Rust facades allocate trace and span IDs from process-wide counters shared by
+the MoQ and QUIC crates. Scope IDs by the captured process when combining
+traces from multiple hosts or processes. Event timestamps use
+`CLOCK_MONOTONIC` on Unix so Rust and C++ hooks share one clock epoch.
 
-## Rust
+## Rust instrumentation
 
-Instrumentation compiles to a disabled facade unless the `lttng` feature is
-enabled on Linux:
+Enable the `lttng` feature in an instrumented relay:
 
 ```toml
 [dependencies]
-quic-trace = { version = "0.1", features = ["lttng"] }
+moq-trace = { version = "0.1", features = ["lttng"] }
 ```
 
-```rust
-let trace = quic_trace::global();
-let mut packet = trace.packet(
-    quic_trace::PacketContext::new(quic_trace::Direction::Rx, connection_id)
-        .with_byte_len(datagram.len()),
-);
-let decrypt = packet.phase(quic_trace::PacketPhase::PayloadDecrypt);
-// Process the protected payload.
-decrypt.finish(quic_trace::PacketOutcome::Success);
-packet.finish(quic_trace::PacketOutcome::Success);
+`moq_trace::Handle` starts MoQ object traces and delegates packet and socket
+traces to the shared transport facade. This keeps one API available to a Rust
+relay and its Quinn hooks.
+
+## C++ instrumentation
+
+Install the CMake project and consume it with:
+
+```cmake
+find_package(moq_trace CONFIG REQUIRED)
+target_link_libraries(relay PRIVATE moq_trace::cpp)
 ```
 
-## C++
+Include `<moq_trace/trace.hpp>` for scoped MoQ objects and
+`<quic_trace/trace.hpp>` for transport events. The C++ types are move-only and
+emit the same provider schemas as the Rust facade.
 
-The CMake target `quic_trace::cpp` exposes move-only scoped packet, phase, and
-socket types. Install the toolkit, use `find_package(quic_trace CONFIG
-REQUIRED)`, link the target, and include `<quic_trace/trace.hpp>`.
+## Capture and analysis
 
-## Analysis
-
-Install the Python package and analyze an existing CTF directory:
+Install the Python package:
 
 ```sh
 python -m pip install ./python
-quic-trace analyze trace.ctf --output analysis.duckdb
+moq-trace --help
 ```
 
-The artifact contains raw event tables and validated `packet_lifecycles`,
-`packet_phase_intervals`, and `socket_lifecycles` views. The reader accepts the
-current `quic_trace:*` namespace and legacy transport events emitted under
-`moq_trace:*`.
+The package needs the Babeltrace 2 Python bindings (`bt2`) to read CTF. Linux
+distributions normally provide them as `python3-bt2`; the Nix development shell
+and Nix package include them. The command can run a relay experiment, capture
+both `moq_trace:*` and `quic_trace:*`, analyze an existing CTF directory, and
+render figures from the resulting DuckDB artifact. The CTF reader also accepts
+legacy transport events emitted under `moq_trace:*`.
+
+Analysis accepts implementation-independent transport traces by default. Use
+`--transport-profile quinn` when the capture must contain the Quinn `routing`
+and `scheduling` phases used by the packet processing metric. Cloudflare quiche
+and Google QUICHE integrations can use the default profile and report whichever
+canonical packet phases they expose.
 
 ## Verification
 
 ```sh
-cargo test -p quic-trace
-PYTHONPATH=python/src python -m unittest discover -s python/tests -v
+nix develop --command just check
 ```

@@ -59,7 +59,7 @@ impl Handle {
         if !inner.socket_enabled() {
             return SocketTrace::disabled();
         }
-        let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let trace_id = crate::next_trace_id();
         inner.socket_start(now_ns(), trace_id, direction, connection_id);
         SocketTrace {
             state: Some(SocketTraceState {

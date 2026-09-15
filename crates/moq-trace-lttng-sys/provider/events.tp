@@ -1,0 +1,81 @@
+#include "interface.h"
+
+LTTNG_UST_TRACEPOINT_ENUM(moq_trace, direction,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("rx", MOQ_TRACE_DIRECTION_RX)
+		lttng_ust_field_enum_value("tx", MOQ_TRACE_DIRECTION_TX)
+	)
+)
+LTTNG_UST_TRACEPOINT_ENUM(moq_trace, edge,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("start", MOQ_TRACE_EDGE_START)
+		lttng_ust_field_enum_value("done", MOQ_TRACE_EDGE_DONE)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_ENUM(moq_trace, object_phase,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("header_parse", MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE)
+		lttng_ust_field_enum_value("create", MOQ_TRACE_OBJECT_PHASE_CREATE)
+		lttng_ust_field_enum_value("payload_read", MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ)
+		lttng_ust_field_enum_value("frame_commit", MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT)
+		lttng_ust_field_enum_value("clone", MOQ_TRACE_OBJECT_PHASE_CLONE)
+		lttng_ust_field_enum_value("header_encode", MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE)
+		lttng_ust_field_enum_value("payload_write", MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_ENUM(moq_trace, object_outcome,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("success", MOQ_TRACE_OBJECT_OUTCOME_SUCCESS)
+		lttng_ust_field_enum_value("failed", MOQ_TRACE_OBJECT_OUTCOME_FAILED)
+		lttng_ust_field_enum_value("abandoned", MOQ_TRACE_OBJECT_OUTCOME_ABANDONED)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(moq_trace, moq_object_start,
+	LTTNG_UST_TP_ARGS(const struct moq_trace_moq_object_start *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, logical_group, event->logical_group)
+		lttng_ust_field_integer(uint64_t, logical_frame, event->logical_frame)
+		lttng_ust_field_integer(uint8_t, has_session_id, event->has_session_id)
+		lttng_ust_field_integer(uint64_t, session_id, event->session_id)
+		lttng_ust_field_integer(uint8_t, has_connection_id, event->has_connection_id)
+		lttng_ust_field_integer(uint64_t, connection_id, event->connection_id)
+		lttng_ust_field_enum(moq_trace, direction, uint8_t, direction, event->direction)
+		lttng_ust_field_integer(uint64_t, track_alias, event->track_alias)
+		lttng_ust_field_integer(uint64_t, group_id, event->group_id)
+		lttng_ust_field_integer(uint64_t, object_id, event->object_id)
+		lttng_ust_field_integer(uint8_t, has_stream_id, event->has_stream_id)
+		lttng_ust_field_integer(uint64_t, stream_id, event->stream_id)
+		lttng_ust_field_integer(uint8_t, has_stream_offset_start, event->has_stream_offset_start)
+		lttng_ust_field_integer(uint64_t, stream_offset_start, event->stream_offset_start)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(moq_trace, moq_object_end,
+	LTTNG_UST_TP_ARGS(const struct moq_trace_moq_object_end *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint8_t, has_stream_offset_end, event->has_stream_offset_end)
+		lttng_ust_field_integer(uint64_t, stream_offset_end, event->stream_offset_end)
+		lttng_ust_field_integer(uint64_t, payload_bytes, event->payload_bytes)
+		lttng_ust_field_enum(moq_trace, object_outcome, uint8_t, outcome, event->outcome)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(moq_trace, moq_object_phase,
+	LTTNG_UST_TP_ARGS(const struct moq_trace_moq_object_phase *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, trace_id, event->trace_id)
+		lttng_ust_field_integer(uint64_t, span_id, event->span_id)
+		lttng_ust_field_enum(moq_trace, object_phase, uint8_t, phase, event->phase)
+		lttng_ust_field_enum(moq_trace, edge, uint8_t, edge, event->edge)
+		lttng_ust_field_integer(uint8_t, has_outcome, event->has_outcome)
+		lttng_ust_field_enum(moq_trace, object_outcome, uint8_t, outcome, event->outcome)
+	)
+)

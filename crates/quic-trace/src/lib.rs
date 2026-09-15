@@ -48,7 +48,13 @@ pub struct Handle {
 static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
-fn next_span_id() -> u64 {
+/// Allocate a process-wide trace identifier shared by the MoQ and QUIC facades.
+pub fn next_trace_id() -> u64 {
+    NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Allocate a process-wide phase span identifier shared by the MoQ and QUIC facades.
+pub fn next_span_id() -> u64 {
     #[cfg(test)]
     SPAN_IDS.with(|ids| ids.set(ids.get() + 1));
     NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
@@ -104,10 +110,25 @@ pub fn global() -> Handle {
     }
 }
 
-/// Return a process-relative monotonic timestamp in nanoseconds.
+/// Return a monotonic timestamp in nanoseconds from the host clock.
 pub fn now_ns() -> u64 {
     #[cfg(test)]
     CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
+    #[cfg(unix)]
+    {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // CLOCK_MONOTONIC is shared with the C++ facade, so events emitted by
+        // Rust and C++ code in one relay use the same timestamp epoch.
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
+        if result == 0 {
+            let seconds = u64::try_from(value.tv_sec).unwrap_or(0);
+            let nanos = u64::try_from(value.tv_nsec).unwrap_or(0);
+            return seconds.saturating_mul(1_000_000_000).saturating_add(nanos);
+        }
+    }
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     START
         .get_or_init(std::time::Instant::now)

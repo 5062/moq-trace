@@ -111,6 +111,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "moq-trace"
+version = "0.1.0"
+dependencies = [
+ "moq-trace-lttng-sys",
+ "quic-trace",
+]
+
+[[package]]
+name = "moq-trace-lttng-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -139,6 +156,7 @@ dependencies = [
 name = "quic-trace"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "quic-trace-lttng-sys",
 ]
 

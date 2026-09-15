@@ -1,7 +1,7 @@
 #ifndef QUIC_TRACE_TRACE_HPP
 #define QUIC_TRACE_TRACE_HPP
 
-#include "interface.h"
+#include <quic_trace/interface.h>
 
 #include <atomic>
 #include <chrono>
@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <time.h>
 #include <utility>
 
 namespace quic_trace {
@@ -17,13 +18,23 @@ namespace detail {
 
 inline std::atomic<std::uint64_t> next_trace_id{1};
 inline std::atomic<std::uint64_t> next_span_id{1};
-inline const auto epoch = std::chrono::steady_clock::now();
+inline const auto fallback_epoch = std::chrono::steady_clock::now();
 inline std::once_flag provider_once;
 
 inline void initialize() { std::call_once(provider_once, quic_trace_provider_init); }
 
 inline std::uint64_t now_ns() {
-  const auto elapsed = std::chrono::steady_clock::now() - epoch;
+#if defined(CLOCK_MONOTONIC)
+  struct timespec value {
+    0,
+    0,
+  };
+  if (::clock_gettime(CLOCK_MONOTONIC, &value) == 0) {
+    return static_cast<std::uint64_t>(value.tv_sec) * 1'000'000'000ULL +
+           static_cast<std::uint64_t>(value.tv_nsec);
+  }
+#endif
+  const auto elapsed = std::chrono::steady_clock::now() - fallback_epoch;
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
 }
@@ -32,11 +43,17 @@ inline std::uint64_t now_ns() {
 
 /** Metadata known when a QUIC packet trace starts. */
 struct PacketContext {
+  /** QUIC connection identifier associated with the packet. */
   std::uint64_t connection_id = 0;
+  /** Direction at the local transport interface. */
   quic_trace_direction direction = QUIC_TRACE_DIRECTION_RX;
+  /** Packet number, when known. */
   std::optional<std::uint64_t> packet_number;
+  /** Packet number space, when known. */
   std::optional<quic_trace_packet_space> packet_space;
+  /** Encoded packet length in bytes, when known. */
   std::optional<std::uint64_t> byte_len;
+  /** Timestamp captured before the packet trace starts, when known. */
   std::optional<std::uint64_t> start_ns;
 };
 
@@ -228,8 +245,11 @@ class Packet {
 
 /** Batch measurements produced by one UDP socket operation. */
 struct SocketStats {
+  /** Number of buffers processed by the operation. */
   std::uint64_t buffers = 0;
+  /** Number of datagrams represented by those buffers. */
   std::uint64_t datagrams = 0;
+  /** Total bytes represented by those buffers. */
   std::uint64_t bytes = 0;
 };
 

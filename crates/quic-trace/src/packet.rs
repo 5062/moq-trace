@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use crate::{Direction, Handle, PacketSpace, now_ns};
 
 /// Result of packet or packet-phase processing.
@@ -147,7 +145,7 @@ impl Handle {
         if !inner.packet_enabled() {
             return PacketTrace::disabled();
         }
-        let trace_id = crate::NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        let trace_id = crate::next_trace_id();
         inner.packet_start(context.start_ns.unwrap_or_else(now_ns), trace_id, &context);
         PacketTrace(Some(PacketTraceState {
             backend: inner.clone(),

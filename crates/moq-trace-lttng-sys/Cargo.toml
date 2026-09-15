@@ -1,0 +1,14 @@
+[package]
+name = "moq-trace-lttng-sys"
+description = "Native LTTng-UST provider for MoQ object tracing."
+authors = ["Luke Curley"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+links = "moq_trace_provider"
+
+[build-dependencies]
+bindgen.workspace = true
+cc.workspace = true
+pkg-config.workspace = true

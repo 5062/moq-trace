@@ -1,4 +1,4 @@
-"""LTTng and child-process lifecycle for transport trace captures."""
+"""LTTng and child-process lifecycle for one experiment."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _run_lttng(*args: str, capture_output: bool = False) -> subprocess.Completed
         )
     except OSError as error:
         raise CaptureError("failed to execute lttng; install LTTng tools 2.13 or newer") from error
-    if result.returncode != 0:
+    if not result.returncode == 0:
         detail = result.stderr.strip() if capture_output else ""
         suffix = f": {detail}" if detail else ""
         raise CaptureError(f"lttng {' '.join(args)} failed with status {result.returncode}{suffix}")
@@ -38,13 +38,10 @@ def _run_lttng(*args: str, capture_output: bool = False) -> subprocess.Completed
 
 
 class LttngSession:
-    """One discard-mode LTTng session scoped to an instrumented process."""
+    """One discard-mode LTTng session scoped to the relay process."""
 
-    def __init__(self, output: pathlib.Path, providers: Sequence[str] = ("quic_trace",)) -> None:
-        if not providers:
-            raise ValueError("at least one LTTng provider is required")
-        self.providers = tuple(providers)
-        self.name = f"quic-trace-{os.getpid()}-{uuid.uuid4().hex}"
+    def __init__(self, output: pathlib.Path) -> None:
+        self.name = f"moq-trace-{os.getpid()}-{uuid.uuid4().hex}"
         self.active = False
         _run_lttng("create", self.name, "--output", str(output))
         self.active = True
@@ -59,23 +56,24 @@ class LttngSession:
                 "8M",
                 "--num-subbuf",
                 "8",
-                "transport",
+                "moq",
             )
         except Exception:
             self.close()
             raise
 
     def wait_for_provider(self, pid: int, timeout: float = 10.0) -> None:
-        """Wait until the exact process has registered every provider."""
+        """Wait until the exact relay process has registered the provider."""
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             listing = _run_lttng("list", "--userspace", capture_output=True).stdout
-            if all(_provider_present(listing, pid, provider) for provider in self.providers):
+            if _provider_listed(listing, pid, "moq_trace:moq_object_end") and _provider_listed(
+                listing, pid, "quic_trace:udp_socket_end"
+            ):
                 return
             time.sleep(0.05)
-        names = ", ".join(self.providers)
-        raise CaptureError(f"timed out waiting for providers {names} from PID {pid}")
+        raise CaptureError(f"timed out waiting for MoQ and QUIC trace providers from relay PID {pid}")
 
     def start(self, pid: int) -> None:
         """Restrict recording to one process and start the session."""
@@ -88,20 +86,28 @@ class LttngSession:
             "--session",
             self.name,
             "--channel",
-            "transport",
+            "moq",
             "--type",
             "vpid",
         )
-        for provider in self.providers:
-            _run_lttng(
-                "enable-event",
-                "--userspace",
-                "--session",
-                self.name,
-                "--channel",
-                "transport",
-                f"{provider}:*",
-            )
+        _run_lttng(
+            "enable-event",
+            "--userspace",
+            "--session",
+            self.name,
+            "--channel",
+            "moq",
+            "moq_trace:*",
+        )
+        _run_lttng(
+            "enable-event",
+            "--userspace",
+            "--session",
+            self.name,
+            "--channel",
+            "moq",
+            "quic_trace:*",
+        )
         _run_lttng("start", self.name)
 
     def finish(self) -> None:
@@ -198,13 +204,13 @@ def wait_for_log(
     raise CaptureError(f"timed out after {timeout:g}s waiting for {description} in {path}")
 
 
-def _provider_present(listing: str, pid: int, provider: str) -> bool:
+def _provider_listed(listing: str, pid: int, event: str) -> bool:
     target = False
     for raw_line in listing.splitlines():
         line = raw_line.strip()
         if line.startswith("PID: "):
             value = line.removeprefix("PID: ").split(maxsplit=1)[0]
             target = value.isdigit() and int(value) == pid
-        elif target and line and line.split(maxsplit=1)[0].startswith(f"{provider}:"):
+        elif target and line and line.split(maxsplit=1)[0] == event:
             return True
     return False
