@@ -14,6 +14,16 @@ from .analyze import run as analyze
 from .artifact import open_artifact, write_metadata
 from .capture import LttngSession, ManagedProcess, wait_for_log
 from .config import ComparisonConfig, ExperimentConfig
+from .metadata import (
+    Affinity,
+    Binaries,
+    CommandSet,
+    ComparisonMetadata,
+    ComparisonRun,
+    RunProvenance,
+    WindowProvenance,
+    WorkloadProvenance,
+)
 from .render import render
 
 # Pinned for every implementation, so a run cannot silently negotiate a version
@@ -234,31 +244,25 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     output.mkdir(parents=True)
     command = commands(config)
     capture = _capture(config, command, output)
-    metadata = {
-        "protocol": PROTOCOL,
-        "affinity": (
-            {"mode": "unpinned"} if config.relay_cpu is None else {"mode": "single-core", "cpu": config.relay_cpu}
+    # The workload and window the analyzer measures win over anything restated
+    # here, so this carries only what a trace cannot show.
+    provenance = RunProvenance(
+        protocol=PROTOCOL,
+        affinity=(
+            Affinity(mode="unpinned")
+            if config.relay_cpu is None
+            else Affinity(mode="single-core", cpu=config.relay_cpu)
         ),
-        "workload": {
-            "publishers": 1,
-            "objects_per_group": 1,
-            "subscribers": config.subscribers,
-            "object_size": config.object_size,
-            "fps": config.fps,
-        },
-        "window": {
-            "warmup_seconds": config.warmup_seconds,
-            "duration_seconds": config.duration_seconds,
-            "cooldown_seconds": config.cooldown_seconds,
-        },
-        "binaries": {
-            "relay": str(config.relay_bin),
-            "relay_sha256": _file_hash(config.relay_bin),
-            "bench": str(config.bench_bin),
-            "bench_sha256": _file_hash(config.bench_bin),
-        },
-        "commands": dataclasses.asdict(command),
-    }
+        workload=WorkloadProvenance(publishers=1, objects_per_group=1, fps=config.fps),
+        window=WindowProvenance(duration_seconds=config.duration_seconds),
+        binaries=Binaries(
+            relay=str(config.relay_bin),
+            relay_sha256=_file_hash(config.relay_bin),
+            bench=str(config.bench_bin),
+            bench_sha256=_file_hash(config.bench_bin),
+        ),
+        commands=CommandSet(relay=command.relay, publisher=command.publisher, subscriber=command.subscriber),
+    )
     database = output / "analysis.duckdb"
     analyze(
         capture.trace,
@@ -270,7 +274,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
         expected_pids=capture.pids,
         pid=capture.relay_pid,
         transport_profile=config.transport_profile,
-        metadata=metadata,
+        provenance=provenance,
     )
     _validate_workload(database)
     if config.render:
@@ -296,10 +300,10 @@ def compare(config: ComparisonConfig) -> pathlib.Path:
             }
         )
         database = run(run_config)
-        runs.append({"value": value, "database": str(database.relative_to(output))})
+        runs.append(ComparisonRun(value=value, database=str(database.relative_to(output))))
     database = output / "comparison.duckdb"
     with duckdb.connect(str(database)) as connection:
-        write_metadata(connection, "comparison", {"dimension": config.dimension, "runs": runs})
+        write_metadata(connection, ComparisonMetadata(dimension=config.dimension, runs=tuple(runs)))
     if config.experiment.render:
         render(database)
     return database

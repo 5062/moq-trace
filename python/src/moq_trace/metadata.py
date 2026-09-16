@@ -1,0 +1,190 @@
+"""Validated schemas for the metadata one analysis artifact carries.
+
+An artifact outlives the tool that wrote it, so its metadata is a compatibility
+contract rather than an internal detail. Modeling it here gives every reader the
+same validated view of a run, and gives every writer one place that says what a
+complete artifact holds.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# The transport profiles an artifact can record. `generic` accepts whichever
+# phases a provider emitted; `quinn` additionally requires the Quinn `routing`
+# and `scheduling` phases that the packet processing metric depends on. Shared
+# with the experiment configuration so both name the same closed set.
+TransportProfile = Literal["generic", "quinn"]
+
+# The dimensions a comparison can vary. Shared with the experiment
+# configuration, because a comparison writes the value it varied straight into
+# its artifact.
+ComparisonDimension = Literal["subscribers", "object_size"]
+
+
+class ArtifactModel(BaseModel):
+    """Base for the metadata an artifact records about itself.
+
+    Unlike experiment configuration, an artifact is read by a tool that may be
+    older than the one that wrote it. Unknown keys are therefore kept instead of
+    rejected, which is where the additive compatibility rule in `AGENTS.md` is
+    enforced: a newer producer stays readable, and the extra keys remain
+    available to a caller that knows about them. Missing or ill-typed keys are
+    still rejected, because a reader forced to guess at a measurement is worse
+    than one that refuses to report it.
+
+    Types are checked strictly because artifact JSON is machine-written: a
+    mismatch is a producer bug, and silently reading `"16384"` as a byte count
+    would hide it. Integers still satisfy float fields, so a producer may write
+    either form of a window duration.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True, strict=True)
+
+
+class Affinity(ArtifactModel):
+    """CPU affinity the relay was confined to."""
+
+    mode: Literal["unpinned", "single-core"] = "unpinned"
+    cpu: int | None = Field(default=None, ge=0)
+
+
+class Workload(ArtifactModel):
+    """Object shape and fan-out one workload drove."""
+
+    subscribers: int = Field(gt=0)
+    object_size: int = Field(gt=0)
+    # Recorded only when an experiment ran the peers. A directly analyzed trace
+    # knows nothing about the workload that produced it.
+    publishers: int | None = Field(default=None, gt=0)
+    objects_per_group: int | None = Field(default=None, gt=0)
+    fps: int | None = Field(default=None, gt=0)
+
+
+class WorkloadProvenance(ArtifactModel):
+    """Workload detail the analyzer cannot measure from the trace alone."""
+
+    publishers: int | None = Field(default=None, gt=0)
+    objects_per_group: int | None = Field(default=None, gt=0)
+    fps: int | None = Field(default=None, gt=0)
+
+
+class Window(ArtifactModel):
+    """Wall time the workload ran and the steady-state window selected."""
+
+    warmup_seconds: float = Field(ge=0)
+    cooldown_seconds: float = Field(ge=0)
+    # The analyzer is told how much to trim, not how long the run was.
+    duration_seconds: float | None = Field(default=None, gt=0)
+
+
+class WindowProvenance(ArtifactModel):
+    """Window detail the analyzer cannot measure from the trace alone."""
+
+    duration_seconds: float | None = Field(default=None, gt=0)
+
+
+class TransportCapabilities(ArtifactModel):
+    """Transport features the capture actually contained.
+
+    Phases are optional per provider, so this records what was present instead
+    of what a profile asked for.
+    """
+
+    packet_phases: tuple[str, ...]
+
+
+class Population(ArtifactModel):
+    """Row population each metric domain is drawn from."""
+
+    object: str
+    quic_object: str
+    packet: str
+    timeline: str
+
+
+class Counts(ArtifactModel):
+    """Row counts that let a reader size the analysis without querying it."""
+
+    groups: int = Field(ge=0)
+    packets: int = Field(ge=0)
+    selected_packets: int = Field(ge=0)
+    correlated_objects: int = Field(ge=0)
+    correlated_object_copies: int = Field(ge=0)
+
+
+class Processes(ArtifactModel):
+    """The process this artifact describes and every process the capture held.
+
+    Trace and span IDs are process-local, so an artifact is always one process's
+    slice of a recording that may hold several.
+    """
+
+    analyzed_pid: int = Field(ge=0)
+    captured_pids: tuple[int, ...]
+
+
+class Binaries(ArtifactModel):
+    """Binaries a run used, hashed so a result names the inputs it measured."""
+
+    relay: str
+    bench: str
+    relay_sha256: str | None = None
+    bench_sha256: str | None = None
+
+
+class CommandSet(ArtifactModel):
+    """Exact argv arrays each peer was started with."""
+
+    relay: tuple[str, ...]
+    publisher: tuple[str, ...]
+    subscriber: tuple[str, ...]
+
+
+class RunProvenance(ArtifactModel):
+    """What a caller knows about a run that the analyzer cannot measure.
+
+    Every field is optional. The analyzer fills in what it measured, and a field
+    set here adds the provenance only an experiment has: the pinned protocol,
+    the affinity it applied, the workload shape it drove, and the exact binaries
+    and commands it ran.
+    """
+
+    protocol: str | None = None
+    affinity: Affinity = Field(default_factory=Affinity)
+    workload: WorkloadProvenance | None = None
+    window: WindowProvenance | None = None
+    binaries: Binaries | None = None
+    commands: CommandSet | None = None
+
+
+class RunMetadata(ArtifactModel):
+    """Everything one run artifact records about the measurement it holds."""
+
+    workload: Workload
+    window: Window
+    transport_profile: TransportProfile
+    transport_capabilities: TransportCapabilities
+    population: Population
+    counts: Counts
+    processes: Processes
+    protocol: str | None = None
+    affinity: Affinity = Field(default_factory=Affinity)
+    binaries: Binaries | None = None
+    commands: CommandSet | None = None
+
+
+class ComparisonRun(ArtifactModel):
+    """One workload in a comparison and the artifact it produced."""
+
+    value: int = Field(gt=0)
+    database: str
+
+
+class ComparisonMetadata(ArtifactModel):
+    """Everything one comparison artifact records about the runs it holds."""
+
+    dimension: ComparisonDimension
+    runs: tuple[ComparisonRun, ...] = Field(min_length=1)

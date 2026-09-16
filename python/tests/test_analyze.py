@@ -276,11 +276,12 @@ class SqlAnalysisTests(unittest.TestCase):
 
             with open_artifact(output, "run") as (connection, kind, metadata):
                 self.assertEqual(kind, "run")
-                self.assertEqual(metadata["counts"]["correlated_objects"], 1)
-                self.assertEqual(metadata["window"]["warmup_seconds"], 0)
-                self.assertEqual(metadata["transport_profile"], "generic")
-                self.assertEqual(metadata["transport_capabilities"]["packet_phases"], ["routing", "scheduling"])
-                self.assertEqual(metadata["processes"], {"analyzed_pid": 0, "captured_pids": [0]})
+                self.assertEqual(metadata.counts.correlated_objects, 1)
+                self.assertEqual(metadata.window.warmup_seconds, 0)
+                self.assertEqual(metadata.transport_profile, "generic")
+                self.assertEqual(metadata.transport_capabilities.packet_phases, ("routing", "scheduling"))
+                self.assertEqual(metadata.processes.analyzed_pid, 0)
+                self.assertEqual(metadata.processes.captured_pids, (0,))
                 self.assertEqual(
                     connection.execute("SELECT count(*) FROM metric_statistics").fetchone()[0],
                     9,
@@ -306,8 +307,8 @@ class SqlAnalysisTests(unittest.TestCase):
                 )
 
             with open_artifact(output, "run") as (connection, _kind, metadata):
-                self.assertEqual(metadata["transport_profile"], "generic")
-                self.assertEqual(metadata["transport_capabilities"]["packet_phases"], [])
+                self.assertEqual(metadata.transport_profile, "generic")
+                self.assertEqual(metadata.transport_capabilities.packet_phases, ())
                 self.assertEqual(
                     connection.execute(
                         "SELECT count(*) FROM metric_statistics WHERE metric = 'rx_packet_span'"
@@ -373,13 +374,13 @@ class SqlAnalysisTests(unittest.TestCase):
             with mock.patch.object(ctf, "batches", self.batches):
                 run(pathlib.Path("unused.ctf"), trimmed, object_size=16, subscribers=1, warmup_seconds=0.5)
             with open_artifact(trimmed) as (connection, _, metadata):
-                self.assertEqual(metadata["counts"]["correlated_objects"], 1)
-                self.assertEqual(metadata["window"]["warmup_seconds"], 0.5)
+                self.assertEqual(metadata.counts.correlated_objects, 1)
+                self.assertEqual(metadata.window.warmup_seconds, 0.5)
                 self.assertEqual(
                     connection.execute("SELECT DISTINCT trace_id FROM packet_samples ORDER BY trace_id").fetchall(),
                     [(13,), (14,)],
                 )
-                self.assertEqual(metadata["population"]["packet"], "selected_object_packets")
+                self.assertEqual(metadata.population.packet, "selected_object_packets")
                 self.assertEqual(
                     connection.execute("SELECT * FROM analysis_window").fetchall(),
                     [(100_000, 500_100_000, 1_000_100_000)],

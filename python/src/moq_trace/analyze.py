@@ -6,7 +6,6 @@ import os
 import pathlib
 import tempfile
 from collections.abc import Collection, Sequence
-from typing import Literal
 
 import duckdb
 import pyarrow as pa
@@ -14,8 +13,19 @@ import pyarrow as pa
 from . import coverage, ctf
 from .artifact import write_metadata
 from .errors import TraceError
-
-TransportProfile = Literal["generic", "quinn"]
+from .metadata import (
+    Counts,
+    Population,
+    Processes,
+    RunMetadata,
+    RunProvenance,
+    TransportCapabilities,
+    TransportProfile,
+    Window,
+    WindowProvenance,
+    Workload,
+    WorkloadProvenance,
+)
 
 
 def _count(connection: duckdb.DuckDBPyConnection, query: str, parameters=()) -> int:
@@ -585,57 +595,71 @@ def _verify_transport_metrics(connection: duckdb.DuckDBPyConnection, transport_p
 
 def _write_run_metadata(
     connection: duckdb.DuckDBPyConnection,
-    metadata: dict,
     *,
+    pid: int,
+    captured: Sequence[int],
     object_size: int,
     subscribers: int,
     warmup_seconds: float,
     cooldown_seconds: float,
-    transport_profile: str,
+    transport_profile: TransportProfile,
+    provenance: RunProvenance | None = None,
 ) -> None:
-    """Record the workload, counts, and experiment provenance in the artifact."""
+    """Record the workload, counts, and experiment provenance in the artifact.
 
-    value = dict(metadata)
-    value.setdefault(
-        "workload",
-        {
-            "subscribers": subscribers,
-            "object_size": object_size,
-        },
-    )
-    value.setdefault(
-        "window",
-        {
-            "warmup_seconds": warmup_seconds,
-            "cooldown_seconds": cooldown_seconds,
-        },
-    )
-    value["transport_profile"] = transport_profile
-    value["transport_capabilities"] = {
-        "packet_phases": sorted(
-            str(phase)
-            for (phase,) in connection.execute(
-                "SELECT DISTINCT phase FROM packet_phase_intervals ORDER BY phase"
-            ).fetchall()
-        )
-    }
-    value["population"] = {
-        "object": "selected_object_copies",
-        "quic_object": "selected_object_copies",
-        "packet": "selected_object_packets",
-        "timeline": "slowest_copy_per_selected_object",
-    }
-    value["counts"] = {
-        "groups": _count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
-        "packets": _count(connection, "SELECT count(*) FROM packet_lifecycles"),
-        "selected_packets": _count(connection, "SELECT count(*) FROM selected_packets"),
-        "correlated_objects": _count(connection, "SELECT count(*) FROM selected_rx"),
-        "correlated_object_copies": _count(
-            connection,
-            "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'",
+    The analyzer supplies everything it measured from the trace. `provenance`
+    adds what only a caller can know, such as the pinned protocol and the exact
+    commands, and never overrides a measured value.
+    """
+
+    source = provenance or RunProvenance()
+    write_metadata(
+        connection,
+        RunMetadata(
+            workload=Workload(
+                subscribers=subscribers,
+                object_size=object_size,
+                **(source.workload or WorkloadProvenance()).model_dump(),
+            ),
+            window=Window(
+                warmup_seconds=warmup_seconds,
+                cooldown_seconds=cooldown_seconds,
+                **(source.window or WindowProvenance()).model_dump(),
+            ),
+            transport_profile=transport_profile,
+            transport_capabilities=TransportCapabilities(
+                packet_phases=tuple(
+                    sorted(
+                        str(phase)
+                        for (phase,) in connection.execute(
+                            "SELECT DISTINCT phase FROM packet_phase_intervals ORDER BY phase"
+                        ).fetchall()
+                    )
+                )
+            ),
+            population=Population(
+                object="selected_object_copies",
+                quic_object="selected_object_copies",
+                packet="selected_object_packets",
+                timeline="slowest_copy_per_selected_object",
+            ),
+            counts=Counts(
+                groups=_count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
+                packets=_count(connection, "SELECT count(*) FROM packet_lifecycles"),
+                selected_packets=_count(connection, "SELECT count(*) FROM selected_packets"),
+                correlated_objects=_count(connection, "SELECT count(*) FROM selected_rx"),
+                correlated_object_copies=_count(
+                    connection,
+                    "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'",
+                ),
+            ),
+            processes=Processes(analyzed_pid=pid, captured_pids=tuple(captured)),
+            protocol=source.protocol,
+            affinity=source.affinity,
+            binaries=source.binaries,
+            commands=source.commands,
         ),
-    }
-    write_metadata(connection, "run", value)
+    )
 
 
 def run(
@@ -649,7 +673,7 @@ def run(
     expected_pids: Collection[int] | None = None,
     pid: int | None = None,
     transport_profile: TransportProfile = "generic",
-    metadata: dict | None = None,
+    provenance: RunProvenance | None = None,
 ) -> None:
     """Analyze CTF into one atomically published DuckDB database.
 
@@ -660,6 +684,10 @@ def run(
     The window opens at the first inbound object every subscriber received, so a
     capture that starts before the subscribers attach is measured from the steady
     state. The margins default to no further trimming.
+
+    `provenance` adds what the caller knows about the run but the trace cannot
+    show, such as the pinned protocol, the affinity applied, and the exact
+    commands. It never overrides a value the analyzer measured.
     """
 
     if object_size <= 0 or subscribers <= 0:
@@ -692,15 +720,14 @@ def run(
             _define_timelines(connection)
             _write_run_metadata(
                 connection,
-                {
-                    "processes": {"analyzed_pid": analyzed, "captured_pids": list(captured)},
-                    **dict(metadata or {}),
-                },
+                pid=analyzed,
+                captured=captured,
                 object_size=object_size,
                 subscribers=subscribers,
                 warmup_seconds=warmup_seconds,
                 cooldown_seconds=cooldown_seconds,
                 transport_profile=transport_profile,
+                provenance=provenance,
             )
             connection.execute("CHECKPOINT")
         finally:

@@ -13,6 +13,8 @@ from pydantic import ValidationError
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
+from support import run_metadata  # noqa: E402
+
 from moq_trace import capture, experiment  # noqa: E402
 from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.capture import _provider_listed  # noqa: E402
@@ -27,7 +29,7 @@ class ExperimentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = pathlib.Path(directory) / "analysis.duckdb"
             with duckdb.connect(str(database)) as connection:
-                write_metadata(connection, "run", {})
+                write_metadata(connection, run_metadata())
                 connection.execute("CREATE TABLE selected_rx AS SELECT unnest([4, 6]) AS group_id")
             with self.assertRaisesRegex(ExperimentError, "groups are not contiguous"):
                 _validate_workload(database)

@@ -94,6 +94,11 @@ and `scheduling` phases used by the packet processing metric. Cloudflare quiche
 and Google QUICHE integrations can use the default profile and report whichever
 canonical packet phases they expose.
 
+Every artifact carries one metadata row describing the measurement it holds.
+`python/src/moq_trace/metadata.py` is the schema that row must satisfy: a reader
+accepts keys a newer writer added, and rejects metadata that does not match the
+kind of the artifact it was found in.
+
 ## Verification
 
 ```sh

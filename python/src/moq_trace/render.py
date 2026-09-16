@@ -9,6 +9,7 @@ import duckdb
 
 from .artifact import open_artifact
 from .errors import TraceError
+from .metadata import ComparisonMetadata, RunMetadata
 from .plot import (
     PerCopyCdfRun,
     PlotOptions,
@@ -20,22 +21,23 @@ from .plot import (
 )
 
 
-def _options(metadata: dict) -> PlotOptions:
-    workload = metadata["workload"]
-    affinity = metadata.get("affinity", {"mode": "unpinned"})
+def _options(metadata: RunMetadata) -> PlotOptions:
+    """Describe one run's context from its validated metadata."""
+
+    affinity = metadata.affinity
     return PlotOptions(
-        relay_cpu=affinity.get("cpu") if affinity.get("mode") == "single-core" else None,
-        subscribers=int(workload["subscribers"]),
-        object_size=int(workload["object_size"]),
-        fps=int(workload["fps"]) if "fps" in workload else None,
-        protocol=str(metadata["protocol"]) if "protocol" in metadata else None,
+        relay_cpu=affinity.cpu if affinity.mode == "single-core" else None,
+        subscribers=metadata.workload.subscribers,
+        object_size=metadata.workload.object_size,
+        fps=metadata.workload.fps,
+        protocol=metadata.protocol,
     )
 
 
 def _render_run(
     database: pathlib.Path,
     connection: duckdb.DuckDBPyConnection,
-    metadata: dict,
+    metadata: RunMetadata,
 ) -> None:
     options = _options(metadata)
     plots = database.parent / "plots"
@@ -57,16 +59,15 @@ def _format_byte_size(value: int) -> str:
     return f"{value} bytes"
 
 
-def _render_comparison(database: pathlib.Path, metadata: dict) -> None:
-    dimension = str(metadata["dimension"])
-    entries = metadata["runs"]
+def _render_comparison(database: pathlib.Path, metadata: ComparisonMetadata) -> None:
+    dimension = metadata.dimension
     with contextlib.ExitStack() as stack:
         runs = []
         run_metadata = []
-        for entry in entries:
-            run_database = database.parent / str(entry["database"])
+        for entry in metadata.runs:
+            run_database = database.parent / entry.database
             connection, _run_kind, summary = stack.enter_context(open_artifact(run_database, "run"))
-            value = int(entry["value"])
+            value = entry.value
             label = (
                 f"{value} {'subscriber' if value == 1 else 'subscribers'}"
                 if dimension == "subscribers"

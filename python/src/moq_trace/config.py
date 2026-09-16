@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .metadata import ComparisonDimension, TransportProfile
 
 
 class StrictModel(BaseModel):
@@ -49,7 +50,7 @@ class ExperimentConfig(StrictModel):
     duration_seconds: float = Field(default=20.0, gt=0)
     cooldown_seconds: float = Field(default=1.0, ge=0)
     port: int = Field(default=4443, gt=0, le=65_535)
-    transport_profile: Literal["generic", "quinn"] = "generic"
+    transport_profile: TransportProfile = "generic"
     render: bool = True
 
     @field_validator("relay_bin", "bench_bin")
@@ -72,7 +73,7 @@ class ComparisonConfig(StrictModel):
     """One comparison dimension applied to a base experiment."""
 
     experiment: ExperimentConfig
-    dimension: Literal["subscribers", "object_size"]
+    dimension: ComparisonDimension
     values: tuple[int, ...]
 
     @model_validator(mode="after")
