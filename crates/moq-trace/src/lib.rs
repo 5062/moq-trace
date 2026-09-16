@@ -10,6 +10,7 @@ pub use quic_trace::{
     Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace, PacketSpace,
     PacketTrace, SocketOutcome, SocketStats, SocketTrace, StreamFrame,
 };
+pub use trace_core::now_ns;
 
 mod backend;
 
@@ -36,23 +37,7 @@ pub struct Handle {
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-fn next_span_id() -> u64 {
-    #[cfg(test)]
-    SPAN_IDS.with(|ids| ids.set(ids.get() + 1));
-    quic_trace::next_span_id()
-}
-
 impl Handle {
-    #[cfg(test)]
-    fn new() -> Self {
-        Self {
-            inner: Some(backend::Handle::owned(backend::Backend::new())),
-            transport: quic_trace::Handle::disabled(),
-            session_id: None,
-            connection_id: None,
-        }
-    }
-
     /// Create a handle that never emits events.
     pub fn disabled() -> Self {
         Self::default()
@@ -85,65 +70,25 @@ impl Handle {
     pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> SocketTrace {
         self.transport.socket(direction, connection_id)
     }
-
-    #[cfg(test)]
-    fn events(&self) -> Vec<backend::Event> {
-        self.inner
-            .as_ref()
-            .map(|inner| inner.events())
-            .unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    fn enable_only(&self, tracepoint: backend::Tracepoint) {
-        if let Some(inner) = &self.inner {
-            inner.enable_only(tracepoint);
-        }
-    }
 }
 
 static GLOBAL: OnceLock<backend::Backend> = OnceLock::new();
 
 /// Return the process-global handle shared by MoQ and transport hooks.
+///
+/// The object and transport providers are separate LTTng providers, so this
+/// reaches each one through its own facade. Object events carry the same
+/// process-wide trace identifiers the transport facade allocates.
 pub fn global() -> Handle {
     let transport = quic_trace::global();
     let inner = backend::available()
-        .then(|| backend::Handle::shared(GLOBAL.get_or_init(backend::Backend::new)));
+        .then(|| backend::Handle::shared(GLOBAL.get_or_init(backend::Backend::native)));
     Handle {
         inner,
         transport,
         session_id: None,
         connection_id: None,
     }
-}
-
-/// Return the transport toolkit's process-relative monotonic timestamp in nanoseconds.
-pub fn now_ns() -> u64 {
-    #[cfg(test)]
-    CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
-    quic_trace::now_ns()
-}
-
-#[cfg(test)]
-thread_local! {
-    static CLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static SPAN_IDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn reset_bookkeeping_counts() {
-    CLOCK_READS.with(|reads| reads.set(0));
-    SPAN_IDS.with(|ids| ids.set(0));
-}
-
-#[cfg(test)]
-fn clock_reads() -> u64 {
-    CLOCK_READS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn span_ids() -> u64 {
-    SPAN_IDS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

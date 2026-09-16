@@ -21,6 +21,9 @@ in their MoQ and QUIC code.
 - Trace and span IDs are process-wide within the Rust facades. Analysis joins
   providers through object and transport metadata rather than assuming an ID
   from one provider is present in the other.
+- The Rust facades share identity allocation, the host clock, and the provider
+  seam through `trace-core`. Neither facade owns them, and neither may grow a
+  second copy.
 - One capture can hold several processes. Every event carries the `vpid` it came
   from, and the analysis publishes one process's slice, so process-local IDs from
   a relay and a peer can never be paired with each other.

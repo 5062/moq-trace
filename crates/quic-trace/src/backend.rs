@@ -1,284 +1,133 @@
-//! LTTng-UST adapter at the instrumentation seam.
+//! The `quic_trace:*` schema on the shared backend seam.
 
 use crate::{
     Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge, SocketOutcome, SocketStats,
     StreamFrame,
 };
+use trace_core::{
+    Backend as CoreBackend, Handle as CoreHandle, Schema, Tracepoint as CoreTracepoint,
+};
 
-#[derive(Clone)]
-pub(crate) enum Handle {
-    Shared(&'static Backend),
-    #[cfg(test)]
-    Owned(std::sync::Arc<Backend>),
-}
-
-impl Handle {
-    #[cfg(test)]
-    pub(crate) fn owned(inner: Backend) -> Self {
-        Self::Owned(std::sync::Arc::new(inner))
-    }
-
-    pub(crate) fn shared(inner: &'static Backend) -> Self {
-        Self::Shared(inner)
-    }
-}
-
-impl std::ops::Deref for Handle {
-    type Target = Backend;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Shared(inner) => inner,
-            #[cfg(test)]
-            Self::Owned(inner) => inner,
-        }
-    }
-}
-
-pub(crate) struct Backend {
-    #[cfg(test)]
-    events: std::sync::Mutex<Vec<Event>>,
-    #[cfg(test)]
-    enabled: std::sync::atomic::AtomicU16,
-}
-
-#[cfg(test)]
+/// The tracepoints the `quic_trace:*` schema exposes.
 #[derive(Clone, Copy)]
 pub(crate) enum Tracepoint {
+    /// A QUIC packet trace started.
     PacketStart,
+    /// A packet lifecycle phase started or completed.
     PacketPhase,
+    /// A STREAM frame was carried by a packet.
     StreamFrame,
+    /// A QUIC packet trace ended.
     PacketEnd,
+    /// A UDP socket operation started.
     SocketStart,
+    /// A UDP socket operation ended.
     SocketEnd,
 }
 
-#[cfg(test)]
-impl Tracepoint {
-    const fn mask(self) -> u16 {
-        1 << self as u16
+impl CoreTracepoint for Tracepoint {
+    fn index(self) -> u32 {
+        self as u32
     }
 }
 
-impl Backend {
-    pub(crate) fn new() -> Self {
-        #[cfg(not(test))]
-        platform::initialize();
-        Self {
-            #[cfg(test)]
-            events: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            enabled: std::sync::atomic::AtomicU16::new(u16::MAX),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enable_only(&self, tracepoint: Tracepoint) {
-        self.enabled
-            .store(tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_enabled(&self, tracepoint: Tracepoint, enabled: bool) {
-        if enabled {
-            self.enabled
-                .fetch_or(tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
-        } else {
-            self.enabled
-                .fetch_and(!tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    #[cfg(test)]
-    fn any_enabled(&self, tracepoints: &[Tracepoint]) -> bool {
-        let enabled = self.enabled.load(std::sync::atomic::Ordering::Relaxed);
-        tracepoints
-            .iter()
-            .any(|tracepoint| enabled & tracepoint.mask() != 0)
-    }
-
-    #[cfg(test)]
-    fn enabled(&self, tracepoint: Tracepoint) -> bool {
-        self.any_enabled(&[tracepoint])
-    }
-
-    pub(crate) fn packet_enabled(&self) -> bool {
-        #[cfg(test)]
-        return self.any_enabled(&[
-            Tracepoint::PacketStart,
-            Tracepoint::PacketPhase,
-            Tracepoint::StreamFrame,
-            Tracepoint::PacketEnd,
-        ]);
-        #[cfg(not(test))]
-        platform::packet_enabled()
-    }
-
-    pub(crate) fn socket_enabled(&self) -> bool {
-        #[cfg(test)]
-        return self.any_enabled(&[Tracepoint::SocketStart, Tracepoint::SocketEnd]);
-        #[cfg(not(test))]
-        platform::socket_enabled()
-    }
-
-    pub(crate) fn packet_phase_enabled(&self) -> bool {
-        #[cfg(test)]
-        return self.enabled(Tracepoint::PacketPhase);
-        #[cfg(not(test))]
-        platform::packet_phase_enabled()
-    }
-
-    pub(crate) fn stream_frame_enabled(&self) -> bool {
-        #[cfg(test)]
-        return self.enabled(Tracepoint::StreamFrame);
-        #[cfg(not(test))]
-        platform::stream_frame_enabled()
-    }
-
-    pub(crate) fn packet_start(&self, _timestamp_ns: u64, trace_id: u64, context: &PacketContext) {
-        #[cfg(test)]
-        self.record(Event::PacketStart {
-            trace_id,
-            connection_id: context.connection_id,
-            direction: context.direction,
-        });
-        #[cfg(not(test))]
-        platform::packet_start(_timestamp_ns, trace_id, context);
-    }
-
-    pub(crate) fn packet_end(
-        &self,
-        _timestamp_ns: u64,
+/// One event in the `quic_trace:*` schema.
+///
+/// The native provider translates an event into the provider call of the same
+/// name. A recording backend keeps the event as it was handed over, including
+/// the timestamp taken at the emission site, so a test observes the values the
+/// provider would have received.
+#[cfg_attr(not(all(feature = "lttng", target_os = "linux")), allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Event {
+    /// A packet trace started with the metadata known up front.
+    PacketStart {
+        timestamp_ns: u64,
         trace_id: u64,
-        context: &PacketContext,
+        context: PacketContext,
+    },
+    /// A packet trace ended with the metadata discovered during processing.
+    PacketEnd {
+        timestamp_ns: u64,
+        trace_id: u64,
+        context: PacketContext,
         outcome: PacketOutcome,
-    ) {
-        #[cfg(test)]
-        self.record(Event::PacketEnd {
-            trace_id,
-            packet_number: context.packet_number,
-            packet_space: context.packet_space,
-            byte_len: context.byte_len,
-            outcome,
-        });
-        #[cfg(not(test))]
-        platform::packet_end(_timestamp_ns, trace_id, context, outcome);
-    }
-
-    pub(crate) fn packet_phase(
-        &self,
-        _timestamp_ns: u64,
+    },
+    /// A packet phase started or completed.
+    PacketPhase {
+        timestamp_ns: u64,
         trace_id: u64,
         span_id: u64,
-        _phase: PacketPhase,
-        _edge: PhaseEdge,
-        _outcome: Option<PacketOutcome>,
-    ) {
-        #[cfg(test)]
-        self.record(Event::PacketPhase { trace_id, span_id });
-        #[cfg(not(test))]
-        platform::packet_phase(_timestamp_ns, trace_id, span_id, _phase, _edge, _outcome);
-    }
-
-    pub(crate) fn stream_frame(
-        &self,
-        _timestamp_ns: u64,
+        phase: PacketPhase,
+        edge: PhaseEdge,
+        outcome: Option<PacketOutcome>,
+    },
+    /// A STREAM frame carried by a packet.
+    StreamFrame {
+        timestamp_ns: u64,
         trace_id: u64,
-        _frame: StreamFrame,
-        _outcome: PacketOutcome,
-    ) {
-        #[cfg(test)]
-        self.record(Event::StreamFrame { trace_id });
-        #[cfg(not(test))]
-        platform::stream_frame(_timestamp_ns, trace_id, _frame, _outcome);
-    }
-
-    pub(crate) fn socket_start(
-        &self,
-        _timestamp_ns: u64,
+        frame: StreamFrame,
+        outcome: PacketOutcome,
+    },
+    /// A UDP socket operation started.
+    SocketStart {
+        timestamp_ns: u64,
         trace_id: u64,
-        _direction: Direction,
-        _connection_id: Option<u64>,
-    ) {
-        #[cfg(test)]
-        self.record(Event::SocketStart { trace_id });
-        #[cfg(not(test))]
-        platform::socket_start(_timestamp_ns, trace_id, _direction, _connection_id);
-    }
-
-    pub(crate) fn socket_end(
-        &self,
-        _timestamp_ns: u64,
+        direction: Direction,
+        connection_id: Option<u64>,
+    },
+    /// A UDP socket operation ended.
+    SocketEnd {
+        timestamp_ns: u64,
         trace_id: u64,
-        _outcome: SocketOutcome,
-        _stats: SocketStats,
-    ) {
-        #[cfg(test)]
-        self.record(Event::SocketEnd { trace_id });
-        #[cfg(not(test))]
-        platform::socket_end(_timestamp_ns, trace_id, _outcome, _stats);
+        outcome: SocketOutcome,
+        stats: SocketStats,
+    },
+}
+
+/// The `quic_trace:*` schema.
+pub(crate) enum TransportSchema {}
+
+impl Schema for TransportSchema {
+    type Tracepoint = Tracepoint;
+    type Event = Event;
+
+    fn initialize() {
+        platform::initialize();
     }
 
-    #[cfg(test)]
-    fn record(&self, event: Event) {
-        self.events.lock().unwrap().push(event);
+    fn enabled(tracepoint: Tracepoint) -> bool {
+        platform::enabled(tracepoint)
     }
 
-    #[cfg(test)]
-    pub(crate) fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
+    fn tracepoint(event: &Event) -> Tracepoint {
+        match event {
+            Event::PacketStart { .. } => Tracepoint::PacketStart,
+            Event::PacketEnd { .. } => Tracepoint::PacketEnd,
+            Event::PacketPhase { .. } => Tracepoint::PacketPhase,
+            Event::StreamFrame { .. } => Tracepoint::StreamFrame,
+            Event::SocketStart { .. } => Tracepoint::SocketStart,
+            Event::SocketEnd { .. } => Tracepoint::SocketEnd,
+        }
+    }
+
+    fn emit(event: Event) {
+        platform::emit(event);
     }
 }
 
+/// A cheap, cloneable reference to the process-global transport backend.
+pub(crate) type Handle = CoreHandle<TransportSchema>;
+
+/// The transport provider of one process.
+pub(crate) type Backend = CoreBackend<TransportSchema>;
+
+/// Return whether this build can emit transport events.
 pub(crate) const fn available() -> bool {
     cfg!(all(feature = "lttng", target_os = "linux"))
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Event {
-    PacketStart {
-        trace_id: u64,
-        connection_id: u64,
-        direction: Direction,
-    },
-    PacketEnd {
-        trace_id: u64,
-        packet_number: Option<u64>,
-        packet_space: Option<crate::PacketSpace>,
-        byte_len: Option<usize>,
-        outcome: PacketOutcome,
-    },
-    PacketPhase {
-        trace_id: u64,
-        span_id: u64,
-    },
-    StreamFrame {
-        trace_id: u64,
-    },
-    SocketStart {
-        trace_id: u64,
-    },
-    SocketEnd {
-        trace_id: u64,
-    },
-}
-
-#[cfg(test)]
-impl Event {
-    pub(crate) fn trace_id(&self) -> u64 {
-        match *self {
-            Self::PacketStart { trace_id, .. }
-            | Self::PacketEnd { trace_id, .. }
-            | Self::PacketPhase { trace_id, .. }
-            | Self::StreamFrame { trace_id }
-            | Self::SocketStart { trace_id }
-            | Self::SocketEnd { trace_id } => trace_id,
-        }
-    }
-}
-
-#[cfg(all(feature = "lttng", target_os = "linux", not(test)))]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 mod platform {
     use quic_trace_lttng_sys as ffi;
 
@@ -288,34 +137,63 @@ mod platform {
         unsafe { ffi::quic_trace_provider_init() };
     }
 
-    pub(super) fn packet_enabled() -> bool {
+    pub(super) fn enabled(tracepoint: Tracepoint) -> bool {
         unsafe {
-            ffi::quic_trace_quic_packet_start_enabled()
-                || ffi::quic_trace_quic_packet_phase_enabled()
-                || ffi::quic_trace_quic_stream_frame_enabled()
-                || ffi::quic_trace_quic_packet_end_enabled()
-        }
-    }
-
-    pub(super) fn socket_enabled() -> bool {
-        unsafe {
-            ffi::quic_trace_udp_socket_start_enabled() || ffi::quic_trace_udp_socket_end_enabled()
-        }
-    }
-
-    pub(super) fn packet_phase_enabled() -> bool {
-        unsafe { ffi::quic_trace_quic_packet_phase_enabled() }
-    }
-
-    pub(super) fn stream_frame_enabled() -> bool {
-        unsafe { ffi::quic_trace_quic_stream_frame_enabled() }
-    }
-
-    pub(super) fn packet_start(timestamp_ns: u64, trace_id: u64, context: &PacketContext) {
-        unsafe {
-            if !ffi::quic_trace_quic_packet_start_enabled() {
-                return;
+            match tracepoint {
+                Tracepoint::PacketStart => ffi::quic_trace_quic_packet_start_enabled(),
+                Tracepoint::PacketPhase => ffi::quic_trace_quic_packet_phase_enabled(),
+                Tracepoint::StreamFrame => ffi::quic_trace_quic_stream_frame_enabled(),
+                Tracepoint::PacketEnd => ffi::quic_trace_quic_packet_end_enabled(),
+                Tracepoint::SocketStart => ffi::quic_trace_udp_socket_start_enabled(),
+                Tracepoint::SocketEnd => ffi::quic_trace_udp_socket_end_enabled(),
             }
+        }
+    }
+
+    pub(super) fn emit(event: Event) {
+        match event {
+            Event::PacketStart {
+                timestamp_ns,
+                trace_id,
+                context,
+            } => packet_start(timestamp_ns, trace_id, &context),
+            Event::PacketEnd {
+                timestamp_ns,
+                trace_id,
+                context,
+                outcome,
+            } => packet_end(timestamp_ns, trace_id, &context, outcome),
+            Event::PacketPhase {
+                timestamp_ns,
+                trace_id,
+                span_id,
+                phase,
+                edge,
+                outcome,
+            } => packet_phase(timestamp_ns, trace_id, span_id, phase, edge, outcome),
+            Event::StreamFrame {
+                timestamp_ns,
+                trace_id,
+                frame,
+                outcome,
+            } => stream_frame(timestamp_ns, trace_id, frame, outcome),
+            Event::SocketStart {
+                timestamp_ns,
+                trace_id,
+                direction,
+                connection_id,
+            } => socket_start(timestamp_ns, trace_id, direction, connection_id),
+            Event::SocketEnd {
+                timestamp_ns,
+                trace_id,
+                outcome,
+                stats,
+            } => socket_end(timestamp_ns, trace_id, outcome, stats),
+        }
+    }
+
+    fn packet_start(timestamp_ns: u64, trace_id: u64, context: &PacketContext) {
+        unsafe {
             let (has_packet_number, packet_number) = optional(context.packet_number);
             let (has_packet_space, packet_space) =
                 optional_enum(context.packet_space, packet_space);
@@ -335,16 +213,13 @@ mod platform {
         }
     }
 
-    pub(super) fn packet_end(
+    fn packet_end(
         timestamp_ns: u64,
         trace_id: u64,
         context: &PacketContext,
         outcome: PacketOutcome,
     ) {
         unsafe {
-            if !ffi::quic_trace_quic_packet_end_enabled() {
-                return;
-            }
             let (has_packet_number, packet_number) = optional(context.packet_number);
             let (has_packet_space, packet_space) =
                 optional_enum(context.packet_space, packet_space);
@@ -363,7 +238,7 @@ mod platform {
         }
     }
 
-    pub(super) fn packet_phase(
+    fn packet_phase(
         timestamp_ns: u64,
         trace_id: u64,
         span_id: u64,
@@ -372,9 +247,6 @@ mod platform {
         outcome: Option<PacketOutcome>,
     ) {
         unsafe {
-            if !ffi::quic_trace_quic_packet_phase_enabled() {
-                return;
-            }
             let (has_outcome, outcome) = optional_enum(outcome, packet_outcome);
             ffi::quic_trace_quic_packet_phase(&ffi::quic_trace_quic_packet_phase {
                 timestamp_ns,
@@ -388,36 +260,26 @@ mod platform {
         }
     }
 
-    pub(super) fn stream_frame(
-        timestamp_ns: u64,
-        trace_id: u64,
-        frame: StreamFrame,
-        outcome: PacketOutcome,
-    ) {
+    fn stream_frame(timestamp_ns: u64, trace_id: u64, frame: StreamFrame, outcome: PacketOutcome) {
         unsafe {
-            if ffi::quic_trace_quic_stream_frame_enabled() {
-                ffi::quic_trace_quic_stream_frame(&ffi::quic_trace_quic_stream_frame {
-                    timestamp_ns,
-                    trace_id,
-                    stream_id: frame.stream_id,
-                    offset_start: frame.offset_start,
-                    offset_end: frame.offset_end,
-                    outcome: packet_outcome(outcome),
-                });
-            }
+            ffi::quic_trace_quic_stream_frame(&ffi::quic_trace_quic_stream_frame {
+                timestamp_ns,
+                trace_id,
+                stream_id: frame.stream_id,
+                offset_start: frame.offset_start,
+                offset_end: frame.offset_end,
+                outcome: packet_outcome(outcome),
+            });
         }
     }
 
-    pub(super) fn socket_start(
+    fn socket_start(
         timestamp_ns: u64,
         trace_id: u64,
         direction_value: Direction,
         connection_id: Option<u64>,
     ) {
         unsafe {
-            if !ffi::quic_trace_udp_socket_start_enabled() {
-                return;
-            }
             let (has_connection_id, connection_id) = optional(connection_id);
             ffi::quic_trace_udp_socket_start(&ffi::quic_trace_udp_socket_start {
                 timestamp_ns,
@@ -429,23 +291,16 @@ mod platform {
         }
     }
 
-    pub(super) fn socket_end(
-        timestamp_ns: u64,
-        trace_id: u64,
-        outcome: SocketOutcome,
-        stats: SocketStats,
-    ) {
+    fn socket_end(timestamp_ns: u64, trace_id: u64, outcome: SocketOutcome, stats: SocketStats) {
         unsafe {
-            if ffi::quic_trace_udp_socket_end_enabled() {
-                ffi::quic_trace_udp_socket_end(&ffi::quic_trace_udp_socket_end {
-                    timestamp_ns,
-                    trace_id,
-                    outcome: socket_outcome(outcome),
-                    buffers: to_u64(stats.buffers),
-                    datagrams: to_u64(stats.datagrams),
-                    bytes: to_u64(stats.bytes),
-                });
-            }
+            ffi::quic_trace_udp_socket_end(&ffi::quic_trace_udp_socket_end {
+                timestamp_ns,
+                trace_id,
+                outcome: socket_outcome(outcome),
+                buffers: to_u64(stats.buffers),
+                datagrams: to_u64(stats.datagrams),
+                bytes: to_u64(stats.bytes),
+            });
         }
     }
 
@@ -565,35 +420,15 @@ mod platform {
     }
 }
 
-#[cfg(all(not(all(feature = "lttng", target_os = "linux")), not(test)))]
+#[cfg(not(all(feature = "lttng", target_os = "linux")))]
 mod platform {
     use super::*;
 
     pub(super) fn initialize() {}
-    pub(super) fn packet_enabled() -> bool {
+
+    pub(super) fn enabled(_: Tracepoint) -> bool {
         false
     }
-    pub(super) fn socket_enabled() -> bool {
-        false
-    }
-    pub(super) fn packet_phase_enabled() -> bool {
-        false
-    }
-    pub(super) fn stream_frame_enabled() -> bool {
-        false
-    }
-    pub(super) fn packet_start(_: u64, _: u64, _: &PacketContext) {}
-    pub(super) fn packet_end(_: u64, _: u64, _: &PacketContext, _: PacketOutcome) {}
-    pub(super) fn packet_phase(
-        _: u64,
-        _: u64,
-        _: u64,
-        _: PacketPhase,
-        _: PhaseEdge,
-        _: Option<PacketOutcome>,
-    ) {
-    }
-    pub(super) fn stream_frame(_: u64, _: u64, _: StreamFrame, _: PacketOutcome) {}
-    pub(super) fn socket_start(_: u64, _: u64, _: Direction, _: Option<u64>) {}
-    pub(super) fn socket_end(_: u64, _: u64, _: SocketOutcome, _: SocketStats) {}
+
+    pub(super) fn emit(_: Event) {}
 }

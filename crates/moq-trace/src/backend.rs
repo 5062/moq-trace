@@ -1,200 +1,103 @@
-//! LTTng-UST adapter for MoQ object events.
+//! The `moq_trace:*` schema on the shared backend seam.
 
 use crate::{ObjectContext, ObjectOutcome, ObjectPhase, PhaseEdge};
+use trace_core::{
+    Backend as CoreBackend, Handle as CoreHandle, Schema, Tracepoint as CoreTracepoint,
+};
 
-#[derive(Clone)]
-pub(crate) enum Handle {
-    Shared(&'static Backend),
-    #[cfg(test)]
-    Owned(std::sync::Arc<Backend>),
-}
-
-impl Handle {
-    #[cfg(test)]
-    pub(crate) fn owned(inner: Backend) -> Self {
-        Self::Owned(std::sync::Arc::new(inner))
-    }
-
-    pub(crate) fn shared(inner: &'static Backend) -> Self {
-        Self::Shared(inner)
-    }
-}
-
-impl std::ops::Deref for Handle {
-    type Target = Backend;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Shared(inner) => inner,
-            #[cfg(test)]
-            Self::Owned(inner) => inner,
-        }
-    }
-}
-
-pub(crate) struct Backend {
-    #[cfg(test)]
-    events: std::sync::Mutex<Vec<Event>>,
-    #[cfg(test)]
-    enabled: std::sync::atomic::AtomicU8,
-}
-
-#[cfg(test)]
+/// The tracepoints the `moq_trace:*` schema exposes.
 #[derive(Clone, Copy)]
 pub(crate) enum Tracepoint {
+    /// A moq-transport object trace started.
     Start,
+    /// An object lifecycle phase started or completed.
     Phase,
+    /// A moq-transport object trace ended.
     End,
 }
 
-#[cfg(test)]
-impl Tracepoint {
-    const fn mask(self) -> u8 {
-        1 << self as u8
+impl CoreTracepoint for Tracepoint {
+    fn index(self) -> u32 {
+        self as u32
     }
 }
 
-impl Backend {
-    pub(crate) fn new() -> Self {
-        #[cfg(not(test))]
-        platform::initialize();
-        Self {
-            #[cfg(test)]
-            events: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            enabled: std::sync::atomic::AtomicU8::new(u8::MAX),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enable_only(&self, tracepoint: Tracepoint) {
-        self.enabled
-            .store(tracepoint.mask(), std::sync::atomic::Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    fn enabled(&self, tracepoint: Tracepoint) -> bool {
-        self.enabled.load(std::sync::atomic::Ordering::Relaxed) & tracepoint.mask() != 0
-    }
-
-    pub(crate) fn object_enabled(&self) -> bool {
-        #[cfg(test)]
-        return self.enabled(Tracepoint::Start)
-            || self.enabled(Tracepoint::Phase)
-            || self.enabled(Tracepoint::End);
-        #[cfg(not(test))]
-        platform::object_enabled()
-    }
-
-    pub(crate) fn object_phase_enabled(&self) -> bool {
-        #[cfg(test)]
-        return self.enabled(Tracepoint::Phase);
-        #[cfg(not(test))]
-        platform::object_phase_enabled()
-    }
-
-    pub(crate) fn object_start(
-        &self,
-        _timestamp_ns: u64,
+/// One event in the `moq_trace:*` schema.
+///
+/// The native provider translates an event into the provider call of the same
+/// name. A recording backend keeps the event as it was handed over, including
+/// the timestamp taken at the emission site, so a test observes the values the
+/// provider would have received.
+#[cfg_attr(not(all(feature = "lttng", target_os = "linux")), allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Event {
+    /// An object trace started, carrying the session and connection it belongs to.
+    Start {
+        timestamp_ns: u64,
         trace_id: u64,
-        _handle: &crate::Handle,
-        context: &ObjectContext,
-    ) {
-        #[cfg(test)]
-        self.record(Event::Start {
-            trace_id,
-            logical_id: context.logical_id,
-        });
-        #[cfg(not(test))]
-        platform::object_start(_timestamp_ns, trace_id, _handle, context);
-    }
-
-    pub(crate) fn object_end(
-        &self,
-        _timestamp_ns: u64,
+        session_id: Option<u64>,
+        connection_id: Option<u64>,
+        context: ObjectContext,
+    },
+    /// An object trace ended with the final payload and stream metadata.
+    End {
+        timestamp_ns: u64,
         trace_id: u64,
         stream_offset_end: Option<u64>,
         payload_bytes: u64,
         outcome: ObjectOutcome,
-    ) {
-        #[cfg(test)]
-        self.record(Event::End {
-            trace_id,
-            stream_offset_end,
-            payload_bytes,
-            outcome,
-        });
-        #[cfg(not(test))]
-        platform::object_end(
-            _timestamp_ns,
-            trace_id,
-            stream_offset_end,
-            payload_bytes,
-            outcome,
-        );
-    }
-
-    pub(crate) fn object_phase(
-        &self,
-        _timestamp_ns: u64,
+    },
+    /// An object phase started or completed.
+    Phase {
+        timestamp_ns: u64,
         trace_id: u64,
         span_id: u64,
-        _phase: ObjectPhase,
-        _edge: PhaseEdge,
-        _outcome: Option<ObjectOutcome>,
-    ) {
-        #[cfg(test)]
-        self.record(Event::Phase { trace_id, span_id });
-        #[cfg(not(test))]
-        platform::object_phase(_timestamp_ns, trace_id, span_id, _phase, _edge, _outcome);
+        phase: ObjectPhase,
+        edge: PhaseEdge,
+        outcome: Option<ObjectOutcome>,
+    },
+}
+
+/// The `moq_trace:*` schema.
+pub(crate) enum ObjectSchema {}
+
+impl Schema for ObjectSchema {
+    type Tracepoint = Tracepoint;
+    type Event = Event;
+
+    fn initialize() {
+        platform::initialize();
     }
 
-    #[cfg(test)]
-    fn record(&self, event: Event) {
-        self.events.lock().unwrap().push(event);
+    fn enabled(tracepoint: Tracepoint) -> bool {
+        platform::enabled(tracepoint)
     }
 
-    #[cfg(test)]
-    pub(crate) fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
+    fn tracepoint(event: &Event) -> Tracepoint {
+        match event {
+            Event::Start { .. } => Tracepoint::Start,
+            Event::End { .. } => Tracepoint::End,
+            Event::Phase { .. } => Tracepoint::Phase,
+        }
+    }
+
+    fn emit(event: Event) {
+        platform::emit(event);
     }
 }
 
+/// A cheap, cloneable reference to the process-global object backend.
+pub(crate) type Handle = CoreHandle<ObjectSchema>;
+
+/// The object provider of one process.
+pub(crate) type Backend = CoreBackend<ObjectSchema>;
+
+/// Return whether this build can emit object events.
 pub(crate) const fn available() -> bool {
     cfg!(all(feature = "lttng", target_os = "linux"))
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Event {
-    Start {
-        trace_id: u64,
-        logical_id: crate::LogicalId,
-    },
-    End {
-        trace_id: u64,
-        stream_offset_end: Option<u64>,
-        payload_bytes: u64,
-        outcome: ObjectOutcome,
-    },
-    Phase {
-        trace_id: u64,
-        span_id: u64,
-    },
-}
-
-#[cfg(test)]
-impl Event {
-    pub(crate) fn trace_id(&self) -> u64 {
-        match *self {
-            Self::Start { trace_id, .. }
-            | Self::End { trace_id, .. }
-            | Self::Phase { trace_id, .. } => trace_id,
-        }
-    }
-}
-
-#[cfg(all(feature = "lttng", target_os = "linux", not(test)))]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
 mod platform {
     use moq_trace_lttng_sys as ffi;
 
@@ -204,30 +107,59 @@ mod platform {
         unsafe { ffi::moq_trace_provider_init() };
     }
 
-    pub(super) fn object_enabled() -> bool {
+    pub(super) fn enabled(tracepoint: Tracepoint) -> bool {
         unsafe {
-            ffi::moq_trace_moq_object_start_enabled()
-                || ffi::moq_trace_moq_object_phase_enabled()
-                || ffi::moq_trace_moq_object_end_enabled()
+            match tracepoint {
+                Tracepoint::Start => ffi::moq_trace_moq_object_start_enabled(),
+                Tracepoint::Phase => ffi::moq_trace_moq_object_phase_enabled(),
+                Tracepoint::End => ffi::moq_trace_moq_object_end_enabled(),
+            }
         }
     }
 
-    pub(super) fn object_phase_enabled() -> bool {
-        unsafe { ffi::moq_trace_moq_object_phase_enabled() }
+    pub(super) fn emit(event: Event) {
+        match event {
+            Event::Start {
+                timestamp_ns,
+                trace_id,
+                session_id,
+                connection_id,
+                context,
+            } => object_start(timestamp_ns, trace_id, session_id, connection_id, &context),
+            Event::End {
+                timestamp_ns,
+                trace_id,
+                stream_offset_end,
+                payload_bytes,
+                outcome,
+            } => object_end(
+                timestamp_ns,
+                trace_id,
+                stream_offset_end,
+                payload_bytes,
+                outcome,
+            ),
+            Event::Phase {
+                timestamp_ns,
+                trace_id,
+                span_id,
+                phase,
+                edge,
+                outcome,
+            } => object_phase(timestamp_ns, trace_id, span_id, phase, edge, outcome),
+        }
     }
 
-    pub(super) fn object_start(
+    fn object_start(
         timestamp_ns: u64,
         trace_id: u64,
-        handle: &crate::Handle,
+        session_id: Option<u64>,
+        connection_id: Option<u64>,
         context: &ObjectContext,
     ) {
         unsafe {
-            if !ffi::moq_trace_moq_object_start_enabled() {
-                return;
-            }
-            let (has_session_id, session_id) = optional(handle.session_id);
-            let (has_connection_id, connection_id) = optional(handle.connection_id);
+            let (has_session_id, session_id) = optional(session_id);
+            let (has_connection_id, connection_id) = optional(connection_id);
             let (has_stream_id, stream_id) = optional(context.stream_id);
             let (has_stream_offset_start, stream_offset_start) =
                 optional(context.stream_offset_start);
@@ -252,7 +184,7 @@ mod platform {
         }
     }
 
-    pub(super) fn object_end(
+    fn object_end(
         timestamp_ns: u64,
         trace_id: u64,
         stream_offset_end: Option<u64>,
@@ -260,9 +192,6 @@ mod platform {
         outcome: ObjectOutcome,
     ) {
         unsafe {
-            if !ffi::moq_trace_moq_object_end_enabled() {
-                return;
-            }
             let (has_stream_offset_end, stream_offset_end) = optional(stream_offset_end);
             ffi::moq_trace_moq_object_end(&ffi::moq_trace_moq_object_end {
                 timestamp_ns,
@@ -275,7 +204,7 @@ mod platform {
         }
     }
 
-    pub(super) fn object_phase(
+    fn object_phase(
         timestamp_ns: u64,
         trace_id: u64,
         span_id: u64,
@@ -284,9 +213,6 @@ mod platform {
         outcome: Option<ObjectOutcome>,
     ) {
         unsafe {
-            if !ffi::moq_trace_moq_object_phase_enabled() {
-                return;
-            }
             let (has_outcome, outcome) = optional_enum(outcome, object_outcome);
             ffi::moq_trace_moq_object_phase(&ffi::moq_trace_moq_object_phase {
                 timestamp_ns,
@@ -359,26 +285,15 @@ mod platform {
     }
 }
 
-#[cfg(all(not(all(feature = "lttng", target_os = "linux")), not(test)))]
+#[cfg(not(all(feature = "lttng", target_os = "linux")))]
 mod platform {
     use super::*;
 
     pub(super) fn initialize() {}
-    pub(super) fn object_enabled() -> bool {
+
+    pub(super) fn enabled(_: Tracepoint) -> bool {
         false
     }
-    pub(super) fn object_phase_enabled() -> bool {
-        false
-    }
-    pub(super) fn object_start(_: u64, _: u64, _: &crate::Handle, _: &ObjectContext) {}
-    pub(super) fn object_end(_: u64, _: u64, _: Option<u64>, _: u64, _: ObjectOutcome) {}
-    pub(super) fn object_phase(
-        _: u64,
-        _: u64,
-        _: u64,
-        _: ObjectPhase,
-        _: PhaseEdge,
-        _: Option<ObjectOutcome>,
-    ) {
-    }
+
+    pub(super) fn emit(_: Event) {}
 }

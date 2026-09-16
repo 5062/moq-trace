@@ -1,4 +1,5 @@
-use crate::{Direction, Handle, now_ns};
+use crate::backend::{Event, Tracepoint};
+use crate::{Direction, Handle};
 
 /// Result of one UDP socket operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +41,9 @@ impl SocketStats {
     }
 }
 
+/// The tracepoints a socket trace token covers.
+const SOCKET_TRACEPOINTS: [Tracepoint; 2] = [Tracepoint::SocketStart, Tracepoint::SocketEnd];
+
 /// A UDP socket operation whose completion consumes the token.
 pub struct SocketTrace {
     state: Option<SocketTraceState>,
@@ -56,11 +60,16 @@ impl Handle {
         let Some(inner) = self.inner.as_ref() else {
             return SocketTrace::disabled();
         };
-        if !inner.socket_enabled() {
+        if !inner.any_enabled(&SOCKET_TRACEPOINTS) {
             return SocketTrace::disabled();
         }
-        let trace_id = crate::next_trace_id();
-        inner.socket_start(now_ns(), trace_id, direction, connection_id);
+        let trace_id = inner.next_trace_id();
+        inner.emit(Event::SocketStart {
+            timestamp_ns: inner.now_ns(),
+            trace_id,
+            direction,
+            connection_id,
+        });
         SocketTrace {
             state: Some(SocketTraceState {
                 backend: inner.clone(),
@@ -85,8 +94,13 @@ impl SocketTrace {
 
 impl SocketTraceState {
     fn emit_end(self, outcome: SocketOutcome, stats: SocketStats) {
-        self.backend
-            .socket_end(now_ns(), self.trace_id, outcome, stats);
+        let Self { backend, trace_id } = self;
+        backend.emit(Event::SocketEnd {
+            timestamp_ns: backend.now_ns(),
+            trace_id,
+            outcome,
+            stats,
+        });
     }
 }
 

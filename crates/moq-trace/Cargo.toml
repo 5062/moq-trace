@@ -14,3 +14,4 @@ lttng = ["dep:moq-trace-lttng-sys", "quic-trace/lttng"]
 [dependencies]
 moq-trace-lttng-sys = { workspace = true, optional = true }
 quic-trace.workspace = true
+trace-core.workspace = true

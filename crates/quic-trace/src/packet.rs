@@ -1,4 +1,5 @@
-use crate::{Direction, Handle, PacketSpace, now_ns};
+use crate::backend::{Event, Tracepoint};
+use crate::{Direction, Handle, PacketSpace};
 
 /// Result of packet or packet-phase processing.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -46,7 +47,7 @@ pub(crate) enum PhaseEdge {
 }
 
 /// Metadata known when a packet trace begins.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(not(all(feature = "lttng", target_os = "linux")), allow(dead_code))]
 pub struct PacketContext {
     pub(crate) connection_id: u64,
@@ -136,17 +137,30 @@ struct PacketPhaseTraceState {
     phase: PacketPhase,
 }
 
+/// The tracepoints a packet trace token covers.
+const PACKET_TRACEPOINTS: [Tracepoint; 4] = [
+    Tracepoint::PacketStart,
+    Tracepoint::PacketPhase,
+    Tracepoint::StreamFrame,
+    Tracepoint::PacketEnd,
+];
+
 impl Handle {
     /// Start a QUIC packet trace.
     pub fn packet(&self, context: PacketContext) -> PacketTrace {
         let Some(inner) = self.inner.as_ref() else {
             return PacketTrace::disabled();
         };
-        if !inner.packet_enabled() {
+        if !inner.any_enabled(&PACKET_TRACEPOINTS) {
             return PacketTrace::disabled();
         }
-        let trace_id = crate::next_trace_id();
-        inner.packet_start(context.start_ns.unwrap_or_else(now_ns), trace_id, &context);
+        let trace_id = inner.next_trace_id();
+        let timestamp_ns = context.start_ns.unwrap_or_else(|| inner.now_ns());
+        inner.emit(Event::PacketStart {
+            timestamp_ns,
+            trace_id,
+            context: context.clone(),
+        });
         PacketTrace(Some(PacketTraceState {
             backend: inner.clone(),
             trace_id,
@@ -187,10 +201,10 @@ impl PacketTrace {
         let Some(state) = &self.0 else {
             return PacketPhaseTrace::disabled();
         };
-        if !state.backend.packet_phase_enabled() {
+        if !state.backend.enabled(Tracepoint::PacketPhase) {
             return PacketPhaseTrace::disabled();
         }
-        Self::start_phase_at(state, phase, now_ns())
+        Self::start_phase_at(state, phase, state.backend.now_ns())
     }
 
     /// Start a measured packet phase at a previously captured timestamp.
@@ -198,7 +212,7 @@ impl PacketTrace {
         let Some(state) = &self.0 else {
             return PacketPhaseTrace::disabled();
         };
-        if !state.backend.packet_phase_enabled() {
+        if !state.backend.enabled(Tracepoint::PacketPhase) {
             return PacketPhaseTrace::disabled();
         }
         Self::start_phase_at(state, phase, timestamp_ns)
@@ -209,15 +223,15 @@ impl PacketTrace {
         phase: PacketPhase,
         timestamp_ns: u64,
     ) -> PacketPhaseTrace {
-        let span_id = crate::next_span_id();
-        state.backend.packet_phase(
+        let span_id = state.backend.next_span_id();
+        state.backend.emit(Event::PacketPhase {
             timestamp_ns,
-            state.trace_id,
+            trace_id: state.trace_id,
             span_id,
             phase,
-            PhaseEdge::Start,
-            None,
-        );
+            edge: PhaseEdge::Start,
+            outcome: None,
+        });
         PacketPhaseTrace(Some(PacketPhaseTraceState {
             backend: state.backend.clone(),
             trace_id: state.trace_id,
@@ -232,12 +246,15 @@ impl PacketTrace {
         let Some(state) = &self.0 else {
             return;
         };
-        if !state.backend.stream_frame_enabled() {
+        if !state.backend.enabled(Tracepoint::StreamFrame) {
             return;
         }
-        state
-            .backend
-            .stream_frame(now_ns(), state.trace_id, frame, outcome);
+        state.backend.emit(Event::StreamFrame {
+            timestamp_ns: state.backend.now_ns(),
+            trace_id: state.trace_id,
+            frame,
+            outcome,
+        });
     }
 
     /// Finish the packet with an explicit result.
@@ -250,8 +267,17 @@ impl PacketTrace {
 
 impl PacketTraceState {
     fn emit_end(self, outcome: PacketOutcome) {
-        self.backend
-            .packet_end(now_ns(), self.trace_id, &self.context, outcome);
+        let Self {
+            backend,
+            trace_id,
+            context,
+        } = self;
+        backend.emit(Event::PacketEnd {
+            timestamp_ns: backend.now_ns(),
+            trace_id,
+            context,
+            outcome,
+        });
     }
 }
 
@@ -285,19 +311,20 @@ impl PacketPhaseTrace {
 
 impl PacketPhaseTraceState {
     fn emit_done(self, outcome: PacketOutcome) {
-        self.emit_done_at(outcome, now_ns());
+        let timestamp_ns = self.backend.now_ns();
+        self.emit_done_at(outcome, timestamp_ns);
     }
 
     fn emit_done_at(self, outcome: PacketOutcome, timestamp_ns: u64) {
         debug_assert!(timestamp_ns >= self.start_ns);
-        self.backend.packet_phase(
+        self.backend.emit(Event::PacketPhase {
             timestamp_ns,
-            self.trace_id,
-            self.span_id,
-            self.phase,
-            PhaseEdge::Done,
-            Some(outcome),
-        );
+            trace_id: self.trace_id,
+            span_id: self.span_id,
+            phase: self.phase,
+            edge: PhaseEdge::Done,
+            outcome: Some(outcome),
+        });
     }
 }
 

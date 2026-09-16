@@ -116,6 +116,7 @@ version = "0.1.0"
 dependencies = [
  "moq-trace-lttng-sys",
  "quic-trace",
+ "trace-core",
 ]
 
 [[package]]
@@ -156,8 +157,8 @@ dependencies = [
 name = "quic-trace"
 version = "0.1.0"
 dependencies = [
- "libc",
  "quic-trace-lttng-sys",
+ "trace-core",
 ]
 
 [[package]]
@@ -228,6 +229,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "trace-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -17,6 +17,8 @@ boundaries being measured.
 - `crates/quic-trace` provides implementation-independent Rust transport
   instrumentation.
 - `crates/quic-trace-lttng-sys` owns the `quic_trace:*` transport provider.
+- `crates/trace-core` owns the process-wide identity counters, the host clock,
+  and the provider seam that both Rust facades share.
 - `include` provides equivalent C++17 scoped APIs.
 - `python` captures relay workloads and builds combined DuckDB artifacts.
 - `moq-bench` provides implementation-independent MoQ client and server peers used
@@ -35,10 +37,11 @@ The transport provider emits:
 
 Lifecycle and phase tokens record `abandoned` when destroyed without an
 explicit terminal outcome. Stream ranges use `[offset_start, offset_end)`.
-Rust facades allocate trace and span IDs from process-wide counters shared by
-the MoQ and QUIC crates. Scope IDs by the captured process when combining
-traces from multiple hosts or processes. Event timestamps use
-`CLOCK_MONOTONIC` on Unix so Rust and C++ hooks share one clock epoch.
+Rust facades allocate trace and span IDs from the process-wide counters in
+`trace-core`, so a MoQ object and the QUIC packets carrying it come from one
+identifier space. Scope IDs by the captured process when combining traces from
+multiple hosts or processes. Event timestamps use `CLOCK_MONOTONIC` on Unix so
+Rust and C++ hooks share one clock epoch.
 
 ## Rust instrumentation
 

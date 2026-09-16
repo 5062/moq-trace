@@ -1412,6 +1412,7 @@ version = "0.1.0"
 dependencies = [
  "moq-trace-lttng-sys",
  "quic-trace",
+ "trace-core",
 ]
 
 [[package]]
@@ -1745,8 +1746,8 @@ dependencies = [
 name = "quic-trace"
 version = "0.1.0"
 dependencies = [
- "libc",
  "quic-trace-lttng-sys",
+ "trace-core",
 ]
 
 [[package]]
@@ -2583,6 +2584,13 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "trace-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "tracing"

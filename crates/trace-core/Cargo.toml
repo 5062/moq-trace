@@ -1,0 +1,10 @@
+[package]
+name = "trace-core"
+description = "Identity, clock, and provider plumbing shared by the MoQ and QUIC facades."
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+libc.workspace = true

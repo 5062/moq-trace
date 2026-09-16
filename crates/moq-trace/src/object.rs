@@ -1,4 +1,5 @@
-use crate::{Direction, Handle, PhaseEdge, now_ns};
+use crate::backend::{Event, Tracepoint};
+use crate::{Direction, Handle, PhaseEdge};
 
 /// Identity shared by ingress and every outbound copy of one logical object.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -136,11 +137,19 @@ struct ObjectTraceState {
 }
 
 /// A scoped object phase whose completion consumes the token.
+///
+/// The phase borrows its object because the object holds the payload size and
+/// stream offset the phase reports. A packet phase has no equivalent metadata to
+/// update, so that token owns its backend handle instead. The difference is the
+/// metadata, not the backend.
 #[must_use = "dropping an object phase records an abandoned phase"]
 pub struct ObjectPhaseTrace<'a> {
     object: &'a mut ObjectTrace,
     state: Option<(u64, ObjectPhase)>,
 }
+
+/// The tracepoints an object trace token covers.
+const OBJECT_TRACEPOINTS: [Tracepoint; 3] = [Tracepoint::Start, Tracepoint::Phase, Tracepoint::End];
 
 impl ObjectTrace {
     /// Return a disabled object trace token.
@@ -165,11 +174,11 @@ impl ObjectTrace {
     /// Start a measured object lifecycle phase.
     pub fn phase(&mut self, phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
         let state = self.0.as_ref().and_then(|state| {
-            if !state.backend.object_phase_enabled() {
+            if !state.backend.enabled(Tracepoint::Phase) {
                 return None;
             }
-            let span_id = crate::next_span_id();
-            self.emit_phase(span_id, phase, PhaseEdge::Start, None);
+            let span_id = state.backend.next_span_id();
+            state.emit_phase(span_id, phase, PhaseEdge::Start, None);
             Some((span_id, phase))
         });
         ObjectPhaseTrace {
@@ -188,9 +197,7 @@ impl ObjectTrace {
         let Some(state) = &self.0 else {
             return;
         };
-        state
-            .backend
-            .object_phase(now_ns(), state.trace_id, span_id, phase, edge, outcome);
+        state.emit_phase(span_id, phase, edge, outcome);
     }
 
     /// Finish the object interval with the latest metadata and result.
@@ -203,14 +210,37 @@ impl ObjectTrace {
 }
 
 impl ObjectTraceState {
-    fn emit_end(self, outcome: ObjectOutcome) {
-        self.backend.object_end(
-            now_ns(),
-            self.trace_id,
-            self.stream_offset_end,
-            self.payload_bytes,
+    fn emit_phase(
+        &self,
+        span_id: u64,
+        phase: ObjectPhase,
+        edge: PhaseEdge,
+        outcome: Option<ObjectOutcome>,
+    ) {
+        self.backend.emit(Event::Phase {
+            timestamp_ns: self.backend.now_ns(),
+            trace_id: self.trace_id,
+            span_id,
+            phase,
+            edge,
             outcome,
-        );
+        });
+    }
+
+    fn emit_end(self, outcome: ObjectOutcome) {
+        let Self {
+            backend,
+            trace_id,
+            payload_bytes,
+            stream_offset_end,
+        } = self;
+        backend.emit(Event::End {
+            timestamp_ns: backend.now_ns(),
+            trace_id,
+            stream_offset_end,
+            payload_bytes,
+            outcome,
+        });
     }
 }
 
@@ -261,11 +291,17 @@ impl Handle {
         let Some(inner) = self.inner.as_ref() else {
             return ObjectTrace::disabled();
         };
-        if !inner.object_enabled() {
+        if !inner.any_enabled(&OBJECT_TRACEPOINTS) {
             return ObjectTrace::disabled();
         }
-        let trace_id = quic_trace::next_trace_id();
-        inner.object_start(now_ns(), trace_id, self, &context);
+        let trace_id = inner.next_trace_id();
+        inner.emit(Event::Start {
+            timestamp_ns: inner.now_ns(),
+            trace_id,
+            session_id: self.session_id,
+            connection_id: self.connection_id,
+            context: context.clone(),
+        });
         ObjectTrace(Some(ObjectTraceState {
             backend: inner.clone(),
             trace_id,

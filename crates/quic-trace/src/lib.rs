@@ -4,7 +4,8 @@
 compile_error!("the lttng feature is supported only on Linux");
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+pub use trace_core::{next_span_id, next_trace_id, now_ns};
 
 mod backend;
 
@@ -45,54 +46,10 @@ pub struct Handle {
     inner: Option<backend::Handle>,
 }
 
-static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Allocate a process-wide trace identifier shared by the MoQ and QUIC facades.
-pub fn next_trace_id() -> u64 {
-    NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Allocate a process-wide phase span identifier shared by the MoQ and QUIC facades.
-pub fn next_span_id() -> u64 {
-    #[cfg(test)]
-    SPAN_IDS.with(|ids| ids.set(ids.get() + 1));
-    NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
-}
-
 impl Handle {
-    #[cfg(test)]
-    fn new() -> Self {
-        Self {
-            inner: Some(backend::Handle::owned(backend::Backend::new())),
-        }
-    }
-
     /// Create a handle that never emits events.
     pub fn disabled() -> Self {
         Self::default()
-    }
-
-    #[cfg(test)]
-    fn events(&self) -> Vec<backend::Event> {
-        self.inner
-            .as_ref()
-            .map(|inner| inner.events())
-            .unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    fn enable_only(&self, tracepoint: backend::Tracepoint) {
-        if let Some(inner) = &self.inner {
-            inner.enable_only(tracepoint);
-        }
-    }
-
-    #[cfg(test)]
-    fn set_enabled(&self, tracepoint: backend::Tracepoint, enabled: bool) {
-        if let Some(inner) = &self.inner {
-            inner.set_enabled(tracepoint, enabled);
-        }
     }
 }
 
@@ -105,59 +62,9 @@ pub fn global() -> Handle {
     }
     Handle {
         inner: Some(backend::Handle::shared(
-            GLOBAL.get_or_init(backend::Backend::new),
+            GLOBAL.get_or_init(backend::Backend::native),
         )),
     }
-}
-
-/// Return a monotonic timestamp in nanoseconds from the host clock.
-pub fn now_ns() -> u64 {
-    #[cfg(test)]
-    CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
-    #[cfg(unix)]
-    {
-        let mut value = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // CLOCK_MONOTONIC is shared with the C++ facade, so events emitted by
-        // Rust and C++ code in one relay use the same timestamp epoch.
-        let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
-        if result == 0 {
-            let seconds = u64::try_from(value.tv_sec).unwrap_or(0);
-            let nanos = u64::try_from(value.tv_nsec).unwrap_or(0);
-            return seconds.saturating_mul(1_000_000_000).saturating_add(nanos);
-        }
-    }
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_nanos()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-#[cfg(test)]
-thread_local! {
-    static CLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static SPAN_IDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn reset_bookkeeping_counts() {
-    CLOCK_READS.with(|reads| reads.set(0));
-    SPAN_IDS.with(|ids| ids.set(0));
-}
-
-#[cfg(test)]
-fn clock_reads() -> u64 {
-    CLOCK_READS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn span_ids() -> u64 {
-    SPAN_IDS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
