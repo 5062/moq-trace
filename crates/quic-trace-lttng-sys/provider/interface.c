@@ -22,15 +22,16 @@
  * registers nothing while `lttng list` still advertises every event. An
  * exported, linker-retained reference to each pointer holds the section in
  * place under both LLD and GNU ld.
+ *
+ * The entries come from events.inc, so an event added there cannot be left out
+ * of the retained set. A missing entry drops the event from a capture while
+ * `lttng list` still reports it.
  */
 QUIC_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const quic_trace_tracepoints[] = {
-	&lttng_ust_tracepoint_ptr_quic_trace___quic_packet_start,
-	&lttng_ust_tracepoint_ptr_quic_trace___quic_packet_end,
-	&lttng_ust_tracepoint_ptr_quic_trace___quic_packet_phase,
-	&lttng_ust_tracepoint_ptr_quic_trace___quic_stream_frame,
-	&lttng_ust_tracepoint_ptr_quic_trace___udp_socket_start,
-	&lttng_ust_tracepoint_ptr_quic_trace___udp_socket_end,
+#define EVENT(name) &lttng_ust_tracepoint_ptr_quic_trace___##name,
+#include "events.inc"
 };
+#undef EVENT
 
 /*
  * Tracepoints register from a constructor in the generated events.h. This entry
@@ -39,15 +40,19 @@ QUIC_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const quic_
  */
 void quic_trace_provider_init(void) {}
 
-bool quic_trace_quic_packet_start_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, quic_packet_start); }
-void quic_trace_quic_packet_start(const struct quic_trace_quic_packet_start *event) { lttng_ust_tracepoint(quic_trace, quic_packet_start, event); }
-bool quic_trace_quic_packet_end_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, quic_packet_end); }
-void quic_trace_quic_packet_end(const struct quic_trace_quic_packet_end *event) { lttng_ust_tracepoint(quic_trace, quic_packet_end, event); }
-bool quic_trace_quic_packet_phase_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, quic_packet_phase); }
-void quic_trace_quic_packet_phase(const struct quic_trace_quic_packet_phase *event) { lttng_ust_tracepoint(quic_trace, quic_packet_phase, event); }
-bool quic_trace_quic_stream_frame_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, quic_stream_frame); }
-void quic_trace_quic_stream_frame(const struct quic_trace_quic_stream_frame *event) { lttng_ust_tracepoint(quic_trace, quic_stream_frame, event); }
-bool quic_trace_udp_socket_start_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, udp_socket_start); }
-void quic_trace_udp_socket_start(const struct quic_trace_udp_socket_start *event) { lttng_ust_tracepoint(quic_trace, udp_socket_start, event); }
-bool quic_trace_udp_socket_end_enabled(void) { return lttng_ust_tracepoint_enabled(quic_trace, udp_socket_end); }
-void quic_trace_udp_socket_end(const struct quic_trace_udp_socket_end *event) { lttng_ust_tracepoint(quic_trace, udp_socket_end, event); }
+/*
+ * Every wrapper comes from events.inc for the same reason. The enablement
+ * predicate is a plain function for the facade to call, and it reads one state
+ * word, so a disabled event never enters the tracepoint.
+ */
+#define EVENT(name) \
+	bool quic_trace_##name##_enabled(void) { \
+		return lttng_ust_tracepoint_enabled(quic_trace, name); \
+	} \
+	void quic_trace_##name(const struct quic_trace_##name *event) { \
+		lttng_ust_tracepoint(quic_trace, name, event); \
+	}
+
+#include "events.inc"
+
+#undef EVENT

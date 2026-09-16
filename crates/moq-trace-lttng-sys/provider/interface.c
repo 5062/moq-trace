@@ -22,12 +22,16 @@
  * registers nothing while `lttng list` still advertises every event. An
  * exported, linker-retained reference to each pointer holds the section in
  * place under both LLD and GNU ld.
+ *
+ * The entries come from events.inc, so an event added there cannot be left out
+ * of the retained set. A missing entry drops the event from a capture while
+ * `lttng list` still reports it.
  */
 MOQ_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const moq_trace_tracepoints[] = {
-	&lttng_ust_tracepoint_ptr_moq_trace___moq_object_start,
-	&lttng_ust_tracepoint_ptr_moq_trace___moq_object_end,
-	&lttng_ust_tracepoint_ptr_moq_trace___moq_object_phase,
+#define EVENT(name) &lttng_ust_tracepoint_ptr_moq_trace___##name,
+#include "events.inc"
 };
+#undef EVENT
 
 /*
  * Tracepoints register from a constructor in the generated events.h. This entry
@@ -36,9 +40,19 @@ MOQ_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const moq_tr
  */
 void moq_trace_provider_init(void) {}
 
-bool moq_trace_moq_object_start_enabled(void) { return lttng_ust_tracepoint_enabled(moq_trace, moq_object_start); }
-void moq_trace_moq_object_start(const struct moq_trace_moq_object_start *event) { lttng_ust_tracepoint(moq_trace, moq_object_start, event); }
-bool moq_trace_moq_object_end_enabled(void) { return lttng_ust_tracepoint_enabled(moq_trace, moq_object_end); }
-void moq_trace_moq_object_end(const struct moq_trace_moq_object_end *event) { lttng_ust_tracepoint(moq_trace, moq_object_end, event); }
-bool moq_trace_moq_object_phase_enabled(void) { return lttng_ust_tracepoint_enabled(moq_trace, moq_object_phase); }
-void moq_trace_moq_object_phase(const struct moq_trace_moq_object_phase *event) { lttng_ust_tracepoint(moq_trace, moq_object_phase, event); }
+/*
+ * Every wrapper comes from events.inc for the same reason. The enablement
+ * predicate is a plain function for the facade to call, and it reads one state
+ * word, so a disabled event never enters the tracepoint.
+ */
+#define EVENT(name) \
+	bool moq_trace_##name##_enabled(void) { \
+		return lttng_ust_tracepoint_enabled(moq_trace, name); \
+	} \
+	void moq_trace_##name(const struct moq_trace_##name *event) { \
+		lttng_ust_tracepoint(moq_trace, name, event); \
+	}
+
+#include "events.inc"
+
+#undef EVENT

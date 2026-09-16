@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", interface.display());
     println!("cargo:rerun-if-changed={}", template.display());
     println!("cargo:rerun-if-changed=provider/interface.c");
+    println!("cargo:rerun-if-changed=provider/events.inc");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
