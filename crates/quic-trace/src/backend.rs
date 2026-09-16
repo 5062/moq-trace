@@ -1,4 +1,8 @@
 //! The `quic_trace:*` schema on the shared backend seam.
+//!
+//! The provider binding casts the public enums to their wire value, so the
+//! declaration order of each enum is its encoding and must match the C enum in
+//! `provider/interface.h`. Reordering variants changes the wire contract.
 
 use crate::{
     Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge, SocketOutcome, SocketStats,
@@ -196,13 +200,13 @@ mod platform {
         unsafe {
             let (has_packet_number, packet_number) = optional(context.packet_number);
             let (has_packet_space, packet_space) =
-                optional_enum(context.packet_space, packet_space);
+                optional(context.packet_space.map(|value| value as u8));
             let (has_byte_len, byte_len) = optional(context.byte_len.map(to_u64));
             ffi::quic_trace_quic_packet_start(&ffi::quic_trace_quic_packet_start {
                 timestamp_ns,
                 trace_id,
                 connection_id: context.connection_id,
-                direction: direction(context.direction),
+                direction: context.direction as u8,
                 has_packet_number,
                 packet_number,
                 has_packet_space,
@@ -222,7 +226,7 @@ mod platform {
         unsafe {
             let (has_packet_number, packet_number) = optional(context.packet_number);
             let (has_packet_space, packet_space) =
-                optional_enum(context.packet_space, packet_space);
+                optional(context.packet_space.map(|value| value as u8));
             let (has_byte_len, byte_len) = optional(context.byte_len.map(to_u64));
             ffi::quic_trace_quic_packet_end(&ffi::quic_trace_quic_packet_end {
                 timestamp_ns,
@@ -233,7 +237,7 @@ mod platform {
                 packet_space,
                 has_byte_len,
                 byte_len,
-                outcome: packet_outcome(outcome),
+                outcome: outcome as u8,
             });
         }
     }
@@ -247,13 +251,13 @@ mod platform {
         outcome: Option<PacketOutcome>,
     ) {
         unsafe {
-            let (has_outcome, outcome) = optional_enum(outcome, packet_outcome);
+            let (has_outcome, outcome) = optional(outcome.map(|value| value as u8));
             ffi::quic_trace_quic_packet_phase(&ffi::quic_trace_quic_packet_phase {
                 timestamp_ns,
                 trace_id,
                 span_id,
-                phase: encode_packet_phase(phase),
-                edge: encode_edge(edge),
+                phase: phase as u8,
+                edge: edge as u8,
                 has_outcome,
                 outcome,
             });
@@ -268,7 +272,7 @@ mod platform {
                 stream_id: frame.stream_id,
                 offset_start: frame.offset_start,
                 offset_end: frame.offset_end,
-                outcome: packet_outcome(outcome),
+                outcome: outcome as u8,
             });
         }
     }
@@ -286,7 +290,7 @@ mod platform {
                 trace_id,
                 has_connection_id,
                 connection_id,
-                direction: direction(direction_value),
+                direction: direction_value as u8,
             });
         }
     }
@@ -296,7 +300,7 @@ mod platform {
             ffi::quic_trace_udp_socket_end(&ffi::quic_trace_udp_socket_end {
                 timestamp_ns,
                 trace_id,
-                outcome: socket_outcome(outcome),
+                outcome: outcome as u8,
                 buffers: to_u64(stats.buffers),
                 datagrams: to_u64(stats.datagrams),
                 bytes: to_u64(stats.bytes),
@@ -304,119 +308,16 @@ mod platform {
         }
     }
 
-    fn optional(value: Option<u64>) -> (u8, u64) {
-        value.map_or((0, 0), |value| (1, value))
-    }
-
-    fn optional_enum<T>(value: Option<T>, convert: fn(T) -> u8) -> (u8, u8) {
-        value.map_or((0, 0), |value| (1, convert(value)))
+    /// Encode an optional field as its wire value, or zero when it is absent.
+    ///
+    /// The provider payload has no sum type for an absent field, so the `has_`
+    /// flag and a zero value together carry the option.
+    fn optional<T: Copy + Default>(value: Option<T>) -> (u8, T) {
+        value.map_or((0, T::default()), |value| (1, value))
     }
 
     fn to_u64(value: usize) -> u64 {
         value.try_into().unwrap_or(u64::MAX)
-    }
-
-    fn direction(value: Direction) -> u8 {
-        match value {
-            Direction::Rx => ffi::quic_trace_direction_QUIC_TRACE_DIRECTION_RX as u8,
-            Direction::Tx => ffi::quic_trace_direction_QUIC_TRACE_DIRECTION_TX as u8,
-        }
-    }
-
-    fn encode_edge(value: PhaseEdge) -> u8 {
-        match value {
-            PhaseEdge::Start => ffi::quic_trace_edge_QUIC_TRACE_EDGE_START as u8,
-            PhaseEdge::Done => ffi::quic_trace_edge_QUIC_TRACE_EDGE_DONE as u8,
-        }
-    }
-
-    fn packet_space(value: crate::PacketSpace) -> u8 {
-        match value {
-            crate::PacketSpace::Initial => {
-                ffi::quic_trace_packet_space_QUIC_TRACE_PACKET_SPACE_INITIAL as u8
-            }
-            crate::PacketSpace::Handshake => {
-                ffi::quic_trace_packet_space_QUIC_TRACE_PACKET_SPACE_HANDSHAKE as u8
-            }
-            crate::PacketSpace::ZeroRtt => {
-                ffi::quic_trace_packet_space_QUIC_TRACE_PACKET_SPACE_ZERO_RTT as u8
-            }
-            crate::PacketSpace::Data => {
-                ffi::quic_trace_packet_space_QUIC_TRACE_PACKET_SPACE_DATA as u8
-            }
-        }
-    }
-
-    fn encode_packet_phase(value: PacketPhase) -> u8 {
-        match value {
-            PacketPhase::HeaderParse => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_HEADER_PARSE as u8
-            }
-            PacketPhase::Routing => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_ROUTING as u8
-            }
-            PacketPhase::Scheduling => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_SCHEDULING as u8
-            }
-            PacketPhase::HeaderUnprotect => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_HEADER_UNPROTECT as u8
-            }
-            PacketPhase::PayloadDecrypt => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_PAYLOAD_DECRYPT as u8
-            }
-            PacketPhase::FrameProcess => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_FRAME_PROCESS as u8
-            }
-            PacketPhase::FrameEncode => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_FRAME_ENCODE as u8
-            }
-            PacketPhase::PacketEncrypt => {
-                ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_PACKET_ENCRYPT as u8
-            }
-        }
-    }
-
-    fn packet_outcome(value: PacketOutcome) -> u8 {
-        match value {
-            PacketOutcome::Success => {
-                ffi::quic_trace_packet_outcome_QUIC_TRACE_PACKET_OUTCOME_SUCCESS as u8
-            }
-            PacketOutcome::Malformed => {
-                ffi::quic_trace_packet_outcome_QUIC_TRACE_PACKET_OUTCOME_MALFORMED as u8
-            }
-            PacketOutcome::AuthenticationFailed => {
-                ffi::quic_trace_packet_outcome_QUIC_TRACE_PACKET_OUTCOME_AUTHENTICATION_FAILED as u8
-            }
-            PacketOutcome::Dropped => {
-                ffi::quic_trace_packet_outcome_QUIC_TRACE_PACKET_OUTCOME_DROPPED as u8
-            }
-            PacketOutcome::Abandoned => {
-                ffi::quic_trace_packet_outcome_QUIC_TRACE_PACKET_OUTCOME_ABANDONED as u8
-            }
-        }
-    }
-
-    fn socket_outcome(value: SocketOutcome) -> u8 {
-        match value {
-            SocketOutcome::Success => {
-                ffi::quic_trace_socket_outcome_QUIC_TRACE_SOCKET_OUTCOME_SUCCESS as u8
-            }
-            SocketOutcome::Pending => {
-                ffi::quic_trace_socket_outcome_QUIC_TRACE_SOCKET_OUTCOME_PENDING as u8
-            }
-            SocketOutcome::WouldBlock => {
-                ffi::quic_trace_socket_outcome_QUIC_TRACE_SOCKET_OUTCOME_WOULD_BLOCK as u8
-            }
-            SocketOutcome::ConnectionReset => {
-                ffi::quic_trace_socket_outcome_QUIC_TRACE_SOCKET_OUTCOME_CONNECTION_RESET as u8
-            }
-            SocketOutcome::Error => {
-                ffi::quic_trace_socket_outcome_QUIC_TRACE_SOCKET_OUTCOME_ERROR as u8
-            }
-            SocketOutcome::Abandoned => {
-                ffi::quic_trace_socket_outcome_QUIC_TRACE_SOCKET_OUTCOME_ABANDONED as u8
-            }
-        }
     }
 }
 

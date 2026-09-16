@@ -1,4 +1,8 @@
 //! The `moq_trace:*` schema on the shared backend seam.
+//!
+//! The provider binding casts the public enums to their wire value, so the
+//! declaration order of each enum is its encoding and must match the C enum in
+//! `provider/interface.h`. Reordering variants changes the wire contract.
 
 use crate::{ObjectContext, ObjectOutcome, ObjectPhase, PhaseEdge};
 use trace_core::{
@@ -172,7 +176,7 @@ mod platform {
                 session_id,
                 has_connection_id,
                 connection_id,
-                direction: direction(context.direction),
+                direction: context.direction as u8,
                 track_alias: context.identity.track_alias,
                 group_id: context.identity.group_id,
                 object_id: context.identity.object_id,
@@ -199,7 +203,7 @@ mod platform {
                 has_stream_offset_end,
                 stream_offset_end,
                 payload_bytes,
-                outcome: object_outcome(outcome),
+                outcome: outcome as u8,
             });
         }
     }
@@ -213,75 +217,25 @@ mod platform {
         outcome: Option<ObjectOutcome>,
     ) {
         unsafe {
-            let (has_outcome, outcome) = optional_enum(outcome, object_outcome);
+            let (has_outcome, outcome) = optional(outcome.map(|value| value as u8));
             ffi::moq_trace_moq_object_phase(&ffi::moq_trace_moq_object_phase {
                 timestamp_ns,
                 trace_id,
                 span_id,
-                phase: encode_object_phase(phase),
-                edge: encode_edge(edge),
+                phase: phase as u8,
+                edge: edge as u8,
                 has_outcome,
                 outcome,
             });
         }
     }
 
-    fn optional(value: Option<u64>) -> (u8, u64) {
-        value.map_or((0, 0), |value| (1, value))
-    }
-
-    fn optional_enum<T>(value: Option<T>, convert: fn(T) -> u8) -> (u8, u8) {
-        value.map_or((0, 0), |value| (1, convert(value)))
-    }
-
-    fn direction(value: crate::Direction) -> u8 {
-        match value {
-            crate::Direction::Rx => ffi::moq_trace_direction_MOQ_TRACE_DIRECTION_RX as u8,
-            crate::Direction::Tx => ffi::moq_trace_direction_MOQ_TRACE_DIRECTION_TX as u8,
-        }
-    }
-
-    fn encode_edge(value: PhaseEdge) -> u8 {
-        match value {
-            PhaseEdge::Start => ffi::moq_trace_edge_MOQ_TRACE_EDGE_START as u8,
-            PhaseEdge::Done => ffi::moq_trace_edge_MOQ_TRACE_EDGE_DONE as u8,
-        }
-    }
-
-    fn encode_object_phase(value: ObjectPhase) -> u8 {
-        match value {
-            ObjectPhase::HeaderParse => {
-                ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE as u8
-            }
-            ObjectPhase::Create => ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_CREATE as u8,
-            ObjectPhase::PayloadRead => {
-                ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ as u8
-            }
-            ObjectPhase::FrameCommit => {
-                ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT as u8
-            }
-            ObjectPhase::Clone => ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_CLONE as u8,
-            ObjectPhase::HeaderEncode => {
-                ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE as u8
-            }
-            ObjectPhase::PayloadWrite => {
-                ffi::moq_trace_object_phase_MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE as u8
-            }
-        }
-    }
-
-    fn object_outcome(value: ObjectOutcome) -> u8 {
-        match value {
-            ObjectOutcome::Success => {
-                ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_SUCCESS as u8
-            }
-            ObjectOutcome::Failed => {
-                ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_FAILED as u8
-            }
-            ObjectOutcome::Abandoned => {
-                ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_ABANDONED as u8
-            }
-        }
+    /// Encode an optional field as its wire value, or zero when it is absent.
+    ///
+    /// The provider payload has no sum type for an absent field, so the `has_`
+    /// flag and a zero value together carry the option.
+    fn optional<T: Copy + Default>(value: Option<T>) -> (u8, T) {
+        value.map_or((0, T::default()), |value| (1, value))
     }
 }
 
