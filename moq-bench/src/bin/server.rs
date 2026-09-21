@@ -11,7 +11,7 @@ use std::time::Duration;
 use clap::Parser;
 use moq_bench::object::TRACK;
 use moq_bench::stats::Stats;
-use moq_bench::{ShapeArgs, install_crypto, publish, versions};
+use moq_bench::{Shape, install_crypto, publish, versions};
 use moq_net::Origin;
 use moq_net::broadcast;
 
@@ -31,7 +31,7 @@ struct Args {
     report: Duration,
 
     #[command(flatten)]
-    shape: ShapeArgs,
+    shape: Shape,
 
     #[command(flatten)]
     log: moq_native::Log,
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             let task_stats = stats.clone();
             tokio::spawn(async move {
                 if let Err(err) =
-                    publish::produce(path.clone(), args.shape.into(), track, task_stats).await
+                    publish::produce(path.clone(), args.shape, track, task_stats).await
                 {
                     tracing::warn!(%path, %err, "publisher ended");
                 }

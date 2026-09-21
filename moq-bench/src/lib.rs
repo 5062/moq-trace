@@ -52,31 +52,9 @@ pub fn versions() -> Versions {
 ///
 /// Every frame in a group is exactly `frame_size` bytes, the JSON keyframe
 /// included, so object size stays a clean independent variable across runs.
-#[derive(Clone, Copy, Debug)]
-#[non_exhaustive]
-pub struct Shape {
-    /// Frames emitted per second per track. Zero publishes the track but stays idle.
-    pub fps: u64,
-    /// Bytes per frame.
-    pub frame_size: u64,
-    /// Zeroed frames per group following the keyframe. May be zero.
-    pub group_size: u64,
-}
-
-impl Default for Shape {
-    fn default() -> Self {
-        Self {
-            fps: 30,
-            frame_size: 16_384,
-            group_size: 0,
-        }
-    }
-}
-
-/// Command-line form of [`Shape`], shared by both peers.
 #[derive(clap::Args, Clone, Copy, Debug)]
 #[non_exhaustive]
-pub struct ShapeArgs {
+pub struct Shape {
     /// Frames emitted per second per track. Zero publishes the track but stays idle.
     #[arg(long, env = "MOQ_BENCH_FPS", default_value_t = Shape::default().fps)]
     pub fps: u64,
@@ -88,12 +66,12 @@ pub struct ShapeArgs {
     pub group_size: u64,
 }
 
-impl From<ShapeArgs> for Shape {
-    fn from(args: ShapeArgs) -> Self {
+impl Default for Shape {
+    fn default() -> Self {
         Self {
-            fps: args.fps,
-            frame_size: args.frame_size,
-            group_size: args.group_size,
+            fps: 30,
+            frame_size: 16_384,
+            group_size: 0,
         }
     }
 }

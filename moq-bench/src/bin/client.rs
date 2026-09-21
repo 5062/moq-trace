@@ -14,7 +14,7 @@ use std::time::Duration;
 use clap::Parser;
 use moq_bench::object::TRACK;
 use moq_bench::stats::Stats;
-use moq_bench::{Shape, ShapeArgs, install_crypto, publish, subscribe, versions};
+use moq_bench::{Shape, install_crypto, publish, subscribe, versions};
 use moq_net::Origin;
 use moq_net::announce;
 use moq_net::broadcast;
@@ -67,7 +67,7 @@ struct Args {
     report: Duration,
 
     #[command(flatten)]
-    shape: ShapeArgs,
+    shape: Shape,
 
     #[command(flatten)]
     log: moq_native::Log,
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             run: run.clone(),
             broadcasts: args.broadcasts,
             subscribe: args.subscribe,
-            shape: args.shape.into(),
+            shape: args.shape,
             client: client.clone(),
             url: url.clone(),
             stats: stats.clone(),
