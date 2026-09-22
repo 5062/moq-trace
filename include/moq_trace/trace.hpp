@@ -16,6 +16,7 @@ namespace moq_trace {
 namespace detail {
 
 inline std::atomic<std::uint64_t> next_session_id{1};
+inline std::atomic<std::uint64_t> next_logical_id{1};
 inline std::once_flag provider_once;
 
 inline void initialize() { std::call_once(provider_once, moq_trace_provider_init); }
@@ -34,6 +35,11 @@ struct LogicalId {
     return group == other.group && frame == other.frame;
   }
 };
+
+/** Allocate a process-local logical identity for one relayed object. */
+inline LogicalId next_logical_id() {
+  return {detail::next_logical_id.fetch_add(1, std::memory_order_relaxed), 0};
+}
 
 /** Stable wire identity of one MoQ transport object. */
 struct ObjectIdentity {

@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: moq_trace
+Description: C++ MoQ object tracing facade and LTTng provider
+Version: @PROJECT_VERSION@
+Requires: quic_trace lttng-ust >= 2.13
+Libs: -L${libdir} -lmoq_trace_provider
+Cflags: -I${includedir}

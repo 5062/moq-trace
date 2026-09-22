@@ -18,6 +18,7 @@ namespace detail {
 
 inline std::atomic<std::uint64_t> next_trace_id{1};
 inline std::atomic<std::uint64_t> next_span_id{1};
+inline std::atomic<std::uint64_t> next_connection_id{1};
 inline const auto fallback_epoch = std::chrono::steady_clock::now();
 inline std::once_flag provider_once;
 
@@ -40,6 +41,14 @@ inline std::uint64_t now_ns() {
 }
 
 }  // namespace detail
+
+/** Return a timestamp from the host monotonic clock in nanoseconds. */
+inline std::uint64_t now_ns() { return detail::now_ns(); }
+
+/** Allocate a process-local stable transport connection identifier. */
+inline std::uint64_t next_connection_id() {
+  return detail::next_connection_id.fetch_add(1, std::memory_order_relaxed);
+}
 
 /** Metadata known when a QUIC packet trace starts. */
 struct PacketContext {

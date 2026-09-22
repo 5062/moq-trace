@@ -246,6 +246,28 @@ class SqlAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(self.connection.execute("SELECT count(*) FROM timeline_selections").fetchone()[0], 3)
 
+    def test_cut_through_forwarding_has_no_post_ingress_tail(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute("UPDATE raw.quic_packet_end SET timestamp_ns = 350000 WHERE trace_id = 3")
+        origin = _select_window(
+            self.connection,
+            object_size=16,
+            subscribers=1,
+            warmup_seconds=0,
+            cooldown_seconds=0,
+        )
+        coverage.resolve(self.connection)
+
+        _derive_samples(self.connection, origin)
+
+        tail = self.connection.execute(
+            "SELECT latency_ns FROM quic_object_samples WHERE metric = 'quic_tail_gap'"
+        ).fetchone()[0]
+        self.assertEqual(tail, 0)
+
     def batches(self, input_path, expected_pids=None, batch_size=65_536):
         """Yield the fixture tables where ingest would read batches from CTF."""
 

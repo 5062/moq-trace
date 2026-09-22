@@ -99,6 +99,8 @@ configure_package_config_file(
   "${CMAKE_CURRENT_BINARY_DIR}/quic_traceConfig.cmake"
   INSTALL_DESTINATION lib/cmake/quic_trace
 )
+configure_file(cmake/quic_trace.pc.in quic_trace.pc @ONLY)
+configure_file(cmake/moq_trace.pc.in moq_trace.pc @ONLY)
 configure_package_config_file(
   cmake/moq_traceConfig.cmake.in
   "${CMAKE_CURRENT_BINARY_DIR}/moq_traceConfig.cmake"
@@ -120,6 +122,16 @@ install(
     "${CMAKE_CURRENT_BINARY_DIR}/quic_traceConfigVersion.cmake"
   DESTINATION lib/cmake/quic_trace
   COMPONENT quic_trace
+)
+install(
+  FILES "${CMAKE_CURRENT_BINARY_DIR}/quic_trace.pc"
+  DESTINATION lib/pkgconfig
+  COMPONENT quic_trace
+)
+install(
+  FILES "${CMAKE_CURRENT_BINARY_DIR}/moq_trace.pc"
+  DESTINATION lib/pkgconfig
+  COMPONENT moq_trace
 )
 install(
   FILES

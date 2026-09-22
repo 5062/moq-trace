@@ -1,11 +1,13 @@
 #include <moq_trace/trace.hpp>
 
+#include <cassert>
 #include <type_traits>
 
 int main() {
   static_assert(!std::is_copy_constructible_v<moq_trace::Object>);
   static_assert(std::is_move_constructible_v<moq_trace::Object>);
   static_assert(!std::is_copy_constructible_v<moq_trace::ObjectPhase>);
+  assert(!(moq_trace::next_logical_id() == moq_trace::next_logical_id()));
 
   moq_trace::ObjectContext context;
   context.logical_id = {1, 2};

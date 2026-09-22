@@ -220,6 +220,20 @@ def wait_for_log(
     raise CaptureError(f"timed out after {timeout:g}s waiting for {description} in {path}")
 
 
+def wait_for_startup(process: ManagedProcess, delay: float) -> None:
+    """Wait a fixed startup interval while rejecting an early process exit."""
+
+    deadline = time.monotonic() + delay
+    while time.monotonic() < deadline:
+        status = process.process.poll()
+        if status is not None:
+            raise CaptureError(f"{process.name} exited with status {status} during startup")
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    status = process.process.poll()
+    if status is not None:
+        raise CaptureError(f"{process.name} exited with status {status} during startup")
+
+
 def _process_pid(line: str) -> int | None:
     """Return the process ID a provider block header names, if it is one."""
 

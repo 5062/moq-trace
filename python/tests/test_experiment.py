@@ -112,6 +112,19 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(subscriber[subscriber.index("--connections") + 1], "3")
         self.assertEqual(subscriber[subscriber.index("--duration") + 1], "15s")
 
+    def test_custom_relay_arguments_expand_run_paths(self) -> None:
+        config = ExperimentConfig(
+            output=pathlib.Path("configured"),
+            relay_args=("--port", "{port}", "--certificate_file", "{certificate}"),
+            port=19667,
+        )
+
+        relay = commands(config, pathlib.Path("actual")).relay
+
+        self.assertEqual(relay[1:3], ("--port", "19667"))
+        self.assertEqual(pathlib.Path(relay[4]).name, "relay.crt")
+        self.assertIn("actual", relay[4])
+
     def test_comparison_values_are_distinct(self) -> None:
         experiment = ExperimentConfig(output=pathlib.Path("run"))
         with self.assertRaises(ValidationError):
@@ -162,6 +175,14 @@ class ExperimentTests(unittest.TestCase):
         enabled = [call.args[-1] for call in run_lttng.call_args_list if call.args[0] == "enable-event"]
         self.assertEqual(enabled, ["moq_trace:*", "quic_trace:*"])
 
+    def test_startup_delay_rejects_an_early_exit(self) -> None:
+        process = mock.Mock()
+        process.name = "relay"
+        process.process.poll.return_value = 7
+
+        with self.assertRaisesRegex(capture.CaptureError, "relay exited with status 7"):
+            capture.wait_for_startup(process, 0)
+
     def test_capture_tracks_every_process_it_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(capture, "_run_lttng") as run_lttng:
@@ -193,10 +214,12 @@ class ExperimentTests(unittest.TestCase):
             with (
                 mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()),
                 mock.patch.object(experiment, "wait_for_log"),
+                mock.patch.object(experiment, "wait_for_startup") as wait_for_startup,
                 mock.patch.object(experiment, "LttngSession") as session_class,
             ):
                 capture_result = experiment._capture(config, command, pathlib.Path(directory))
         self.session = session_class.return_value
+        self.wait_for_startup = wait_for_startup
         return capture_result
 
     def test_capture_records_local_peers(self) -> None:
@@ -219,6 +242,13 @@ class ExperimentTests(unittest.TestCase):
         # The subscriber's local PID is the ssh client, which emits nothing.
         self.assertEqual(result.pids, (2000, 2002))
         self.assertEqual(self.session.track.call_args_list, [mock.call(2002)])
+
+    def test_capture_can_use_a_startup_delay_instead_of_a_log_marker(self) -> None:
+        config = ExperimentConfig(output=pathlib.Path("run"), relay_ready_log="", relay_startup_seconds=0.25)
+
+        self._capture(config)
+
+        self.wait_for_startup.assert_called_once_with(mock.ANY, 0.25)
 
 
 if __name__ == "__main__":

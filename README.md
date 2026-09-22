@@ -38,10 +38,10 @@ The transport provider emits:
 Lifecycle and phase tokens record `abandoned` when destroyed without an
 explicit terminal outcome. Stream ranges use `[offset_start, offset_end)`.
 Rust facades allocate trace and span IDs from the process-wide counters in
-`trace-core`, so a MoQ object and the QUIC packets carrying it come from one
-identifier space. Scope IDs by the captured process when combining traces from
-multiple hosts or processes. Event timestamps use `CLOCK_MONOTONIC` on Unix so
-Rust and C++ hooks share one clock epoch.
+`trace-core`; the C++ facade likewise owns its session, connection, logical
+object, trace, and span allocators. Scope IDs by the captured process when
+combining traces from multiple hosts or processes. Event timestamps use
+`CLOCK_MONOTONIC` on Unix so Rust and C++ hooks share one clock epoch.
 
 ## Rust instrumentation
 
@@ -69,6 +69,14 @@ Include `<moq_trace/trace.hpp>` for scoped MoQ objects and
 `<quic_trace/trace.hpp>` for transport events. The C++ types are move-only and
 emit the same provider schemas as the Rust facade.
 
+Non-CMake consumers can use the installed pkg-config package, which supplies
+both providers, their headers, LTTng-UST, and the provider-retention linker
+flag:
+
+```sh
+pkg-config --cflags --libs moq_trace
+```
+
 ## Capture and analysis
 
 Install the Python package:
@@ -84,6 +92,13 @@ and Nix package include them. The command can run a relay experiment, capture
 both `moq_trace:*` and `quic_trace:*`, analyze an existing CTF directory, and
 render figures from the resulting DuckDB artifact. The CTF reader also accepts
 legacy transport events emitted under `moq_trace:*`.
+
+An experiment may replace the default relay arguments with a `relay_args` TOML
+array. Its entries can use `{port}`, `{output}`, `{certificate}`, and `{key}`;
+certificate placeholders trigger generation of a throwaway TLS pair. Relays
+without a readiness log marker can set `relay_ready_log = ""` and use
+`relay_startup_seconds`. `moq-trace run --output` overrides the configured run
+directory without changing the checked-in experiment profile.
 
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that

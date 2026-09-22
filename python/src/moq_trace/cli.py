@@ -27,6 +27,7 @@ def parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="Run one experiment from TOML configuration.")
     run.add_argument("config", type=pathlib.Path)
+    run.add_argument("--output", type=pathlib.Path, help="Override the configured output directory.")
 
     compare = commands.add_parser("compare", help="Run one comparison from TOML configuration.")
     compare.add_argument("config", type=pathlib.Path)
@@ -76,7 +77,10 @@ def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
         from .experiment import run
 
-        print(run(_model(args.config, ExperimentConfig)))
+        config = _model(args.config, ExperimentConfig)
+        if args.output is not None:
+            config = config.model_copy(update={"output": args.output})
+        print(run(config))
     elif args.command == "compare":
         from .experiment import compare
 

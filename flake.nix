@@ -55,6 +55,7 @@
               --prefix PATH : ${
                 pkgs.lib.makeBinPath [
                   pkgs.lttng-tools
+                  pkgs.openssl
                   pkgs.openssh
                   pkgs.util-linux
                 ]

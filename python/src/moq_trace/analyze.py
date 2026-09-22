@@ -336,7 +336,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
                     PARTITION BY rx.trace_id ORDER BY tx.session_id, tx.trace_id
                   ) - 1 AS copy_ordinal,
                   greatest(rx.start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
-                  tx.end_ns - rx.start_ns AS latency_ns
+                  tx.end_ns::HUGEINT - rx.start_ns::HUGEINT AS latency_ns
            FROM selected_rx AS rx
            JOIN object_lifecycles AS tx
             ON tx.logical_group = rx.logical_group
@@ -365,7 +365,10 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            )
            SELECT group_id, object_id, metric, copy_ordinal,
                   greatest(first_start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
-                  finish_ns - start_ns AS latency_ns
+                  CASE WHEN metric = 'quic_tail_gap'
+                       THEN greatest(finish_ns::HUGEINT - start_ns::HUGEINT, 0)
+                       ELSE finish_ns::HUGEINT - start_ns::HUGEINT
+                  END AS latency_ns
            FROM copies
            CROSS JOIN LATERAL (VALUES
              ('quic_forward_start', first_start_ns, outbound_first_end_ns),
@@ -391,13 +394,13 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            SELECT direction || '_packet_span' AS metric, direction, connection_id,
                   trace_id, 0 AS occurrence,
                   greatest(start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
-                  end_ns - start_ns AS latency_ns
+                  end_ns::HUGEINT - start_ns::HUGEINT AS latency_ns
            FROM selected_packets WHERE outcome = 'success'
            UNION ALL
            SELECT packet.direction || '_' || phase.phase, packet.direction,
                   packet.connection_id, packet.trace_id, phase.occurrence,
                   greatest(phase.start_ns::HUGEINT - $origin, 0),
-                  phase.end_ns - phase.start_ns
+                  phase.end_ns::HUGEINT - phase.start_ns::HUGEINT
            FROM packet_phase_intervals AS phase
            JOIN selected_packets AS packet USING (trace_id)
            WHERE phase.outcome = 'success'
@@ -405,7 +408,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            SELECT 'rx_packet_processing_span', packet.direction, packet.connection_id,
                   packet.trace_id, 0,
                   greatest(schedule.end_ns::HUGEINT - $origin, 0),
-                  packet.end_ns - schedule.end_ns
+                  packet.end_ns::HUGEINT - schedule.end_ns::HUGEINT
            FROM selected_packets AS packet
            JOIN (
              SELECT trace_id, max(end_ns) AS end_ns

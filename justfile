@@ -73,6 +73,10 @@ package:
     cmake -S cpp/tests/package -B target/package/consumer --fresh -DCMAKE_PREFIX_PATH="$prefix_moq;$prefix_quic"
     cmake --build target/package/consumer
     "$PWD/target/package/consumer/consumer"
+    export PKG_CONFIG_PATH="$prefix_moq/lib/pkgconfig:$prefix_quic/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    pkg-config --exists moq_trace
+    pkg-config --cflags --libs moq_trace | grep -q -- '-lmoq_trace_provider'
+    pkg-config --cflags --libs moq_trace | grep -q -- '-lquic_trace_provider'
 
 fix:
     cargo fmt --all

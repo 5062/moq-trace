@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import shutil
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -36,6 +37,10 @@ class ExperimentConfig(StrictModel):
 
     output: pathlib.Path
     relay_bin: pathlib.Path = pathlib.Path("moq-relay")
+    relay_args: tuple[str, ...] | None = None
+    relay_ready_log: str = "listening"
+    relay_startup_seconds: float = Field(default=0.5, ge=0)
+    relay_graceful_stop: bool = True
     # Defaults to the reference peers, which are the constant side of a measurement.
     # `just moq-bench-build` writes it, and a run from the toolkit root picks it up.
     bench_bin: pathlib.Path = pathlib.Path("moq-bench/target/release/moq-bench")
@@ -58,6 +63,10 @@ class ExperimentConfig(StrictModel):
     def resolve_local_binary(cls, value: pathlib.Path) -> pathlib.Path:
         """Resolve local binaries before child processes change directory."""
 
+        if value.parent == pathlib.Path("."):
+            installed = shutil.which(str(value))
+            if installed is not None:
+                return pathlib.Path(installed).resolve()
         return value.resolve()
 
     @model_validator(mode="after")

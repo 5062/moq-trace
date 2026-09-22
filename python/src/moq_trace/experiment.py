@@ -7,12 +7,13 @@ import hashlib
 import os
 import pathlib
 import shlex
+import subprocess
 
 import duckdb
 
 from .analyze import run as analyze
 from .artifact import open_artifact, write_metadata
-from .capture import LttngSession, ManagedProcess, wait_for_log
+from .capture import LttngSession, ManagedProcess, wait_for_log, wait_for_startup
 from .config import ComparisonConfig, ExperimentConfig
 from .metadata import (
     Affinity,
@@ -83,24 +84,37 @@ def _run_seconds(config: ExperimentConfig) -> float:
     return config.warmup_seconds + config.duration_seconds + config.cooldown_seconds
 
 
-def commands(config: ExperimentConfig) -> Commands:
+def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> Commands:
     """Construct exact argv arrays without invoking a shell."""
 
     relay_binary = str(config.relay_bin)
     bench_binary = str(config.bench_bin)
-    relay = [
-        relay_binary,
-        "--server-bind",
-        f"[::]:{config.port}",
-        "--server-backend",
-        "quinn",
-        "--server-version",
-        PROTOCOL,
-        "--tls-generate",
-        "localhost",
-        "--auth-public",
-        "",
-    ]
+    if config.relay_args is None:
+        relay = [
+            relay_binary,
+            "--server-bind",
+            f"[::]:{config.port}",
+            "--server-backend",
+            "quinn",
+            "--server-version",
+            PROTOCOL,
+            "--tls-generate",
+            "localhost",
+            "--auth-public",
+            "",
+        ]
+    else:
+        run_output = (output or config.output).resolve()
+        values = {
+            "port": str(config.port),
+            "output": str(run_output),
+            "certificate": str(run_output / "relay.crt"),
+            "key": str(run_output / "relay.key"),
+        }
+        try:
+            relay = [relay_binary, *(argument.format_map(values) for argument in config.relay_args)]
+        except KeyError as error:
+            raise ExperimentError(f"unknown relay argument placeholder: {error.args[0]}") from error
     if config.relay_cpu is not None:
         relay[:0] = ["taskset", "-c", str(config.relay_cpu)]
 
@@ -154,7 +168,11 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
     try:
         relay = ManagedProcess("relay", command.relay, output, output / "relay.log")
         processes.append(relay)
-        wait_for_log(output / "relay.log", relay, lambda value: "listening" in value, "listening", 15)
+        if config.relay_ready_log:
+            marker = config.relay_ready_log
+            wait_for_log(output / "relay.log", relay, lambda value: marker in value, marker, 15)
+        else:
+            wait_for_startup(relay, config.relay_startup_seconds)
         session.wait_for_provider(relay.pid)
         session.start([relay.pid])
         tracked = [relay.pid]
@@ -204,7 +222,7 @@ def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) 
         subscriber.log_handle.close()
         publisher.stop(True)
         processes.remove(publisher)
-        relay.stop(True)
+        relay.stop(config.relay_graceful_stop)
         processes.remove(relay)
         session.finish()
         return Capture(trace=ctf, relay_pid=relay.pid, pids=tuple(tracked))
@@ -225,6 +243,37 @@ def _file_hash(path: pathlib.Path) -> str | None:
         return None
 
 
+def _generate_certificate(config: ExperimentConfig, output: pathlib.Path) -> None:
+    """Generate the certificate requested by relay command placeholders."""
+
+    if config.relay_args is None or not any(
+        placeholder in argument for argument in config.relay_args for placeholder in ("{certificate}", "{key}")
+    ):
+        return
+    command = (
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-days",
+        "1",
+        "-keyout",
+        str(output / "relay.key"),
+        "-out",
+        str(output / "relay.crt"),
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    )
+    try:
+        subprocess.run(command, check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ExperimentError("failed to generate the relay TLS certificate with openssl") from error
+
+
 def _validate_workload(database: pathlib.Path) -> None:
     with open_artifact(database, "run") as (connection, _, _metadata):
         count, first, last = connection.execute(
@@ -242,7 +291,8 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     if output.exists():
         raise ExperimentError(f"run output already exists: {output}")
     output.mkdir(parents=True)
-    command = commands(config)
+    _generate_certificate(config, output)
+    command = commands(config, output)
     capture = _capture(config, command, output)
     # The workload and window the analyzer measures win over anything restated
     # here, so this carries only what a trace cannot show.

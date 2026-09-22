@@ -1,10 +1,13 @@
 #include <quic_trace/trace.hpp>
 
+#include <cassert>
 #include <type_traits>
 
 int main() {
   static_assert(!std::is_copy_constructible_v<quic_trace::Packet>);
   static_assert(std::is_move_constructible_v<quic_trace::Packet>);
+  assert(quic_trace::next_connection_id() != quic_trace::next_connection_id());
+  assert(quic_trace::now_ns() <= quic_trace::now_ns());
 
   quic_trace::PacketContext context;
   context.connection_id = 7;
