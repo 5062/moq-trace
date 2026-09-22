@@ -90,6 +90,7 @@ pub struct ObjectContext {
     pub(crate) direction: Direction,
     pub(crate) stream_id: Option<u64>,
     pub(crate) stream_offset_start: Option<u64>,
+    start_ns: Option<u64>,
     payload_bytes: u64,
 }
 
@@ -102,6 +103,7 @@ impl ObjectContext {
             direction,
             stream_id: None,
             stream_offset_start: None,
+            start_ns: None,
             payload_bytes: 0,
         }
     }
@@ -115,6 +117,12 @@ impl ObjectContext {
     /// Attach the inclusive stream byte offset where this object starts.
     pub fn with_stream_offset_start(mut self, offset_start: u64) -> Self {
         self.stream_offset_start = Some(offset_start);
+        self
+    }
+
+    /// Attach a lifecycle start timestamp captured before the context was known.
+    pub fn with_start_ns(mut self, start_ns: u64) -> Self {
+        self.start_ns = Some(start_ns);
         self
     }
 
@@ -296,7 +304,7 @@ impl Handle {
         }
         let trace_id = inner.next_trace_id();
         inner.emit(Event::Start {
-            timestamp_ns: inner.now_ns(),
+            timestamp_ns: context.start_ns.unwrap_or_else(|| inner.now_ns()),
             trace_id,
             session_id: self.session_id,
             connection_id: self.connection_id,

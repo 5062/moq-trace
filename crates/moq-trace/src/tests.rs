@@ -111,6 +111,22 @@ fn object_children_reference_the_start_record() {
 }
 
 #[test]
+fn object_start_uses_a_timestamp_captured_before_its_context() {
+    let handle = trace();
+    handle
+        .object(context().with_start_ns(123))
+        .finish(ObjectOutcome::Success);
+
+    assert!(matches!(
+        events(&handle).first(),
+        Some(Event::Start {
+            timestamp_ns: 123,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn dropping_an_object_records_abandonment() {
     let handle = trace();
     let object = handle.object(context());

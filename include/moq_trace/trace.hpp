@@ -28,6 +28,11 @@ struct LogicalId {
   std::uint64_t group = 0;
   /** Frame ordinal within the logical group. */
   std::uint64_t frame = 0;
+
+  /** Compare both components of a logical object identity. */
+  bool operator==(const LogicalId& other) const {
+    return group == other.group && frame == other.frame;
+  }
 };
 
 /** Stable wire identity of one MoQ transport object. */
@@ -56,6 +61,8 @@ struct ObjectContext {
   std::optional<std::uint64_t> stream_id;
   /** Inclusive stream offset where the object starts, when known. */
   std::optional<std::uint64_t> stream_offset_start;
+  /** Timestamp captured before the remaining object context was known. */
+  std::optional<std::uint64_t> start_ns;
   /** Payload size known before the object trace starts. */
   std::uint64_t payload_bytes = 0;
 };
@@ -201,7 +208,7 @@ class Object {
  private:
   void emit_start() const {
     const struct moq_trace_moq_object_start event{
-        quic_trace::detail::now_ns(),
+        context_.start_ns.value_or(quic_trace::detail::now_ns()),
         trace_id_,
         context_.logical_id.group,
         context_.logical_id.frame,

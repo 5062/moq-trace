@@ -14,6 +14,7 @@ int main() {
   context.connection_id = 6;
   context.stream_id = 7;
   context.stream_offset_start = 8;
+  context.start_ns = 9;
 
   moq_trace::Object object(context);
   auto phase = object.phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ);
