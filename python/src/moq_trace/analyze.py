@@ -14,17 +14,17 @@ from . import coverage, ctf
 from .artifact import write_metadata
 from .errors import TraceError
 from .metadata import (
+    Affinity,
+    Binaries,
+    CommandSet,
     Counts,
     Population,
     Processes,
     RunMetadata,
-    RunProvenance,
     TransportCapabilities,
     TransportProfile,
     Window,
-    WindowProvenance,
     Workload,
-    WorkloadProvenance,
 )
 
 
@@ -63,6 +63,15 @@ def _define_lifecycle_views(connection: duckdb.DuckDBPyConnection) -> None:
                   finish.outcome
            FROM quic_packet_start AS start
            JOIN quic_packet_end AS finish USING (trace_id);
+
+           -- Every successful outbound copy of a logical object, keyed by the
+           -- trace of its ingress lifecycle. Validation guarantees one ingress
+           -- per logical object, so `rx_trace_id` names it unambiguously.
+           CREATE VIEW object_copies AS
+           SELECT rx.trace_id AS rx_trace_id, tx.trace_id, tx.session_id, tx.end_ns
+           FROM object_lifecycles AS rx
+           JOIN object_lifecycles AS tx USING (logical_group, logical_frame)
+           WHERE rx.direction = 'rx' AND tx.direction = 'tx' AND tx.outcome = 'success';
 
            CREATE VIEW object_phase_intervals AS
            WITH paired AS (
@@ -297,10 +306,7 @@ def _select_window(
         """SELECT min(start_ns) FROM (
              SELECT rx.start_ns
              FROM object_lifecycles AS rx
-             JOIN object_lifecycles AS tx
-               ON tx.logical_group = rx.logical_group
-              AND tx.logical_frame = rx.logical_frame
-              AND tx.direction = 'tx' AND tx.outcome = 'success'
+             JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
              WHERE rx.direction = 'rx' AND rx.outcome = 'success' AND rx.payload_bytes = ?
              GROUP BY rx.trace_id, rx.start_ns
              HAVING count(*) = ?
@@ -326,10 +332,7 @@ def _select_window(
         """SELECT count(*) FROM (
              SELECT rx.trace_id, count(tx.trace_id) AS copies
              FROM selected_rx AS rx
-             LEFT JOIN object_lifecycles AS tx
-              ON tx.logical_group = rx.logical_group
-             AND tx.logical_frame = rx.logical_frame
-              AND tx.direction = 'tx' AND tx.outcome = 'success'
+             LEFT JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
              GROUP BY rx.trace_id HAVING copies <> ?
            )""",
         [subscribers],
@@ -357,10 +360,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
                   greatest(rx.start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
                   tx.end_ns::HUGEINT - rx.start_ns::HUGEINT AS latency_ns
            FROM selected_rx AS rx
-           JOIN object_lifecycles AS tx
-            ON tx.logical_group = rx.logical_group
-           AND tx.logical_frame = rx.logical_frame
-            AND tx.direction = 'tx' AND tx.outcome = 'success'""",
+           JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id""",
         {"origin": origin},
     )
     connection.execute(
@@ -376,10 +376,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
                     outbound.complete_end_ns AS outbound_complete_end_ns
              FROM selected_rx AS rx
              JOIN object_packet_coverage AS inbound ON inbound.trace_id = rx.trace_id
-             JOIN object_lifecycles AS tx
-               ON tx.logical_group = rx.logical_group
-              AND tx.logical_frame = rx.logical_frame
-              AND tx.direction = 'tx' AND tx.outcome = 'success'
+             JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
              JOIN object_packet_coverage AS outbound ON outbound.trace_id = tx.trace_id
            )
            SELECT group_id, object_id, metric, copy_ordinal,
@@ -520,10 +517,7 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
                   rx.object_id, rx.start_ns,
                   max((tx.end_ns - rx.start_ns) / 1000.0) AS actual_us
            FROM selected_rx AS rx
-           JOIN object_lifecycles AS tx
-             ON tx.logical_group = rx.logical_group
-            AND tx.logical_frame = rx.logical_frame
-            AND tx.direction = 'tx' AND tx.outcome = 'success'
+           JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
            GROUP BY ALL"""
     )
     connection.execute(
@@ -553,12 +547,9 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
            FROM timeline_selections AS selection
            JOIN object_lifecycles AS object ON object.trace_id = selection.trace_id
            UNION ALL
-           SELECT selection.selection_order, 'tx', object.session_id, object.trace_id
+           SELECT selection.selection_order, 'tx', copy.session_id, copy.trace_id
            FROM timeline_selections AS selection
-           JOIN object_lifecycles AS object
-             ON object.logical_group = selection.logical_group
-            AND object.logical_frame = selection.logical_frame
-            AND object.direction = 'tx' AND object.outcome = 'success'"""
+           JOIN object_copies AS copy ON copy.rx_trace_id = selection.trace_id"""
     )
     _require_zero(
         connection,
@@ -640,34 +631,21 @@ def _write_run_metadata(
     *,
     pid: int,
     captured: Sequence[int],
-    object_size: int,
-    subscribers: int,
-    warmup_seconds: float,
-    cooldown_seconds: float,
+    workload: Workload,
+    window: Window,
     transport_profile: TransportProfile,
-    provenance: RunProvenance | None = None,
+    protocol: str | None,
+    affinity: Affinity,
+    binaries: Binaries | None,
+    commands: CommandSet | None,
 ) -> None:
-    """Record the workload, counts, and experiment provenance in the artifact.
+    """Record the workload, counts, and experiment provenance in the artifact."""
 
-    The analyzer supplies everything it measured from the trace. `provenance`
-    adds what only a caller can know, such as the pinned protocol and the exact
-    commands, and never overrides a measured value.
-    """
-
-    source = provenance or RunProvenance()
     write_metadata(
         connection,
         RunMetadata(
-            workload=Workload(
-                subscribers=subscribers,
-                object_size=object_size,
-                **(source.workload or WorkloadProvenance()).model_dump(),
-            ),
-            window=Window(
-                warmup_seconds=warmup_seconds,
-                cooldown_seconds=cooldown_seconds,
-                **(source.window or WindowProvenance()).model_dump(),
-            ),
+            workload=workload,
+            window=window,
             transport_profile=transport_profile,
             transport_capabilities=TransportCapabilities(
                 packet_phases=tuple(
@@ -696,10 +674,10 @@ def _write_run_metadata(
                 ),
             ),
             processes=Processes(analyzed_pid=pid, captured_pids=tuple(captured)),
-            protocol=source.protocol,
-            affinity=source.affinity,
-            binaries=source.binaries,
-            commands=source.commands,
+            protocol=protocol,
+            affinity=affinity,
+            binaries=binaries,
+            commands=commands,
         ),
     )
 
@@ -708,14 +686,15 @@ def run(
     input_path: pathlib.Path,
     output: pathlib.Path,
     *,
-    object_size: int,
-    subscribers: int,
-    warmup_seconds: float = 0.0,
-    cooldown_seconds: float = 0.0,
+    workload: Workload,
+    window: Window,
     expected_pids: Collection[int] | None = None,
     pid: int | None = None,
     transport_profile: TransportProfile = "generic",
-    provenance: RunProvenance | None = None,
+    protocol: str | None = None,
+    affinity: Affinity | None = None,
+    binaries: Binaries | None = None,
+    commands: CommandSet | None = None,
 ) -> None:
     """Analyze CTF into one atomically published DuckDB database.
 
@@ -723,19 +702,14 @@ def run(
     this analysis describes and defaults to the only captured one. `expected_pids`
     rejects a capture that reaches beyond the processes it should hold.
 
-    The window opens at the first inbound object every subscriber received, so a
-    capture that starts before the subscribers attach is measured from the steady
-    state. The margins default to no further trimming.
-
-    `provenance` adds what the caller knows about the run but the trace cannot
-    show, such as the pinned protocol, the affinity applied, and the exact
-    commands. It never overrides a value the analyzer measured.
+    `workload` names the object size and fan-out to select, and `window` the
+    margins to trim. The window opens at the first inbound object every
+    subscriber received, so a capture that starts before the subscribers attach
+    is measured from the steady state. Both are recorded in the artifact as
+    given, so their optional fields carry whatever the caller knows about the
+    run, as do `protocol`, `affinity`, `binaries`, and `commands`.
     """
 
-    if object_size <= 0 or subscribers <= 0:
-        raise TraceError("object size and subscribers must be positive")
-    if warmup_seconds < 0 or cooldown_seconds < 0:
-        raise TraceError("warmup and cooldown must be nonnegative")
     if output.exists():
         raise TraceError(f"analysis database already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -750,10 +724,10 @@ def run(
             _validate_raw(connection)
             origin = _select_window(
                 connection,
-                object_size=object_size,
-                subscribers=subscribers,
-                warmup_seconds=warmup_seconds,
-                cooldown_seconds=cooldown_seconds,
+                object_size=workload.object_size,
+                subscribers=workload.subscribers,
+                warmup_seconds=window.warmup_seconds,
+                cooldown_seconds=window.cooldown_seconds,
             )
             coverage.resolve(connection)
             _derive_samples(connection, origin)
@@ -764,12 +738,13 @@ def run(
                 connection,
                 pid=analyzed,
                 captured=captured,
-                object_size=object_size,
-                subscribers=subscribers,
-                warmup_seconds=warmup_seconds,
-                cooldown_seconds=cooldown_seconds,
+                workload=workload,
+                window=window,
                 transport_profile=transport_profile,
-                provenance=provenance,
+                protocol=protocol,
+                affinity=affinity or Affinity(),
+                binaries=binaries,
+                commands=commands,
             )
             connection.execute("CHECKPOINT")
         finally:

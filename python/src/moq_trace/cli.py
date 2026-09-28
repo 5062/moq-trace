@@ -87,14 +87,13 @@ def _run(args: argparse.Namespace) -> None:
         print(compare(_model(args.config, ComparisonConfig)))
     elif args.command == "analyze":
         from .analyze import run
+        from .metadata import Window, Workload
 
         run(
             args.input,
             args.output,
-            object_size=args.object_size,
-            subscribers=args.subscribers,
-            warmup_seconds=args.warmup_seconds,
-            cooldown_seconds=args.cooldown_seconds,
+            workload=Workload(object_size=args.object_size, subscribers=args.subscribers),
+            window=Window(warmup_seconds=args.warmup_seconds, cooldown_seconds=args.cooldown_seconds),
             expected_pids=args.expected_pid,
             pid=args.pid,
             transport_profile=args.transport_profile,

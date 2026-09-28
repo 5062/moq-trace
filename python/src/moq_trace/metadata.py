@@ -63,26 +63,12 @@ class Workload(ArtifactModel):
     fps: int | None = Field(default=None, gt=0)
 
 
-class WorkloadProvenance(ArtifactModel):
-    """Workload detail the analyzer cannot measure from the trace alone."""
-
-    publishers: int | None = Field(default=None, gt=0)
-    objects_per_group: int | None = Field(default=None, gt=0)
-    fps: int | None = Field(default=None, gt=0)
-
-
 class Window(ArtifactModel):
     """Wall time the workload ran and the steady-state window selected."""
 
     warmup_seconds: float = Field(ge=0)
     cooldown_seconds: float = Field(ge=0)
     # The analyzer is told how much to trim, not how long the run was.
-    duration_seconds: float | None = Field(default=None, gt=0)
-
-
-class WindowProvenance(ArtifactModel):
-    """Window detail the analyzer cannot measure from the trace alone."""
-
     duration_seconds: float | None = Field(default=None, gt=0)
 
 
@@ -141,23 +127,6 @@ class CommandSet(ArtifactModel):
     relay: tuple[str, ...]
     publisher: tuple[str, ...]
     subscriber: tuple[str, ...]
-
-
-class RunProvenance(ArtifactModel):
-    """What a caller knows about a run that the analyzer cannot measure.
-
-    Every field is optional. The analyzer fills in what it measured, and a field
-    set here adds the provenance only an experiment has: the pinned protocol,
-    the affinity it applied, the workload shape it drove, and the exact binaries
-    and commands it ran.
-    """
-
-    protocol: str | None = None
-    affinity: Affinity = Field(default_factory=Affinity)
-    workload: WorkloadProvenance | None = None
-    window: WindowProvenance | None = None
-    binaries: Binaries | None = None
-    commands: CommandSet | None = None
 
 
 class RunMetadata(ArtifactModel):

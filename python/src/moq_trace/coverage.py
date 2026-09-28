@@ -39,10 +39,7 @@ def _select_targets(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
              SELECT trace_id FROM selected_rx
              UNION ALL
              SELECT tx.trace_id FROM selected_rx AS rx
-             JOIN object_lifecycles AS tx
-              ON tx.logical_group = rx.logical_group
-             AND tx.logical_frame = rx.logical_frame
-              AND tx.direction = 'tx' AND tx.outcome = 'success'
+             JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
            ) AS selected USING (trace_id)"""
     )
     return connection.execute("SELECT * FROM coverage_targets").fetchall()

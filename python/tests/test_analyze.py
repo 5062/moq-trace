@@ -9,6 +9,7 @@ from unittest import mock
 
 import duckdb
 import pyarrow as pa
+from pydantic import ValidationError
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
@@ -31,6 +32,7 @@ from moq_trace.analyze import (  # noqa: E402
 from moq_trace.artifact import open_artifact  # noqa: E402
 from moq_trace.coverage import _subtract  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.metadata import Window, Workload  # noqa: E402
 
 
 class SqlAnalysisTests(unittest.TestCase):
@@ -357,10 +359,8 @@ class SqlAnalysisTests(unittest.TestCase):
                 run(
                     pathlib.Path("unused.ctf"),
                     output,
-                    object_size=16,
-                    subscribers=1,
-                    warmup_seconds=0,
-                    cooldown_seconds=0,
+                    workload=Workload(object_size=16, subscribers=1),
+                    window=Window(warmup_seconds=0, cooldown_seconds=0),
                 )
 
             with open_artifact(output, "run") as (connection, kind, metadata):
@@ -390,8 +390,8 @@ class SqlAnalysisTests(unittest.TestCase):
                 run(
                     pathlib.Path("unused.ctf"),
                     output,
-                    object_size=16,
-                    subscribers=1,
+                    workload=Workload(object_size=16, subscribers=1),
+                    window=Window(warmup_seconds=0, cooldown_seconds=0),
                     transport_profile="generic",
                 )
 
@@ -420,8 +420,8 @@ class SqlAnalysisTests(unittest.TestCase):
                     run(
                         pathlib.Path("unused.ctf"),
                         output,
-                        object_size=16,
-                        subscribers=1,
+                        workload=Workload(object_size=16, subscribers=1),
+                        window=Window(warmup_seconds=0, cooldown_seconds=0),
                         transport_profile="quinn",
                     )
 
@@ -461,7 +461,12 @@ class SqlAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             trimmed = pathlib.Path(directory) / "trimmed.duckdb"
             with mock.patch.object(ctf, "batches", self.batches):
-                run(pathlib.Path("unused.ctf"), trimmed, object_size=16, subscribers=1, warmup_seconds=0.5)
+                run(
+                    pathlib.Path("unused.ctf"),
+                    trimmed,
+                    workload=Workload(object_size=16, subscribers=1),
+                    window=Window(warmup_seconds=0.5, cooldown_seconds=0),
+                )
             with open_artifact(trimmed) as (connection, _, metadata):
                 self.assertEqual(metadata.counts.correlated_objects, 1)
                 self.assertEqual(metadata.window.warmup_seconds, 0.5)
@@ -476,14 +481,16 @@ class SqlAnalysisTests(unittest.TestCase):
                 )
 
     def test_run_rejects_impossible_inputs(self) -> None:
-        """The public entry point rejects values no capture could contain."""
+        """The workload and window an analysis takes reject values no capture could contain."""
 
-        with tempfile.TemporaryDirectory() as directory:
-            output = pathlib.Path(directory) / "analysis.duckdb"
-            with self.assertRaisesRegex(TraceError, "object size and subscribers must be positive"):
-                run(pathlib.Path("unused.ctf"), output, object_size=0, subscribers=1)
-            with self.assertRaisesRegex(TraceError, "warmup and cooldown must be nonnegative"):
-                run(pathlib.Path("unused.ctf"), output, object_size=16, subscribers=1, warmup_seconds=-1)
+        with self.assertRaisesRegex(ValidationError, "object_size"):
+            Workload(object_size=0, subscribers=1)
+        with self.assertRaisesRegex(ValidationError, "subscribers"):
+            Workload(object_size=16, subscribers=0)
+        with self.assertRaisesRegex(ValidationError, "warmup_seconds"):
+            Window(warmup_seconds=-1, cooldown_seconds=0)
+        with self.assertRaisesRegex(ValidationError, "cooldown_seconds"):
+            Window(warmup_seconds=0, cooldown_seconds=-1)
 
     def test_pairs_overlapping_phase_occurrences_by_span_id(self) -> None:
         for ctf_timestamp, timestamp, span_id, edge, outcome in (

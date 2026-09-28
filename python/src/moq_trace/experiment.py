@@ -21,9 +21,8 @@ from .metadata import (
     CommandSet,
     ComparisonMetadata,
     ComparisonRun,
-    RunProvenance,
-    WindowProvenance,
-    WorkloadProvenance,
+    Window,
+    Workload,
 )
 from .render import render
 
@@ -294,17 +293,31 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     _generate_certificate(config, output)
     command = commands(config, output)
     capture = _capture(config, command, output)
-    # The workload and window the analyzer measures win over anything restated
-    # here, so this carries only what a trace cannot show.
-    provenance = RunProvenance(
+    database = output / "analysis.duckdb"
+    analyze(
+        capture.trace,
+        database,
+        workload=Workload(
+            subscribers=config.subscribers,
+            object_size=config.object_size,
+            publishers=1,
+            objects_per_group=1,
+            fps=config.fps,
+        ),
+        window=Window(
+            warmup_seconds=config.warmup_seconds,
+            cooldown_seconds=config.cooldown_seconds,
+            duration_seconds=config.duration_seconds,
+        ),
+        expected_pids=capture.pids,
+        pid=capture.relay_pid,
+        transport_profile=config.transport_profile,
         protocol=PROTOCOL,
         affinity=(
             Affinity(mode="unpinned")
             if config.relay_cpu is None
             else Affinity(mode="single-core", cpu=config.relay_cpu)
         ),
-        workload=WorkloadProvenance(publishers=1, objects_per_group=1, fps=config.fps),
-        window=WindowProvenance(duration_seconds=config.duration_seconds),
         binaries=Binaries(
             relay=str(config.relay_bin),
             relay_sha256=_file_hash(config.relay_bin),
@@ -312,19 +325,6 @@ def run(config: ExperimentConfig) -> pathlib.Path:
             bench_sha256=_file_hash(config.bench_bin),
         ),
         commands=CommandSet(relay=command.relay, publisher=command.publisher, subscriber=command.subscriber),
-    )
-    database = output / "analysis.duckdb"
-    analyze(
-        capture.trace,
-        database,
-        object_size=config.object_size,
-        subscribers=config.subscribers,
-        warmup_seconds=config.warmup_seconds,
-        cooldown_seconds=config.cooldown_seconds,
-        expected_pids=capture.pids,
-        pid=capture.relay_pid,
-        transport_profile=config.transport_profile,
-        provenance=provenance,
     )
     _validate_workload(database)
     if config.render:
