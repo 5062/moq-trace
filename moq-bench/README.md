@@ -39,9 +39,9 @@ has to name the peer revision next to the relay revision it was compared against
 ## Tracing
 
 Build with `--features lttng` to link the `moq_trace:*` and `quic_trace:*`
-providers. `moq-net/trace` covers MoQ object lifecycles and `moq-native/trace`
-covers Quinn packets and sockets, so both peers register all nine events the Python
-capture looks for.
+providers. `moq-net/trace` covers MoQ object lifecycles and turns on the LTTng
+backend, and the patched Quinn always carries its packet and socket hooks, so both
+peers register all nine events the Python capture looks for.
 
 ```sh
 just moq-bench-build            # cargo build --release --features lttng
@@ -121,7 +121,9 @@ with `exclude`, because it depends on the MoQ implementation under test. It pull
 [5062/moq](https://github.com/5062/moq), pinned by `moq-bench/Cargo.lock`, so
 `just check` never builds MoQ and only the `just moq-bench-*` recipes fetch it.
 Run `cargo update --manifest-path moq-bench/Cargo.toml -p moq-net -p moq-native`
-to pick up newer commits on that branch.
+to pick up newer commits on that branch. The transport fork revisions in
+`Cargo.toml` must match `rs/trace.toml` on that branch, and `moq-trace` is patched
+for both its crates.io and git sources so every hook shares this checkout.
 
 The dependency direction is deliberate:
 

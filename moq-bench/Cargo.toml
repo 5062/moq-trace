@@ -21,8 +21,9 @@ path = "src/bin/server.rs"
 
 [features]
 default = []
-# Emit moq_trace:* and quic_trace:* LTTng events from both peers.
-lttng = ["moq-net/trace", "moq-native/trace"]
+# Emit moq_trace:* and quic_trace:* LTTng events from both peers. moq-net/trace
+# turns on the LTTng backend, which the patched Quinn's hooks share.
+lttng = ["moq-net/trace"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -43,9 +44,16 @@ url = "2"
 # Both peers must resolve the same transport sources the moq workspace uses.
 # Patches only apply at the workspace root, so an outside workspace has to repeat
 # them or it silently builds a different Quinn and web-transport than the relays.
+# The revisions match rs/trace.toml in the moq repository.
 [patch.crates-io]
 moq-trace = { path = "../crates/moq-trace" }
-quinn = { git = "https://github.com/5062/quinn", branch = "moq-trace/quinn-0.11" }
-quinn-proto = { git = "https://github.com/5062/quinn", branch = "moq-trace/quinn-0.11" }
-web-transport-quinn = { git = "https://github.com/5062/web-transport", branch = "moq-trace/web-transport-quinn-v0.11.11" }
-web-transport-trait = { git = "https://github.com/5062/web-transport", branch = "moq-trace/web-transport-quinn-v0.11.11" }
+quinn = { git = "https://github.com/5062/quinn", rev = "8fdd327360992222590af37ce64375040c8337a1" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "8fdd327360992222590af37ce64375040c8337a1" }
+web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
+web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
+
+# moq-net takes moq-trace from git while the Quinn fork takes it from crates.io.
+# Both must resolve to this checkout, or MoQ and transport hooks link two separate
+# facades with unrelated identifier spaces.
+[patch."https://github.com/5062/moq-trace"]
+moq-trace = { path = "../crates/moq-trace" }
