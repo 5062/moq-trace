@@ -252,7 +252,13 @@ def plot_packet_latency_cdf(
     """Compare RX and TX packet processing at the QUIC connection layer."""
 
     available = {metric for (metric,) in connection.execute("SELECT DISTINCT metric FROM packet_samples").fetchall()}
-    rx_metric = "rx_packet_processing_span" if "rx_packet_processing_span" in available else "rx_packet_span"
+    # Prefer the transport's own share of the packet, so a stack that runs the
+    # application inside packet processing plots comparably with one that does not.
+    rx_metric = next(
+        metric
+        for metric in ("rx_packet_processing_span", "rx_packet_transport_span", "rx_packet_span")
+        if metric in available or metric == "rx_packet_span"
+    )
     candidates = ((rx_metric, "RX"), ("tx_packet_span", "TX"))
     series = tuple(
         CdfSeries(metric, label, connection, "packet_samples", index, "-", 0)
@@ -421,6 +427,7 @@ def plot_object_timelines(
         ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
         ("rx", "quic_payload_decrypt", "RX QUIC Payload Decrypt"),
         ("rx", "quic_frame_process", "RX QUIC Frame Process"),
+        ("rx", "quic_application", "RX QUIC Application"),
     )
     moq_rows = (
         ("rx", "header_parse", "RX Header Parse"),

@@ -177,6 +177,55 @@ fn handle_travels_across_tasks() {
 }
 
 #[test]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn packet_phase_wire_values_match_the_provider() {
+    // The provider receives each phase as its declaration index, so every
+    // variant must keep the value of the C enumerator with the same name.
+    use quic_trace_lttng_sys as ffi;
+    let phases = [
+        (
+            PacketPhase::HeaderParse,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_HEADER_PARSE,
+        ),
+        (
+            PacketPhase::Routing,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_ROUTING,
+        ),
+        (
+            PacketPhase::Scheduling,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_SCHEDULING,
+        ),
+        (
+            PacketPhase::HeaderUnprotect,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_HEADER_UNPROTECT,
+        ),
+        (
+            PacketPhase::PayloadDecrypt,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_PAYLOAD_DECRYPT,
+        ),
+        (
+            PacketPhase::FrameProcess,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_FRAME_PROCESS,
+        ),
+        (
+            PacketPhase::FrameEncode,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_FRAME_ENCODE,
+        ),
+        (
+            PacketPhase::PacketEncrypt,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_PACKET_ENCRYPT,
+        ),
+        (
+            PacketPhase::Application,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_APPLICATION,
+        ),
+    ];
+    for (phase, wire) in phases {
+        assert_eq!(phase as u32, wire, "{phase:?}");
+    }
+}
+
+#[test]
 #[cfg(not(feature = "lttng"))]
 fn disabled_global_is_noop_without_lttng() {
     let handle = global();

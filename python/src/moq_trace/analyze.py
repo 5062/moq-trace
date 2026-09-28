@@ -235,6 +235,25 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     )
     _require_zero(
         connection,
+        """SELECT count(*) FROM packet_phase_intervals AS phase
+           JOIN packet_lifecycles AS packet USING (trace_id)
+           WHERE phase.phase = 'application' AND packet.direction <> 'rx'""",
+        "application packet phases outside inbound packets",
+    )
+    # The transport share of a packet subtracts application time from the
+    # packet span, which is only sound when that time overlaps no other phase.
+    _require_zero(
+        connection,
+        """SELECT count(*) FROM packet_phase_intervals AS application
+           JOIN packet_phase_intervals AS other USING (trace_id)
+           WHERE application.phase = 'application'
+             AND other.span_id <> application.span_id
+             AND other.start_ns < application.end_ns
+             AND application.start_ns < other.end_ns""",
+        "application packet phases overlap other packet phases",
+    )
+    _require_zero(
+        connection,
         """SELECT count(*) FROM (
              SELECT logical_group, logical_frame,
                     count(*) FILTER (direction = 'rx') AS ingress
@@ -391,11 +410,26 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     )
     connection.execute(
         """CREATE TABLE packet_samples AS
+           WITH application AS (
+             SELECT trace_id, start_ns, end_ns::HUGEINT - start_ns::HUGEINT AS ns
+             FROM packet_phase_intervals WHERE phase = 'application'
+           )
            SELECT direction || '_packet_span' AS metric, direction, connection_id,
                   trace_id, 0 AS occurrence,
                   greatest(start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
                   end_ns::HUGEINT - start_ns::HUGEINT AS latency_ns
            FROM selected_packets WHERE outcome = 'success'
+           UNION ALL
+           -- A stack that delivers data after the packet returns records no
+           -- application phase, so its transport span equals its packet span.
+           SELECT 'rx_packet_transport_span', packet.direction, packet.connection_id,
+                  packet.trace_id, 0,
+                  greatest(packet.start_ns::HUGEINT - $origin, 0),
+                  packet.end_ns::HUGEINT - packet.start_ns::HUGEINT
+                    - coalesce((SELECT sum(ns) FROM application
+                                WHERE application.trace_id = packet.trace_id), 0)
+           FROM selected_packets AS packet
+           WHERE packet.direction = 'rx' AND packet.outcome = 'success'
            UNION ALL
            SELECT packet.direction || '_' || phase.phase, packet.direction,
                   packet.connection_id, packet.trace_id, phase.occurrence,
@@ -409,6 +443,9 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
                   packet.trace_id, 0,
                   greatest(schedule.end_ns::HUGEINT - $origin, 0),
                   packet.end_ns::HUGEINT - schedule.end_ns::HUGEINT
+                    - coalesce((SELECT sum(ns) FROM application
+                                WHERE application.trace_id = packet.trace_id
+                                  AND application.start_ns >= schedule.end_ns), 0)
            FROM selected_packets AS packet
            JOIN (
              SELECT trace_id, max(end_ns) AS end_ns
@@ -431,16 +468,18 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
         ("quic_object", "quic_tail_gap", "QUIC tail gap", 1),
         ("quic_object", "quic_full_span", "QUIC full span", 2),
         ("packet", "rx_packet_span", "RX packet span", 0),
-        ("packet", "rx_header_parse", "RX header parse", 1),
-        ("packet", "rx_routing", "RX routing", 2),
-        ("packet", "rx_scheduling", "RX scheduling", 3),
-        ("packet", "rx_header_unprotect", "RX header unprotect", 4),
-        ("packet", "rx_payload_decrypt", "RX payload decrypt", 5),
-        ("packet", "rx_frame_process", "RX frame process", 6),
-        ("packet", "rx_packet_processing_span", "RX packet processing span", 7),
-        ("packet", "tx_packet_span", "TX packet span", 8),
-        ("packet", "tx_frame_encode", "TX frame encode", 9),
-        ("packet", "tx_packet_encrypt", "TX packet encrypt", 10),
+        ("packet", "rx_packet_transport_span", "RX packet transport span", 1),
+        ("packet", "rx_header_parse", "RX header parse", 2),
+        ("packet", "rx_routing", "RX routing", 3),
+        ("packet", "rx_scheduling", "RX scheduling", 4),
+        ("packet", "rx_header_unprotect", "RX header unprotect", 5),
+        ("packet", "rx_payload_decrypt", "RX payload decrypt", 6),
+        ("packet", "rx_frame_process", "RX frame process", 7),
+        ("packet", "rx_application", "RX application", 8),
+        ("packet", "rx_packet_processing_span", "RX packet processing span", 9),
+        ("packet", "tx_packet_span", "TX packet span", 10),
+        ("packet", "tx_frame_encode", "TX frame encode", 11),
+        ("packet", "tx_packet_encrypt", "TX packet encrypt", 12),
     )
     connection.execute(
         """CREATE TABLE metric_definitions(

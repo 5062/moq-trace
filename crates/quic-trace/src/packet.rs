@@ -37,6 +37,14 @@ pub enum PacketPhase {
     FrameEncode,
     /// Encrypt the packet and apply header protection.
     PacketEncrypt,
+    /// Run application callbacks the transport invokes synchronously while it
+    /// processes an inbound packet.
+    ///
+    /// A stack that hands data to the application after packet processing
+    /// returns never records this phase. The interval does not overlap the
+    /// packet's other phases, so subtracting it leaves the transport's own
+    /// share of the packet lifecycle.
+    Application,
 }
 
 /// Whether a packet phase record starts or completes work.

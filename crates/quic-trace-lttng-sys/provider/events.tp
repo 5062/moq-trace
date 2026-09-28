@@ -32,6 +32,7 @@ LTTNG_UST_TRACEPOINT_ENUM(quic_trace, packet_phase,
 		lttng_ust_field_enum_value("frame_process", QUIC_TRACE_PACKET_PHASE_FRAME_PROCESS)
 		lttng_ust_field_enum_value("frame_encode", QUIC_TRACE_PACKET_PHASE_FRAME_ENCODE)
 		lttng_ust_field_enum_value("packet_encrypt", QUIC_TRACE_PACKET_PHASE_PACKET_ENCRYPT)
+		lttng_ust_field_enum_value("application", QUIC_TRACE_PACKET_PHASE_APPLICATION)
 	)
 )
 

@@ -116,6 +116,15 @@ recording, so process-local trace and span IDs from different processes never
 meet. `analyze` picks the only process by default and needs `--pid` when the
 recording holds more than one.
 
+Some transports call the application while they process an inbound packet;
+Google QUICHE, for one, parses and forwards MoQ objects before its packet handler
+returns. Such a provider records that time as the `application` packet phase,
+which may only appear on RX packets and must not overlap the packet's other
+phases. A transport that hands data over after packet processing returns never
+records it. `rx_packet_transport_span` subtracts the phase from the packet span,
+so it measures the transport's own share of a packet the same way on both kinds
+of stack, and `rx_packet_span` keeps the full interval.
+
 Analysis accepts implementation-independent transport traces by default. Use
 `--transport-profile quinn` when the capture must contain the Quinn `routing`
 and `scheduling` phases used by the packet processing metric. Cloudflare quiche

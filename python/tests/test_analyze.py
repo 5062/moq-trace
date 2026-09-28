@@ -127,7 +127,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 ctf_timestamp_ns=trace_id * 1_000 + index,
                 timestamp_ns=timestamp,
                 trace_id=trace_id,
-                span_id=trace_id * 100 + {"routing": 1, "scheduling": 2}[phase],
+                span_id=trace_id * 100 + {"routing": 1, "scheduling": 2, "frame_process": 3, "application": 4}[phase],
                 phase=phase,
                 edge=edge,
                 outcome=outcome,
@@ -250,6 +250,69 @@ class SqlAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(self.connection.execute("SELECT count(*) FROM timeline_selections").fetchone()[0], 3)
 
+    def _derive_all(self) -> None:
+        _validate_raw(self.connection)
+        origin = _select_window(
+            self.connection,
+            object_size=16,
+            subscribers=1,
+            warmup_seconds=0,
+            cooldown_seconds=0,
+        )
+        coverage.resolve(self.connection)
+        _derive_samples(self.connection, origin)
+        _define_metrics(self.connection)
+
+    def _packet_metric(self, metric: str) -> list[int]:
+        return [
+            int(latency)
+            for (latency,) in self.connection.execute(
+                "SELECT latency_ns FROM packet_samples WHERE metric = ?", [metric]
+            ).fetchall()
+        ]
+
+    def test_transport_span_excludes_synchronous_application_work(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.phase(3, "routing", 110_000, 120_000)
+        self.phase(3, "scheduling", 120_000, 130_000)
+        self.phase(3, "frame_process", 140_000, 150_000)
+        self.phase(3, "application", 150_000, 180_000)
+
+        self._derive_all()
+
+        self.assertEqual(self._packet_metric("rx_packet_span"), [115_000])
+        self.assertEqual(self._packet_metric("rx_packet_transport_span"), [85_000])
+        self.assertEqual(self._packet_metric("rx_packet_processing_span"), [45_000])
+        self.assertEqual(self._packet_metric("rx_application"), [30_000])
+
+    def test_transport_span_equals_packet_span_without_application_phases(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+
+        self._derive_all()
+
+        self.assertEqual(self._packet_metric("rx_packet_transport_span"), self._packet_metric("rx_packet_span"))
+
+    def test_rejects_application_phases_on_outbound_packets(self) -> None:
+        self.packet(4, "tx", 2)
+        self.phase(4, "application", 230_000, 240_000)
+
+        with self.assertRaisesRegex(TraceError, "application packet phases outside inbound packets"):
+            _validate_raw(self.connection)
+
+    def test_rejects_application_phases_overlapping_other_phases(self) -> None:
+        self.packet(3, "rx", 1)
+        self.phase(3, "frame_process", 140_000, 160_000)
+        self.phase(3, "application", 150_000, 180_000)
+
+        with self.assertRaisesRegex(TraceError, "application packet phases overlap other packet phases"):
+            _validate_raw(self.connection)
+
     def test_cut_through_forwarding_has_no_post_ingress_tail(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
@@ -310,7 +373,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(metadata.processes.captured_pids, (0,))
                 self.assertEqual(
                     connection.execute("SELECT count(*) FROM metric_statistics").fetchone()[0],
-                    9,
+                    10,
                 )
 
     def test_generic_profile_accepts_transport_without_quinn_phases(self) -> None:
