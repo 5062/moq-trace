@@ -83,7 +83,7 @@ fix:
     ruff check --fix python
     ruff format python
 
-# The measurement peers. They build against the sibling moq repository, so they are
+# The measurement peers. They build against the instrumented moq branch, so they are
 # excluded from the workspace and from `check`, which must pass on its own.
 moq-bench-build:
     # Release: a measurement must not carry a debug-built peer's overhead, and the

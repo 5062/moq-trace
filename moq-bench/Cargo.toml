@@ -1,7 +1,6 @@
-# The bench peers are their own workspace so `just check` still works from a
-# standalone toolkit checkout. They depend on the MoQ implementation under test,
-# which lives in the sibling moq repository, and the toolkit must not need that to
-# build.
+# The bench peers are their own workspace so `just check` never builds the MoQ
+# implementation under test. They pull it from the instrumented moq branch, and
+# `Cargo.lock` pins the revision; `cargo update -p moq-net -p moq-native` refreshes it.
 [workspace]
 
 [package]
@@ -29,11 +28,11 @@ lttng = ["moq-net/trace", "moq-native/trace"]
 anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive", "env"] }
 humantime = "2.3"
-moq-native = { path = "../../moq-trace/rs/moq-native", default-features = false, features = [
+moq-native = { git = "https://github.com/5062/moq", branch = "moq-trace", default-features = false, features = [
     "aws-lc-rs",
     "quinn",
 ] }
-moq-net = { path = "../../moq-trace/rs/moq-net" }
+moq-net = { git = "https://github.com/5062/moq", branch = "moq-trace" }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

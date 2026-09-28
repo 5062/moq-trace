@@ -62,8 +62,8 @@ tests, both C++ facade smoke tests, and Python linting. It also links a real
 binary to confirm the LTTng providers survive garbage collection and reach a
 capture, and consumes the installed CMake packages from separate prefixes.
 
-The bench peers are checked separately, because they need the sibling moq
-repository present for the implementation under test:
+The bench peers are checked separately, because they fetch and build the moq
+implementation under test from its git branch:
 
 ```sh
 nix develop --command just moq-bench-check

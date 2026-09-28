@@ -116,9 +116,12 @@ comparison.
 ## Boundary
 
 This directory sits outside the toolkit's workspace, which `Cargo.toml` enforces
-with `exclude`, because it depends on the MoQ implementation under test in a
-sibling repository. `just check` still runs from a standalone toolkit checkout;
-only the `just moq-bench-*` recipes need that sibling present.
+with `exclude`, because it depends on the MoQ implementation under test. It pulls
+`moq-net` and `moq-native` from the `moq-trace` branch of
+[5062/moq](https://github.com/5062/moq), pinned by `moq-bench/Cargo.lock`, so
+`just check` never builds MoQ and only the `just moq-bench-*` recipes fetch it.
+Run `cargo update --manifest-path moq-bench/Cargo.toml -p moq-net -p moq-native`
+to pick up newer commits on that branch.
 
 The dependency direction is deliberate:
 
