@@ -67,26 +67,19 @@ def _stage_frames(connection: duckdb.DuckDBPyConnection) -> None:
     the square of the capture length. Both sides are split into the offset
     buckets they cover and also matched on the bucket. An overlapping pair shares
     the bucket where its overlap begins, and only that bucket reports it, so each
-    pair appears exactly once. A zero-length frame still occupies the bucket of
-    its offset, so it overlaps exactly the objects it did without buckets.
+    pair appears exactly once.
     """
 
     connection.execute(
         """CREATE TEMP TABLE coverage_frames AS
            WITH targets AS (
-             SELECT *, unnest(range(
-                      (stream_offset_start // $bucket)::BIGINT,
-                      ((greatest(stream_offset_end, stream_offset_start + 1) - 1) // $bucket + 1)::BIGINT
-                    )) AS bucket
+             SELECT *, unnest(offset_buckets(stream_offset_start, stream_offset_end, $bucket)) AS bucket
              FROM coverage_targets
            ), frames AS (
              SELECT packet.connection_id, packet.direction, frame.stream_id,
                     frame.offset_start, frame.offset_end, frame.timestamp_ns,
                     packet.trace_id, packet.start_ns, packet.end_ns,
-                    unnest(range(
-                      (frame.offset_start // $bucket)::BIGINT,
-                      ((greatest(frame.offset_end, frame.offset_start + 1) - 1) // $bucket + 1)::BIGINT
-                    )) AS bucket
+                    unnest(offset_buckets(frame.offset_start, frame.offset_end, $bucket)) AS bucket
              FROM quic_stream_frame AS frame
              JOIN packet_lifecycles AS packet USING (trace_id)
              WHERE packet.outcome = 'success' AND frame.outcome = 'success'
@@ -151,10 +144,7 @@ def _stage_completion(connection: duckdb.DuckDBPyConnection) -> None:
              WHERE segment_end IS NOT NULL
            ), covering AS (
              SELECT trace_id, seq, covered_start, covered_end,
-                    unnest(range(
-                      (covered_start // $bucket)::BIGINT,
-                      ((covered_end - 1) // $bucket + 1)::BIGINT
-                    )) AS bucket
+                    unnest(offset_buckets(covered_start, covered_end, $bucket)) AS bucket
              FROM coverage_frames
              WHERE covered_start < covered_end
            ), first_cover AS (

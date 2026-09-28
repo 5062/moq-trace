@@ -17,7 +17,7 @@ sys.path.insert(0, str(SOURCE))
 import trace_source  # noqa: E402
 from trace_source import Enum, Event  # noqa: E402
 
-from moq_trace import coverage, ctf  # noqa: E402
+from moq_trace import coverage, ctf, macros  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
     _define_lifecycle_views,
     _define_metrics,
@@ -39,6 +39,7 @@ class SqlAnalysisTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.connection = duckdb.connect(":memory:")
+        macros.define(self.connection)
         self.connection.execute("CREATE SCHEMA raw")
         for name, schema in ctf.SCHEMAS.items():
             self.connection.register("rows", pa.Table.from_batches([], schema=schema))

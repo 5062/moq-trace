@@ -10,7 +10,7 @@ from collections.abc import Collection, Sequence
 import duckdb
 import pyarrow as pa
 
-from . import coverage, ctf
+from . import coverage, ctf, macros
 from .artifact import write_metadata
 from .errors import TraceError
 from .metadata import (
@@ -335,8 +335,8 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
                   row_number() OVER (
                     PARTITION BY rx.trace_id ORDER BY tx.session_id, tx.trace_id
                   ) - 1 AS copy_ordinal,
-                  greatest(rx.start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
-                  tx.end_ns::HUGEINT - rx.start_ns::HUGEINT AS latency_ns
+                  elapsed_ns(rx.start_ns, $origin) AS elapsed_ns,
+                  span_ns(rx.start_ns, tx.end_ns) AS latency_ns
            FROM selected_rx AS rx
            JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id""",
         {"origin": origin},
@@ -358,10 +358,10 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
              JOIN object_packet_coverage AS outbound ON outbound.trace_id = tx.trace_id
            )
            SELECT group_id, object_id, metric, copy_ordinal,
-                  greatest(first_start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
+                  elapsed_ns(first_start_ns, $origin) AS elapsed_ns,
                   CASE WHEN metric = 'quic_tail_gap'
-                       THEN greatest(finish_ns::HUGEINT - start_ns::HUGEINT, 0)
-                       ELSE finish_ns::HUGEINT - start_ns::HUGEINT
+                       THEN greatest(span_ns(start_ns, finish_ns), 0)
+                       ELSE span_ns(start_ns, finish_ns)
                   END AS latency_ns
            FROM copies
            CROSS JOIN LATERAL (VALUES
@@ -386,21 +386,21 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     connection.execute(
         """CREATE TABLE packet_samples AS
            WITH application AS (
-             SELECT trace_id, start_ns, end_ns::HUGEINT - start_ns::HUGEINT AS ns
+             SELECT trace_id, start_ns, span_ns(start_ns, end_ns) AS ns
              FROM packet_phase_intervals WHERE phase = 'application'
            )
            SELECT direction || '_packet_span' AS metric, direction, connection_id,
                   trace_id, 0 AS occurrence,
-                  greatest(start_ns::HUGEINT - $origin, 0) AS elapsed_ns,
-                  end_ns::HUGEINT - start_ns::HUGEINT AS latency_ns
+                  elapsed_ns(start_ns, $origin) AS elapsed_ns,
+                  span_ns(start_ns, end_ns) AS latency_ns
            FROM selected_packets WHERE outcome = 'success'
            UNION ALL
            -- A stack that delivers data after the packet returns records no
            -- application phase, so its transport span equals its packet span.
            SELECT 'rx_packet_transport_span', packet.direction, packet.connection_id,
                   packet.trace_id, 0,
-                  greatest(packet.start_ns::HUGEINT - $origin, 0),
-                  packet.end_ns::HUGEINT - packet.start_ns::HUGEINT
+                  elapsed_ns(packet.start_ns, $origin),
+                  span_ns(packet.start_ns, packet.end_ns)
                     - coalesce((SELECT sum(ns) FROM application
                                 WHERE application.trace_id = packet.trace_id), 0)
            FROM selected_packets AS packet
@@ -408,16 +408,16 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            UNION ALL
            SELECT packet.direction || '_' || phase.phase, packet.direction,
                   packet.connection_id, packet.trace_id, phase.occurrence,
-                  greatest(phase.start_ns::HUGEINT - $origin, 0),
-                  phase.end_ns::HUGEINT - phase.start_ns::HUGEINT
+                  elapsed_ns(phase.start_ns, $origin),
+                  span_ns(phase.start_ns, phase.end_ns)
            FROM packet_phase_intervals AS phase
            JOIN selected_packets AS packet USING (trace_id)
            WHERE phase.outcome = 'success'
            UNION ALL
            SELECT 'rx_packet_processing_span', packet.direction, packet.connection_id,
                   packet.trace_id, 0,
-                  greatest(schedule.end_ns::HUGEINT - $origin, 0),
-                  packet.end_ns::HUGEINT - schedule.end_ns::HUGEINT
+                  elapsed_ns(schedule.end_ns, $origin),
+                  span_ns(schedule.end_ns, packet.end_ns)
                     - coalesce((SELECT sum(ns) FROM application
                                 WHERE application.trace_id = packet.trace_id
                                   AND application.start_ns >= schedule.end_ns), 0)
@@ -493,7 +493,7 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
         """CREATE TEMP TABLE object_slowest AS
            SELECT rx.trace_id, rx.logical_group, rx.logical_frame, rx.group_id,
                   rx.object_id, rx.start_ns,
-                  max((tx.end_ns - rx.start_ns) / 1000.0) AS actual_us
+                  max(span_us(rx.start_ns, tx.end_ns)) AS actual_us
            FROM selected_rx AS rx
            JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
            GROUP BY ALL"""
@@ -542,7 +542,7 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
                     ORDER BY object.session_id, object.trace_id
                   ) AS subscriber_ordinal,
                   count(*) OVER (PARTITION BY object.selection_order) AS copy_count,
-                  (lifecycle.end_ns - selection.start_ns) / 1000.0 AS full_span_us
+                  span_us(selection.start_ns, lifecycle.end_ns) AS full_span_us
            FROM timeline_objects AS object
            JOIN timeline_selections AS selection USING (selection_order)
            JOIN object_lifecycles AS lifecycle ON lifecycle.trace_id = object.trace_id
@@ -550,43 +550,43 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
     )
     connection.execute(
         """CREATE TABLE timeline_intervals AS
+           -- Every interval that belongs to a timeline object, keyed by that
+           -- object's trace: its own lifecycle and phases, then each packet
+           -- that carried it and those packets' phases.
+           WITH packets AS (
+             SELECT trace_id,
+                    unnest(packet_ids) AS packet_id,
+                    unnest(range(len(packet_ids))) AS occurrence
+             FROM object_packet_coverage
+             SEMI JOIN timeline_objects USING (trace_id)
+           ), intervals AS (
+             SELECT trace_id, 'object' AS phase, 0 AS occurrence, start_ns, end_ns
+             FROM object_lifecycles
+             SEMI JOIN timeline_objects USING (trace_id)
+             UNION ALL
+             SELECT trace_id, phase, occurrence, start_ns, end_ns
+             FROM object_phase_intervals
+             SEMI JOIN timeline_objects USING (trace_id)
+             WHERE outcome = 'success'
+             UNION ALL
+             SELECT packet.trace_id, 'quic_packet', packet.occurrence,
+                    lifecycle.start_ns, lifecycle.end_ns
+             FROM packets AS packet
+             JOIN packet_lifecycles AS lifecycle ON lifecycle.trace_id = packet.packet_id
+             UNION ALL
+             SELECT packet.trace_id, 'quic_' || phase.phase, phase.occurrence,
+                    phase.start_ns, phase.end_ns
+             FROM packets AS packet
+             JOIN packet_phase_intervals AS phase ON phase.trace_id = packet.packet_id
+             WHERE phase.outcome = 'success'
+           )
            SELECT object.selection_order, object.direction, object.session_id,
-                  'object' AS phase, 0 AS occurrence,
-                  (lifecycle.start_ns::HUGEINT - selection.start_ns) / 1000.0 AS start_us,
-                  (lifecycle.end_ns::HUGEINT - selection.start_ns) / 1000.0 AS end_us
+                  interval.phase, interval.occurrence,
+                  span_us(selection.start_ns, interval.start_ns) AS start_us,
+                  span_us(selection.start_ns, interval.end_ns) AS end_us
            FROM timeline_objects AS object
            JOIN timeline_selections AS selection USING (selection_order)
-           JOIN object_lifecycles AS lifecycle ON lifecycle.trace_id = object.trace_id
-           UNION ALL
-           SELECT object.selection_order, object.direction, object.session_id,
-                  phase.phase, phase.occurrence,
-                  (phase.start_ns::HUGEINT - selection.start_ns) / 1000.0,
-                  (phase.end_ns::HUGEINT - selection.start_ns) / 1000.0
-           FROM timeline_objects AS object
-           JOIN timeline_selections AS selection USING (selection_order)
-           JOIN object_phase_intervals AS phase ON phase.trace_id = object.trace_id
-           WHERE phase.outcome = 'success'
-           UNION ALL
-           SELECT object.selection_order, object.direction, object.session_id,
-                  'quic_packet', list_position(coverage.packet_ids, packet.trace_id) - 1,
-                  (packet.start_ns::HUGEINT - selection.start_ns) / 1000.0,
-                  (packet.end_ns::HUGEINT - selection.start_ns) / 1000.0
-           FROM timeline_objects AS object
-           JOIN timeline_selections AS selection USING (selection_order)
-           JOIN object_packet_coverage AS coverage ON coverage.trace_id = object.trace_id
-           JOIN packet_lifecycles AS packet
-             ON list_contains(coverage.packet_ids, packet.trace_id)
-           UNION ALL
-           SELECT object.selection_order, object.direction, object.session_id,
-                  'quic_' || phase.phase, phase.occurrence,
-                  (phase.start_ns::HUGEINT - selection.start_ns) / 1000.0,
-                  (phase.end_ns::HUGEINT - selection.start_ns) / 1000.0
-           FROM timeline_objects AS object
-           JOIN timeline_selections AS selection USING (selection_order)
-           JOIN object_packet_coverage AS coverage ON coverage.trace_id = object.trace_id
-           JOIN packet_phase_intervals AS phase
-             ON list_contains(coverage.packet_ids, phase.trace_id)
-           WHERE phase.outcome = 'success'"""
+           JOIN intervals AS interval ON interval.trace_id = object.trace_id"""
     )
 
 
@@ -696,6 +696,7 @@ def run(
         database = staging / output.name
         connection = duckdb.connect(str(database))
         try:
+            macros.define(connection)
             captured = _ingest(connection, input_path, expected_pids)
             analyzed = _select_process(connection, pid, captured)
             _define_lifecycle_views(connection)
