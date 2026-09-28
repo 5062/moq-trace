@@ -188,3 +188,117 @@ fn disabled_global_is_noop_without_lttng() {
     handle.object(context()).finish(ObjectOutcome::Success);
     assert!(events(&handle).is_empty());
 }
+
+/// Poll `future` to completion on the current thread.
+fn drive<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+    }
+}
+
+/// A future that is pending on its first poll and then completes with `result`.
+fn pending_once<T>(result: T) -> impl std::future::Future<Output = T> {
+    let mut result = Some(result);
+    let mut polled = false;
+    std::future::poll_fn(move |_| {
+        if !polled {
+            polled = true;
+            return std::task::Poll::Pending;
+        }
+        std::task::Poll::Ready(result.take().expect("polled after completion"))
+    })
+}
+
+/// Return each phase occurrence as `(span_id, start_ns, done_ns, outcome)`.
+fn phase_occurrences(events: &[Event]) -> Vec<(u64, u64, u64, Option<ObjectOutcome>)> {
+    let mut occurrences = Vec::new();
+    for event in events {
+        let Event::Phase {
+            timestamp_ns,
+            span_id,
+            edge,
+            outcome,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        match edge {
+            PhaseEdge::Start => occurrences.push((*span_id, *timestamp_ns, 0, None)),
+            PhaseEdge::Done => {
+                let occurrence = occurrences
+                    .iter_mut()
+                    .find(|occurrence| occurrence.0 == *span_id)
+                    .expect("a done edge follows its start edge");
+                occurrence.2 = *timestamp_ns;
+                occurrence.3 = *outcome;
+            }
+        }
+    }
+    occurrences
+}
+
+#[test]
+fn measure_records_each_poll_and_excludes_pending_time() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result: Result<u32, ()> =
+        drive(object.measure(ObjectPhase::PayloadRead, pending_once(Ok(7))));
+    assert_eq!(result, Ok(7));
+    object.finish(ObjectOutcome::Success);
+
+    let occurrences = phase_occurrences(&events(&handle));
+    assert_eq!(occurrences.len(), 2, "one occurrence per poll");
+    assert_ne!(occurrences[0].0, occurrences[1].0);
+    for (_, start_ns, done_ns, outcome) in &occurrences {
+        assert!(start_ns <= done_ns);
+        assert_eq!(*outcome, Some(ObjectOutcome::Success));
+    }
+    // The gap between the pending poll and the completing one belongs to no phase.
+    assert!(occurrences[0].2 <= occurrences[1].1);
+}
+
+#[test]
+fn measure_marks_the_completing_poll_failed_on_error() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result: Result<(), &str> =
+        drive(object.measure(ObjectPhase::HeaderParse, pending_once(Err("short"))));
+    assert_eq!(result, Err("short"));
+    drop(object);
+
+    let outcomes: Vec<_> = phase_occurrences(&events(&handle))
+        .into_iter()
+        .map(|occurrence| occurrence.3)
+        .collect();
+    assert_eq!(
+        outcomes,
+        [Some(ObjectOutcome::Success), Some(ObjectOutcome::Failed)]
+    );
+}
+
+#[test]
+fn measure_without_phase_tracing_only_runs_the_future() {
+    let handle = trace();
+    let recording = recording(&handle);
+    recording.enable_only(Tracepoint::Start);
+    let mut object = handle.object(context());
+    let clock_reads = recording.clock_reads();
+    let result: Result<u32, ()> =
+        drive(object.measure(ObjectPhase::PayloadWrite, pending_once(Ok(3))));
+    assert_eq!(result, Ok(3));
+    assert_eq!(recording.clock_reads(), clock_reads);
+    assert!(phase_occurrences(&events(&handle)).is_empty());
+    object.finish(ObjectOutcome::Success);
+}
+
+#[test]
+fn connection_ids_are_never_reused() {
+    let first = next_connection_id();
+    let second = next_connection_id();
+    assert!(second > first);
+}

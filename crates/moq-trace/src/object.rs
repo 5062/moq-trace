@@ -1,3 +1,5 @@
+use std::task::Poll;
+
 use crate::backend::{Event, Tracepoint};
 use crate::{Direction, Handle, PhaseEdge};
 
@@ -32,6 +34,12 @@ impl std::fmt::Display for LogicalId {
 }
 
 /// A measured step in the moq-transport object lifecycle.
+///
+/// Phases measure processing. Time a phase spends waiting on I/O, such as bytes
+/// that have not arrived or flow control that blocks a write, belongs to no
+/// phase. A phase that awaits I/O should run through [`ObjectTrace::measure`],
+/// which records only the polls that do work. Such a phase can therefore appear
+/// several times for one object, so a per-object figure sums the occurrences.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum ObjectPhase {
@@ -39,9 +47,19 @@ pub enum ObjectPhase {
     HeaderParse,
     /// Create an inbound object in the relay model.
     Create,
-    /// Read an inbound object payload.
+    /// Read inbound payload bytes from the transport.
+    ///
+    /// The phase covers the transport handing received bytes to the relay. It
+    /// excludes waiting for them to arrive, and it excludes copying them into
+    /// the relay model, which belongs to `FrameCommit`. A relay may record one
+    /// phase per chunk.
     PayloadRead,
-    /// Commit an inbound frame to the relay model.
+    /// Make received payload bytes visible to relay consumers.
+    ///
+    /// The phase covers writing payload bytes into the relay model and the step
+    /// that marks the object complete, whichever of those wakes a waiting
+    /// consumer. A relay may record one phase per chunk, and the completion step
+    /// belongs to the last one or to a final phase of its own.
     FrameCommit,
     /// Clone or select an outbound object from the relay model.
     Clone,
@@ -195,6 +213,43 @@ impl ObjectTrace {
         }
     }
 
+    /// Run a phase that awaits I/O, recording only the polls that do work.
+    ///
+    /// Each poll of `future` becomes one occurrence of `phase`, timed from the
+    /// start of the poll to its return, so time the future spends pending belongs
+    /// to no phase. A poll that returns pending records `Success`, because it did
+    /// its share of the work without failing. The poll that completes records
+    /// `Success` or `Failed` from the result. Both edges of an occurrence are
+    /// emitted after its poll returns, so the provider calls add nothing to the
+    /// measured interval.
+    pub async fn measure<F, T, E>(&mut self, phase: ObjectPhase, future: F) -> Result<T, E>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|cx| {
+            let Some(state) = self
+                .0
+                .as_ref()
+                .filter(|state| state.backend.enabled(Tracepoint::Phase))
+            else {
+                return future.as_mut().poll(cx);
+            };
+            let start_ns = state.backend.now_ns();
+            let poll = future.as_mut().poll(cx);
+            let end_ns = state.backend.now_ns();
+            let outcome = match &poll {
+                Poll::Ready(Err(_)) => ObjectOutcome::Failed,
+                _ => ObjectOutcome::Success,
+            };
+            let span_id = state.backend.next_span_id();
+            state.emit_phase_at(span_id, phase, PhaseEdge::Start, None, start_ns);
+            state.emit_phase_at(span_id, phase, PhaseEdge::Done, Some(outcome), end_ns);
+            poll
+        })
+        .await
+    }
+
     fn emit_phase(
         &self,
         span_id: u64,
@@ -225,8 +280,19 @@ impl ObjectTraceState {
         edge: PhaseEdge,
         outcome: Option<ObjectOutcome>,
     ) {
+        self.emit_phase_at(span_id, phase, edge, outcome, self.backend.now_ns());
+    }
+
+    fn emit_phase_at(
+        &self,
+        span_id: u64,
+        phase: ObjectPhase,
+        edge: PhaseEdge,
+        outcome: Option<ObjectOutcome>,
+        timestamp_ns: u64,
+    ) {
         self.backend.emit(Event::Phase {
-            timestamp_ns: self.backend.now_ns(),
+            timestamp_ns,
             trace_id: self.trace_id,
             span_id,
             phase,

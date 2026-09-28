@@ -12,4 +12,4 @@ mod ids;
 
 pub use backend::{Backend, Handle, Schema, Tracepoint};
 pub use clock::now_ns;
-pub use ids::{next_span_id, next_trace_id};
+pub use ids::{next_connection_id, next_span_id, next_trace_id};

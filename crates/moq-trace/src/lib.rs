@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use quic_trace::{
     Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace, PacketSpace,
-    PacketTrace, SocketOutcome, SocketStats, SocketTrace, StreamFrame,
+    PacketTrace, SocketOutcome, SocketStats, SocketTrace, StreamFrame, next_connection_id,
 };
 pub use trace_core::now_ns;
 

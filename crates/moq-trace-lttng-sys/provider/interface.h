@@ -21,7 +21,12 @@ enum moq_trace_edge {
 enum moq_trace_object_phase {
 	MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE,
 	MOQ_TRACE_OBJECT_PHASE_CREATE,
+	/* The transport handing received payload bytes to the relay. Waiting for
+	 * them to arrive and copying them into the relay model are excluded. Every
+	 * phase excludes time spent waiting on I/O. */
 	MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ,
+	/* Write payload bytes into the relay model and mark the object complete,
+	 * so the bytes become visible to relay consumers. */
 	MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT,
 	MOQ_TRACE_OBJECT_PHASE_CLONE,
 	MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE,

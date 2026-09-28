@@ -5,7 +5,7 @@ compile_error!("the lttng feature is supported only on Linux");
 
 use std::sync::OnceLock;
 
-pub use trace_core::{next_span_id, next_trace_id, now_ns};
+pub use trace_core::{next_connection_id, next_span_id, next_trace_id, now_ns};
 
 mod backend;
 

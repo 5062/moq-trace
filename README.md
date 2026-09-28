@@ -56,6 +56,16 @@ moq-trace = { version = "0.1", features = ["lttng"] }
 traces to the shared transport facade. This keeps one API available to a Rust
 relay and its Quinn hooks.
 
+Object phases measure processing, not waiting. Run any phase that awaits I/O
+through `ObjectTrace::measure`, which records each poll that does work and
+leaves time spent pending outside every phase.
+
+A transport allocates each connection's identity with `next_connection_id`
+(`quic_trace::next_connection_id()` in C++) and stamps it on that connection's
+packet, socket, and object events. The counter never reuses a value. Do not use
+an address-derived ID such as Quinn's `stable_id`: a later connection can reuse
+the address, and the analysis joins by connection ID without a time bound.
+
 ## C++ instrumentation
 
 Install the CMake project and consume it with:
