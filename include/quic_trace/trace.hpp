@@ -94,6 +94,7 @@ class PacketPhase {
 
   /** Finish the phase with an explicit result. */
   void finish(quic_trace_packet_outcome outcome) {
+    if (span_id_ == 0) return;
     finish_at(outcome, detail::now_ns());
   }
 
@@ -184,7 +185,8 @@ class Packet {
 
   /** Start a measured packet phase. */
   PacketPhase phase(quic_trace_packet_phase value) const {
-    return phase_at(value, detail::now_ns());
+    if (trace_id_ == 0 || !quic_trace_quic_packet_phase_enabled()) return {};
+    return PacketPhase(trace_id_, value, detail::now_ns());
   }
 
   /** Start a measured packet phase at a previously captured timestamp. */
@@ -215,7 +217,7 @@ class Packet {
  private:
   void emit_start() const {
     const struct quic_trace_quic_packet_start event{
-        context_.start_ns.value_or(detail::now_ns()),
+        context_.start_ns ? *context_.start_ns : detail::now_ns(),
         trace_id_,
         context_.connection_id,
         static_cast<std::uint8_t>(context_.direction),

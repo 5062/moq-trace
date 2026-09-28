@@ -101,6 +101,7 @@ class ObjectPhase {
 
   /** Finish the phase with an explicit result. */
   void finish(moq_trace_object_outcome outcome) {
+    if (span_id_ == 0) return;
     finish_at(outcome, quic_trace::detail::now_ns());
   }
 
@@ -194,7 +195,8 @@ class Object {
 
   /** Start a measured object phase. */
   ObjectPhase phase(moq_trace_object_phase value) const {
-    return phase_at(value, quic_trace::detail::now_ns());
+    if (trace_id_ == 0 || !moq_trace_moq_object_phase_enabled()) return {};
+    return ObjectPhase(trace_id_, value, quic_trace::detail::now_ns());
   }
 
   /** Start a measured object phase at a previously captured timestamp. */
@@ -214,7 +216,7 @@ class Object {
  private:
   void emit_start() const {
     const struct moq_trace_moq_object_start event{
-        context_.start_ns.value_or(quic_trace::detail::now_ns()),
+        context_.start_ns ? *context_.start_ns : quic_trace::detail::now_ns(),
         trace_id_,
         context_.logical_id.group,
         context_.logical_id.frame,
