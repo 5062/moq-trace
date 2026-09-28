@@ -37,15 +37,6 @@ class ExperimentError(RuntimeError):
 
 
 @dataclasses.dataclass(frozen=True)
-class Commands:
-    """Exact commands used by one workload."""
-
-    relay: tuple[str, ...]
-    publisher: tuple[str, ...]
-    subscriber: tuple[str, ...]
-
-
-@dataclasses.dataclass(frozen=True)
 class Capture:
     """One CTF recording and the processes it holds."""
 
@@ -83,7 +74,7 @@ def _run_seconds(config: ExperimentConfig) -> float:
     return config.warmup_seconds + config.duration_seconds + config.cooldown_seconds
 
 
-def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> Commands:
+def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> CommandSet:
     """Construct exact argv arrays without invoking a shell."""
 
     relay_binary = str(config.relay_bin)
@@ -151,7 +142,7 @@ def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> Co
             config.subscriber.ssh,
             remote,
         ]
-    return Commands(tuple(relay), tuple(publisher), tuple(subscriber))
+    return CommandSet(relay=tuple(relay), publisher=tuple(publisher), subscriber=tuple(subscriber))
 
 
 def _validate_environment(config: ExperimentConfig) -> None:
@@ -160,7 +151,7 @@ def _validate_environment(config: ExperimentConfig) -> None:
             raise ExperimentError(f"relay CPU {config.relay_cpu} is unavailable to this process")
 
 
-def _capture(config: ExperimentConfig, command: Commands, output: pathlib.Path) -> Capture:
+def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path) -> Capture:
     ctf = output / "trace"
     session = LttngSession(ctf)
     processes: list[ManagedProcess] = []
@@ -324,7 +315,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
             bench=str(config.bench_bin),
             bench_sha256=_file_hash(config.bench_bin),
         ),
-        commands=CommandSet(relay=command.relay, publisher=command.publisher, subscriber=command.subscriber),
+        commands=command,
     )
     _validate_workload(database)
     if config.render:

@@ -9,7 +9,9 @@
 mod backend;
 mod clock;
 mod ids;
+mod wire;
 
 pub use backend::{Backend, Handle, Schema, Tracepoint};
 pub use clock::now_ns;
 pub use ids::{next_connection_id, next_span_id, next_trace_id};
+pub use wire::{PhaseEdge, encode_optional};

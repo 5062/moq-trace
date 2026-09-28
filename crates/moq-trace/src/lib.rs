@@ -20,11 +20,7 @@ pub use object::{
     ObjectTrace,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PhaseEdge {
-    Start,
-    Done,
-}
+use trace_core::PhaseEdge;
 
 /// A cheap cloneable handle for MoQ and transport instrumentation sites.
 #[derive(Clone, Default)]

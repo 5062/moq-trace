@@ -1,5 +1,5 @@
 use crate::backend::{Event, Tracepoint};
-use crate::{Direction, Handle, PacketSpace};
+use crate::{Direction, Handle, PacketSpace, PhaseEdge};
 
 /// Result of packet or packet-phase processing.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -45,13 +45,6 @@ pub enum PacketPhase {
     /// packet's other phases, so subtracting it leaves the transport's own
     /// share of the packet lifecycle.
     Application,
-}
-
-/// Whether a packet phase record starts or completes work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PhaseEdge {
-    Start,
-    Done,
 }
 
 /// Metadata known when a packet trace begins.
@@ -206,31 +199,26 @@ impl PacketTrace {
 
     /// Start a measured packet lifecycle phase.
     pub fn phase(&self, phase: PacketPhase) -> PacketPhaseTrace {
-        let Some(state) = &self.0 else {
-            return PacketPhaseTrace::disabled();
-        };
-        if !state.backend.enabled(Tracepoint::PacketPhase) {
-            return PacketPhaseTrace::disabled();
-        }
-        Self::start_phase_at(state, phase, state.backend.now_ns())
+        self.start_phase(phase, None)
     }
 
     /// Start a measured packet phase at a previously captured timestamp.
     pub fn phase_at(&self, phase: PacketPhase, timestamp_ns: u64) -> PacketPhaseTrace {
+        self.start_phase(phase, Some(timestamp_ns))
+    }
+
+    /// Start a phase at `timestamp_ns`, or at the current time when it is absent.
+    ///
+    /// The clock is read only after enablement is checked, so a disabled phase
+    /// costs no clock read.
+    fn start_phase(&self, phase: PacketPhase, timestamp_ns: Option<u64>) -> PacketPhaseTrace {
         let Some(state) = &self.0 else {
             return PacketPhaseTrace::disabled();
         };
         if !state.backend.enabled(Tracepoint::PacketPhase) {
             return PacketPhaseTrace::disabled();
         }
-        Self::start_phase_at(state, phase, timestamp_ns)
-    }
-
-    fn start_phase_at(
-        state: &PacketTraceState,
-        phase: PacketPhase,
-        timestamp_ns: u64,
-    ) -> PacketPhaseTrace {
+        let timestamp_ns = timestamp_ns.unwrap_or_else(|| state.backend.now_ns());
         let span_id = state.backend.next_span_id();
         state.backend.emit(Event::PacketPhase {
             timestamp_ns,

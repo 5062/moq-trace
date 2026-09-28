@@ -5,12 +5,12 @@ compile_error!("the lttng feature is supported only on Linux");
 
 use std::sync::OnceLock;
 
+use trace_core::PhaseEdge;
 pub use trace_core::{next_connection_id, next_span_id, next_trace_id, now_ns};
 
 mod backend;
 
 mod packet;
-use packet::PhaseEdge;
 pub use packet::{
     PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace, PacketTrace, StreamFrame,
 };

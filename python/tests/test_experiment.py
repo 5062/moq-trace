@@ -19,7 +19,8 @@ from moq_trace import capture, experiment  # noqa: E402
 from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.capture import _provider_listed  # noqa: E402
 from moq_trace.config import ComparisonConfig, ExperimentConfig, SubscriberHost  # noqa: E402
-from moq_trace.experiment import Commands, ExperimentError, _validate_workload, commands  # noqa: E402
+from moq_trace.experiment import ExperimentError, _validate_workload, commands  # noqa: E402
+from moq_trace.metadata import CommandSet  # noqa: E402
 
 
 class ExperimentTests(unittest.TestCase):
@@ -209,7 +210,7 @@ class ExperimentTests(unittest.TestCase):
         return start
 
     def _capture(self, config: ExperimentConfig) -> experiment.Capture:
-        command = Commands(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
+        command = CommandSet(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
         with tempfile.TemporaryDirectory() as directory:
             with (
                 mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()),

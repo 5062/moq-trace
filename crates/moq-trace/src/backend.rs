@@ -105,6 +105,8 @@ pub(crate) const fn available() -> bool {
 mod platform {
     use moq_trace_lttng_sys as ffi;
 
+    use trace_core::encode_optional;
+
     use super::*;
 
     pub(super) fn initialize() {
@@ -162,11 +164,11 @@ mod platform {
         context: &ObjectContext,
     ) {
         unsafe {
-            let (has_session_id, session_id) = optional(session_id);
-            let (has_connection_id, connection_id) = optional(connection_id);
-            let (has_stream_id, stream_id) = optional(context.stream_id);
+            let (has_session_id, session_id) = encode_optional(session_id);
+            let (has_connection_id, connection_id) = encode_optional(connection_id);
+            let (has_stream_id, stream_id) = encode_optional(context.stream_id);
             let (has_stream_offset_start, stream_offset_start) =
-                optional(context.stream_offset_start);
+                encode_optional(context.stream_offset_start);
             ffi::moq_trace_moq_object_start(&ffi::moq_trace_moq_object_start {
                 timestamp_ns,
                 trace_id,
@@ -196,7 +198,7 @@ mod platform {
         outcome: ObjectOutcome,
     ) {
         unsafe {
-            let (has_stream_offset_end, stream_offset_end) = optional(stream_offset_end);
+            let (has_stream_offset_end, stream_offset_end) = encode_optional(stream_offset_end);
             ffi::moq_trace_moq_object_end(&ffi::moq_trace_moq_object_end {
                 timestamp_ns,
                 trace_id,
@@ -217,7 +219,7 @@ mod platform {
         outcome: Option<ObjectOutcome>,
     ) {
         unsafe {
-            let (has_outcome, outcome) = optional(outcome.map(|value| value as u8));
+            let (has_outcome, outcome) = encode_optional(outcome.map(|value| value as u8));
             ffi::moq_trace_moq_object_phase(&ffi::moq_trace_moq_object_phase {
                 timestamp_ns,
                 trace_id,
@@ -228,14 +230,6 @@ mod platform {
                 outcome,
             });
         }
-    }
-
-    /// Encode an optional field as its wire value, or zero when it is absent.
-    ///
-    /// The provider payload has no sum type for an absent field, so the `has_`
-    /// flag and a zero value together carry the option.
-    fn optional<T: Copy + Default>(value: Option<T>) -> (u8, T) {
-        value.map_or((0, T::default()), |value| (1, value))
     }
 }
 

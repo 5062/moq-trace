@@ -250,19 +250,6 @@ impl ObjectTrace {
         .await
     }
 
-    fn emit_phase(
-        &self,
-        span_id: u64,
-        phase: ObjectPhase,
-        edge: PhaseEdge,
-        outcome: Option<ObjectOutcome>,
-    ) {
-        let Some(state) = &self.0 else {
-            return;
-        };
-        state.emit_phase(span_id, phase, edge, outcome);
-    }
-
     /// Finish the object interval with the latest metadata and result.
     pub fn finish(mut self, outcome: ObjectOutcome) {
         let Some(state) = self.0.take() else {
@@ -339,23 +326,20 @@ impl ObjectPhaseTrace<'_> {
 
     /// Finish the phase with an explicit result.
     pub fn finish(mut self, outcome: ObjectOutcome) {
-        if let Some((span_id, phase)) = self.state.take() {
-            self.object
-                .emit_phase(span_id, phase, PhaseEdge::Done, Some(outcome));
+        self.emit_done(outcome);
+    }
+
+    /// Emit the completing edge once; a phase only has state while its object does.
+    fn emit_done(&mut self, outcome: ObjectOutcome) {
+        if let (Some((span_id, phase)), Some(object)) = (self.state.take(), &self.object.0) {
+            object.emit_phase(span_id, phase, PhaseEdge::Done, Some(outcome));
         }
     }
 }
 
 impl Drop for ObjectPhaseTrace<'_> {
     fn drop(&mut self) {
-        if let Some((span_id, phase)) = self.state.take() {
-            self.object.emit_phase(
-                span_id,
-                phase,
-                PhaseEdge::Done,
-                Some(ObjectOutcome::Abandoned),
-            );
-        }
+        self.emit_done(ObjectOutcome::Abandoned);
     }
 }
 

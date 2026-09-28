@@ -135,6 +135,8 @@ pub(crate) const fn available() -> bool {
 mod platform {
     use quic_trace_lttng_sys as ffi;
 
+    use trace_core::encode_optional;
+
     use super::*;
 
     pub(super) fn initialize() {
@@ -198,10 +200,10 @@ mod platform {
 
     fn packet_start(timestamp_ns: u64, trace_id: u64, context: &PacketContext) {
         unsafe {
-            let (has_packet_number, packet_number) = optional(context.packet_number);
+            let (has_packet_number, packet_number) = encode_optional(context.packet_number);
             let (has_packet_space, packet_space) =
-                optional(context.packet_space.map(|value| value as u8));
-            let (has_byte_len, byte_len) = optional(context.byte_len.map(to_u64));
+                encode_optional(context.packet_space.map(|value| value as u8));
+            let (has_byte_len, byte_len) = encode_optional(context.byte_len.map(to_u64));
             ffi::quic_trace_quic_packet_start(&ffi::quic_trace_quic_packet_start {
                 timestamp_ns,
                 trace_id,
@@ -224,10 +226,10 @@ mod platform {
         outcome: PacketOutcome,
     ) {
         unsafe {
-            let (has_packet_number, packet_number) = optional(context.packet_number);
+            let (has_packet_number, packet_number) = encode_optional(context.packet_number);
             let (has_packet_space, packet_space) =
-                optional(context.packet_space.map(|value| value as u8));
-            let (has_byte_len, byte_len) = optional(context.byte_len.map(to_u64));
+                encode_optional(context.packet_space.map(|value| value as u8));
+            let (has_byte_len, byte_len) = encode_optional(context.byte_len.map(to_u64));
             ffi::quic_trace_quic_packet_end(&ffi::quic_trace_quic_packet_end {
                 timestamp_ns,
                 trace_id,
@@ -251,7 +253,7 @@ mod platform {
         outcome: Option<PacketOutcome>,
     ) {
         unsafe {
-            let (has_outcome, outcome) = optional(outcome.map(|value| value as u8));
+            let (has_outcome, outcome) = encode_optional(outcome.map(|value| value as u8));
             ffi::quic_trace_quic_packet_phase(&ffi::quic_trace_quic_packet_phase {
                 timestamp_ns,
                 trace_id,
@@ -284,7 +286,7 @@ mod platform {
         connection_id: Option<u64>,
     ) {
         unsafe {
-            let (has_connection_id, connection_id) = optional(connection_id);
+            let (has_connection_id, connection_id) = encode_optional(connection_id);
             ffi::quic_trace_udp_socket_start(&ffi::quic_trace_udp_socket_start {
                 timestamp_ns,
                 trace_id,
@@ -306,14 +308,6 @@ mod platform {
                 bytes: to_u64(stats.bytes),
             });
         }
-    }
-
-    /// Encode an optional field as its wire value, or zero when it is absent.
-    ///
-    /// The provider payload has no sum type for an absent field, so the `has_`
-    /// flag and a zero value together carry the option.
-    fn optional<T: Copy + Default>(value: Option<T>) -> (u8, T) {
-        value.map_or((0, T::default()), |value| (1, value))
     }
 
     fn to_u64(value: usize) -> u64 {

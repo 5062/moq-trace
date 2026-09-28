@@ -8,7 +8,7 @@ complete artifact holds.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -132,6 +132,10 @@ class CommandSet(ArtifactModel):
 class RunMetadata(ArtifactModel):
     """Everything one run artifact records about the measurement it holds."""
 
+    # The on-disk artifact kind this model describes. A class constant rather
+    # than a field, so it names the schema instead of appearing in the payload.
+    KIND: ClassVar[str] = "run"
+
     workload: Workload
     window: Window
     transport_profile: TransportProfile
@@ -154,6 +158,9 @@ class ComparisonRun(ArtifactModel):
 
 class ComparisonMetadata(ArtifactModel):
     """Everything one comparison artifact records about the runs it holds."""
+
+    # The on-disk artifact kind this model describes.
+    KIND: ClassVar[str] = "comparison"
 
     dimension: ComparisonDimension
     runs: tuple[ComparisonRun, ...] = Field(min_length=1)

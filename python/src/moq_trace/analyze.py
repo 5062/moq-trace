@@ -71,40 +71,30 @@ def _define_lifecycle_views(connection: duckdb.DuckDBPyConnection) -> None:
            SELECT rx.trace_id AS rx_trace_id, tx.trace_id, tx.session_id, tx.end_ns
            FROM object_lifecycles AS rx
            JOIN object_lifecycles AS tx USING (logical_group, logical_frame)
-           WHERE rx.direction = 'rx' AND tx.direction = 'tx' AND tx.outcome = 'success';
-
-           CREATE VIEW object_phase_intervals AS
-           WITH paired AS (
-             SELECT starts.trace_id, starts.span_id, starts.phase,
-                    starts.ctf_timestamp_ns, starts.timestamp_ns AS start_ns,
-                    finishes.timestamp_ns AS end_ns, finishes.outcome
-             FROM moq_object_phase AS starts
-             JOIN moq_object_phase AS finishes USING (trace_id, span_id, phase)
-             WHERE starts.edge = 'start' AND finishes.edge = 'done'
-           )
-           SELECT trace_id, span_id, phase,
-                  row_number() OVER (
-                    PARTITION BY trace_id, phase ORDER BY ctf_timestamp_ns, start_ns, span_id
-                  ) - 1 AS occurrence,
-                  start_ns, end_ns, outcome
-           FROM paired;
-
-           CREATE VIEW packet_phase_intervals AS
-           WITH paired AS (
-             SELECT starts.trace_id, starts.span_id, starts.phase,
-                    starts.ctf_timestamp_ns, starts.timestamp_ns AS start_ns,
-                    finishes.timestamp_ns AS end_ns, finishes.outcome
-             FROM quic_packet_phase AS starts
-             JOIN quic_packet_phase AS finishes USING (trace_id, span_id, phase)
-             WHERE starts.edge = 'start' AND finishes.edge = 'done'
-           )
-           SELECT trace_id, span_id, phase,
-                  row_number() OVER (
-                    PARTITION BY trace_id, phase ORDER BY ctf_timestamp_ns, start_ns, span_id
-                  ) - 1 AS occurrence,
-                  start_ns, end_ns, outcome
-           FROM paired"""
+           WHERE rx.direction = 'rx' AND tx.direction = 'tx' AND tx.outcome = 'success';"""
     )
+    # Both providers share the phase record shape, so one pairing serves both.
+    for view, table in (
+        ("object_phase_intervals", "moq_object_phase"),
+        ("packet_phase_intervals", "quic_packet_phase"),
+    ):
+        connection.execute(
+            f"""CREATE VIEW {view} AS
+               WITH paired AS (
+                 SELECT starts.trace_id, starts.span_id, starts.phase,
+                        starts.ctf_timestamp_ns, starts.timestamp_ns AS start_ns,
+                        finishes.timestamp_ns AS end_ns, finishes.outcome
+                 FROM {table} AS starts
+                 JOIN {table} AS finishes USING (trace_id, span_id, phase)
+                 WHERE starts.edge = 'start' AND finishes.edge = 'done'
+               )
+               SELECT trace_id, span_id, phase,
+                      row_number() OVER (
+                        PARTITION BY trace_id, phase ORDER BY ctf_timestamp_ns, start_ns, span_id
+                      ) - 1 AS occurrence,
+                      start_ns, end_ns, outcome
+               FROM paired"""
+        )
 
 
 def _ingest(
@@ -188,37 +178,25 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
             f"SELECT count(*) FROM (SELECT trace_id FROM {table} GROUP BY trace_id HAVING count(*) <> 1)",
             f"{table} contains duplicate trace IDs",
         )
-    _require_zero(
-        connection,
-        "SELECT count(*) FROM moq_object_end ANTI JOIN moq_object_start USING (trace_id)",
-        "object completions without starts",
-    )
-    _require_zero(
-        connection,
-        "SELECT count(*) FROM quic_packet_end ANTI JOIN quic_packet_start USING (trace_id)",
-        "packet completions without starts",
-    )
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM moq_object_start AS start
-           ANTI JOIN moq_object_end USING (trace_id)""",
-        "object starts without completions",
-    )
-    _require_zero(
-        connection,
-        "SELECT count(*) FROM quic_packet_start ANTI JOIN quic_packet_end USING (trace_id)",
-        "packet starts without completions",
-    )
-    _require_zero(
-        connection,
-        "SELECT count(*) FROM object_lifecycles WHERE end_ns < start_ns",
-        "objects completing before they start",
-    )
-    _require_zero(
-        connection,
-        "SELECT count(*) FROM packet_lifecycles WHERE end_ns < start_ns",
-        "packets completing before they start",
-    )
+    for kind, start, finish, lifecycles in (
+        ("object", "moq_object_start", "moq_object_end", "object_lifecycles"),
+        ("packet", "quic_packet_start", "quic_packet_end", "packet_lifecycles"),
+    ):
+        _require_zero(
+            connection,
+            f"SELECT count(*) FROM {finish} ANTI JOIN {start} USING (trace_id)",
+            f"{kind} completions without starts",
+        )
+        _require_zero(
+            connection,
+            f"SELECT count(*) FROM {start} ANTI JOIN {finish} USING (trace_id)",
+            f"{kind} starts without completions",
+        )
+        _require_zero(
+            connection,
+            f"SELECT count(*) FROM {lifecycles} WHERE end_ns < start_ns",
+            f"{kind}s completing before they start",
+        )
     for table, intervals in (
         ("moq_object_phase", "object_phase_intervals"),
         ("quic_packet_phase", "packet_phase_intervals"),

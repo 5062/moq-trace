@@ -15,30 +15,24 @@ from .metadata import ArtifactModel, ComparisonMetadata, RunMetadata
 # The metadata schema each artifact kind must satisfy. A kind is an on-disk
 # identity rather than an internal detail, so metadata is validated when it is
 # opened instead of when it is first read.
-ARTIFACT_MODELS: dict[str, type[ArtifactModel]] = {
-    "run": RunMetadata,
-    "comparison": ComparisonMetadata,
+ARTIFACT_MODELS: dict[str, type[RunMetadata | ComparisonMetadata]] = {
+    model.KIND: model for model in (RunMetadata, ComparisonMetadata)
 }
 
-_KINDS_BY_MODEL = {model: kind for kind, model in ARTIFACT_MODELS.items()}
 
-
-def write_metadata(connection: duckdb.DuckDBPyConnection, metadata: ArtifactModel) -> None:
+def write_metadata(connection: duckdb.DuckDBPyConnection, metadata: RunMetadata | ComparisonMetadata) -> None:
     """Write the authoritative identity and metadata for one artifact.
 
     The kind is derived from the model, so an artifact cannot be written under a
     kind that does not describe it.
     """
 
-    kind = _KINDS_BY_MODEL.get(type(metadata))
-    if kind is None:
-        raise TraceError(f"no artifact kind is registered for {type(metadata).__name__}")
     # An unset optional field is written as null rather than omitted, so growing
     # the schema only ever adds a key to a payload. A reader gets the default
     # back, and a field this producer left unset stays visible as unset.
     encoded = metadata.model_dump_json()
     connection.execute("CREATE TABLE metadata(kind VARCHAR PRIMARY KEY, value JSON NOT NULL)")
-    connection.execute("INSERT INTO metadata VALUES (?, ?)", [kind, encoded])
+    connection.execute("INSERT INTO metadata VALUES (?, ?)", [metadata.KIND, encoded])
 
 
 def _decode(kind: str, encoded: str) -> ArtifactModel:
