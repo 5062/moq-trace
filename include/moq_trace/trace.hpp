@@ -5,7 +5,6 @@
 
 #include <quic_trace/trace.hpp>
 
-#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -15,8 +14,6 @@ namespace moq_trace {
 
 namespace detail {
 
-inline std::atomic<std::uint64_t> next_session_id{1};
-inline std::atomic<std::uint64_t> next_logical_id{1};
 inline std::once_flag provider_once;
 
 inline void initialize() { std::call_once(provider_once, moq_trace_provider_init); }
@@ -36,10 +33,13 @@ struct LogicalId {
   }
 };
 
-/** Allocate a process-local logical identity for one relayed object. */
-inline LogicalId next_logical_id() {
-  return {detail::next_logical_id.fetch_add(1, std::memory_order_relaxed), 0};
-}
+/**
+ * Allocate a process-wide logical group instance, starting at frame zero.
+ *
+ * The group comes from the provider library, so Rust and C++ hooks in one
+ * process never hand out the same one.
+ */
+inline LogicalId next_logical_id() { return {moq_trace_next_logical_group(), 0}; }
 
 /** Stable wire identity of one MoQ transport object. */
 struct ObjectIdentity {
@@ -256,10 +256,8 @@ class Object {
   std::optional<std::uint64_t> stream_offset_end_;
 };
 
-/** Allocate a process-local session identifier. */
-inline std::uint64_t next_session_id() {
-  return detail::next_session_id.fetch_add(1, std::memory_order_relaxed);
-}
+/** Allocate a process-wide session identifier shared with Rust hooks. */
+inline std::uint64_t next_session_id() { return moq_trace_next_session_id(); }
 
 }  // namespace moq_trace
 

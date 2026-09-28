@@ -85,6 +85,17 @@ bool moq_trace_moq_object_phase_enabled(void);
 void moq_trace_moq_object_phase(const struct moq_trace_moq_object_phase *event);
 void moq_trace_provider_init(void);
 
+/*
+ * Process-wide MoQ identity shared by every facade, in any language.
+ *
+ * Session identifiers and logical group instances come from two counters that
+ * start at 1 and never repeat. A process that instruments some code from Rust
+ * and some from C++ must link one copy of this library so both draw from the
+ * same counters.
+ */
+uint64_t moq_trace_next_session_id(void);
+uint64_t moq_trace_next_logical_group(void);
+
 #ifdef __cplusplus
 }
 #endif

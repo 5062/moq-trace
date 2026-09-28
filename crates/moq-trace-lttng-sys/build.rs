@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", interface.display());
     println!("cargo:rerun-if-changed={}", template.display());
     println!("cargo:rerun-if-changed=provider/interface.c");
+    println!("cargo:rerun-if-changed=provider/identity.c");
     println!("cargo:rerun-if-changed=provider/events.inc");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
@@ -47,6 +48,7 @@ fn main() {
     let mut build = cc::Build::new();
     build
         .file("provider/interface.c")
+        .file("provider/identity.c")
         .include(provider)
         .include(&output);
     for include in library.include_paths {

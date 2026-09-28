@@ -56,6 +56,7 @@ add_custom_command(
 
 add_library(moq_trace_provider STATIC
   "${MOQ_PROVIDER_DIR}/interface.c"
+  "${MOQ_PROVIDER_DIR}/identity.c"
   "${GENERATED_DIR}/moq/events.h"
 )
 add_library(moq_trace::provider ALIAS moq_trace_provider)

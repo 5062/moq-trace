@@ -38,11 +38,13 @@ The transport provider emits:
 Lifecycle and phase tokens record `abandoned` when destroyed without an
 explicit terminal outcome. Stream ranges use `[offset_start, offset_end)`.
 Trace, span, and connection IDs and event timestamps come from the native QUIC
-provider library, which both the Rust and C++ facades call. Rust and C++ hooks
-in one process therefore share one set of counters and one `CLOCK_MONOTONIC`
-epoch, as long as the process links a single copy of the provider. Session and
-logical object IDs are still allocated per facade. Scope IDs by the captured
-process when combining traces from multiple hosts or processes.
+provider library, and session IDs and logical groups from the native MoQ
+provider library. Both the Rust and C++ facades call them, so Rust and C++ hooks
+in one process share one set of counters and one `CLOCK_MONOTONIC` epoch, as
+long as the process links a single copy of each provider. Allocate logical
+groups with `next_logical_id` in either language rather than inventing them.
+Scope IDs by the captured process when combining traces from multiple hosts or
+processes.
 
 ## Rust instrumentation
 

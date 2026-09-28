@@ -4,7 +4,6 @@
 compile_error!("the lttng feature is supported only on Linux");
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use quic_trace::{
     Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace, PacketSpace,
@@ -13,6 +12,9 @@ pub use quic_trace::{
 pub use trace_core::now_ns;
 
 mod backend;
+
+mod ids;
+pub use ids::{next_logical_id, next_session_id};
 
 mod object;
 pub use object::{
@@ -31,15 +33,16 @@ pub struct Handle {
     connection_id: Option<u64>,
 }
 
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-
 impl Handle {
     /// Create a handle that never emits events.
     pub fn disabled() -> Self {
         Self::default()
     }
 
-    /// Return a clone that stamps object events with this process-local session ID.
+    /// Return a clone that stamps object events with this session ID.
+    ///
+    /// Prefer [`next_session_id`] as the source, so the ID stays unique across
+    /// Rust and C++ hooks in one process.
     pub fn with_session_id(mut self, session_id: u64) -> Self {
         self.session_id = Some(session_id);
         self
@@ -51,9 +54,9 @@ impl Handle {
         self
     }
 
-    /// Return a clone that stamps object events with the next process-local session ID.
+    /// Return a clone that stamps object events with the next process-wide session ID.
     pub fn with_new_session_id(mut self) -> Self {
-        self.session_id = Some(NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed));
+        self.session_id = Some(next_session_id());
         self
     }
 

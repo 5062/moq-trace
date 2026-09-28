@@ -302,3 +302,21 @@ fn connection_ids_are_never_reused() {
     let second = next_connection_id();
     assert!(second > first);
 }
+
+/// Rust and C++ hooks in one process must draw MoQ identity from the same
+/// native counters, which the C++ facade calls directly. Interleaving the two
+/// callers shows one counter: concurrent allocation only widens the gaps.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+#[test]
+fn session_and_logical_ids_come_from_the_native_provider() {
+    use moq_trace_lttng_sys as ffi;
+
+    let rust = next_session_id();
+    let native = unsafe { ffi::moq_trace_next_session_id() };
+    assert!(rust < native && native < next_session_id());
+
+    let rust = next_logical_id();
+    let native = unsafe { ffi::moq_trace_next_logical_group() };
+    assert!(rust.group() < native && native < next_logical_id().group());
+    assert_eq!(rust.frame(), 0);
+}
