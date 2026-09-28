@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import duckdb
-import pyarrow as pa
 
 from .errors import TraceError
 
@@ -12,23 +11,8 @@ from .errors import TraceError
 _BUCKET_BYTES = 16 * 1024
 
 
-def _subtract(gaps: list[tuple[int, int]], start: int, end: int) -> None:
-    """Subtract one covered half-open range from the remaining gaps."""
-
-    remaining = []
-    for left, right in gaps:
-        if end <= left or right <= start:
-            remaining.append((left, right))
-            continue
-        if left < start:
-            remaining.append((left, start))
-        if end < right:
-            remaining.append((end, right))
-    gaps[:] = remaining
-
-
-def _select_targets(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
-    """Stage the selected object lifecycles in `coverage_targets` and return them."""
+def _stage_targets(connection: duckdb.DuckDBPyConnection) -> None:
+    """Stage the selected object lifecycles in `coverage_targets`."""
 
     connection.execute(
         """CREATE TEMP TABLE coverage_targets AS
@@ -42,15 +26,41 @@ def _select_targets(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
              JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id
            ) AS selected USING (trace_id)"""
     )
-    return connection.execute("SELECT * FROM coverage_targets").fetchall()
 
 
-def _candidates(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
-    """Return every successful STREAM frame overlapping a staged target.
+def _first_trace(connection: duckdb.DuckDBPyConnection, query: str) -> int | None:
+    row = connection.execute(query).fetchone()
+    return None if row is None else int(row[0])
 
-    Each row is `(object trace ID, frame start, frame end, packet trace ID,
-    packet start, packet end)`, ordered by object and then by when the frame was
-    sent or received.
+
+def _validate_targets(connection: duckdb.DuckDBPyConnection) -> None:
+    """Reject staged targets whose byte range cannot be resolved."""
+
+    missing = _first_trace(
+        connection,
+        """SELECT trace_id FROM coverage_targets
+           WHERE connection_id IS NULL OR stream_id IS NULL
+              OR stream_offset_start IS NULL OR stream_offset_end IS NULL
+           ORDER BY trace_id LIMIT 1""",
+    )
+    if missing is not None:
+        raise TraceError(f"object trace {missing} is missing transport metadata")
+    empty = _first_trace(
+        connection,
+        """SELECT trace_id FROM coverage_targets
+           WHERE stream_offset_end <= stream_offset_start
+           ORDER BY trace_id LIMIT 1""",
+    )
+    if empty is not None:
+        raise TraceError(f"object trace {empty} has an empty transport range")
+
+
+def _stage_frames(connection: duckdb.DuckDBPyConnection) -> None:
+    """Stage every successful STREAM frame overlapping a target in `coverage_frames`.
+
+    Each row pairs one object with one frame, clips the frame to the object's
+    range, and numbers the object's frames by `seq` in the order they were sent
+    or received: frame time, then packet end, then packet trace ID.
 
     A connection carries few streams, so matching frames to objects on the stream
     alone compares every object with every frame on it, and the work grows with
@@ -61,8 +71,9 @@ def _candidates(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
     its offset, so it overlaps exactly the objects it did without buckets.
     """
 
-    return connection.execute(
-        """WITH targets AS (
+    connection.execute(
+        """CREATE TEMP TABLE coverage_frames AS
+           WITH targets AS (
              SELECT *, unnest(range(
                       (stream_offset_start // $bucket)::BIGINT,
                       ((greatest(stream_offset_end, stream_offset_start + 1) - 1) // $bucket + 1)::BIGINT
@@ -81,7 +92,16 @@ def _candidates(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
              WHERE packet.outcome = 'success' AND frame.outcome = 'success'
            )
            SELECT object.trace_id, frame.offset_start, frame.offset_end,
-                  frame.trace_id, frame.start_ns, frame.end_ns
+                  greatest(frame.offset_start, object.stream_offset_start) AS covered_start,
+                  least(frame.offset_end, object.stream_offset_end) AS covered_end,
+                  frame.trace_id AS packet_id,
+                  frame.start_ns AS packet_start_ns,
+                  frame.end_ns AS packet_end_ns,
+                  row_number() OVER (
+                    PARTITION BY object.trace_id
+                    ORDER BY frame.timestamp_ns, frame.end_ns, frame.trace_id,
+                             frame.offset_start, frame.offset_end
+                  ) AS seq
            FROM targets AS object
            JOIN frames AS frame
              ON frame.connection_id = object.connection_id
@@ -90,68 +110,121 @@ def _candidates(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
             AND frame.bucket = object.bucket
             AND frame.offset_start < object.stream_offset_end
             AND object.stream_offset_start < frame.offset_end
-            AND object.bucket = greatest(object.stream_offset_start, frame.offset_start) // $bucket
-           ORDER BY object.trace_id, frame.timestamp_ns, frame.end_ns, frame.trace_id""",
+            AND object.bucket = greatest(object.stream_offset_start, frame.offset_start) // $bucket""",
         {"bucket": _BUCKET_BYTES},
-    ).fetchall()
+    )
+
+
+def _stage_completion(connection: duckdb.DuckDBPyConnection) -> None:
+    """Stage the `seq` of the frame that completes each target in `coverage_completion`.
+
+    Cutting a target at every clipped frame edge yields segments that each frame
+    covers entirely or not at all. A segment is first covered by the lowest `seq`
+    among the frames spanning it, and the target is complete once its last
+    segment is, so the completing frame is the maximum of those first covers.
+    This is the frame at which subtracting frames in `seq` order leaves no gap,
+    without replaying the frames one at a time. A target with a segment no frame
+    covers has a NULL `complete_seq`.
+
+    Segments are matched to frames on the bucket holding the segment start, so a
+    large object compares each segment only with the frames near it.
+    """
+
+    connection.execute(
+        """CREATE TEMP TABLE coverage_completion AS
+           WITH boundaries AS (
+             SELECT trace_id, stream_offset_start AS boundary FROM coverage_targets
+             UNION
+             SELECT trace_id, stream_offset_end FROM coverage_targets
+             UNION
+             SELECT trace_id, covered_start FROM coverage_frames
+             UNION
+             SELECT trace_id, covered_end FROM coverage_frames
+           ), segments AS (
+             SELECT trace_id, segment_start, segment_end,
+                    (segment_start // $bucket)::BIGINT AS bucket
+             FROM (
+               SELECT trace_id, boundary AS segment_start,
+                      lead(boundary) OVER (PARTITION BY trace_id ORDER BY boundary) AS segment_end
+               FROM boundaries
+             )
+             WHERE segment_end IS NOT NULL
+           ), covering AS (
+             SELECT trace_id, seq, covered_start, covered_end,
+                    unnest(range(
+                      (covered_start // $bucket)::BIGINT,
+                      ((covered_end - 1) // $bucket + 1)::BIGINT
+                    )) AS bucket
+             FROM coverage_frames
+             WHERE covered_start < covered_end
+           ), first_cover AS (
+             SELECT segment.trace_id, min(frame.seq) AS seq
+             FROM segments AS segment
+             LEFT JOIN covering AS frame
+               ON frame.trace_id = segment.trace_id
+              AND frame.bucket = segment.bucket
+              AND frame.covered_start <= segment.segment_start
+              AND segment.segment_end <= frame.covered_end
+             GROUP BY segment.trace_id, segment.segment_start
+           )
+           SELECT trace_id,
+                  CASE WHEN count(seq) = count(*) THEN max(seq) END AS complete_seq
+           FROM first_cover
+           GROUP BY trace_id""",
+        {"bucket": _BUCKET_BYTES},
+    )
+
+
+def _resolve_targets(connection: duckdb.DuckDBPyConnection) -> None:
+    """Materialize `object_packet_coverage` for the staged `coverage_targets`.
+
+    Each object records the first packet carrying any of its bytes, the packet
+    that completed its byte range, and every packet up to that one in `seq`
+    order. Frames after the completing one, such as late retransmissions, do
+    not extend the object.
+    """
+
+    _validate_targets(connection)
+    _stage_frames(connection)
+    _stage_completion(connection)
+    incomplete = _first_trace(
+        connection,
+        """SELECT trace_id FROM coverage_completion
+           WHERE complete_seq IS NULL ORDER BY trace_id LIMIT 1""",
+    )
+    if incomplete is not None:
+        raise TraceError(f"object trace {incomplete} does not have complete packet coverage")
+    connection.execute(
+        """CREATE TABLE object_packet_coverage AS
+           WITH packets AS (
+             SELECT frame.trace_id, frame.packet_id, min(frame.seq) AS seq
+             FROM coverage_frames AS frame
+             JOIN coverage_completion AS completion ON completion.trace_id = frame.trace_id
+             WHERE frame.seq <= completion.complete_seq
+             GROUP BY frame.trace_id, frame.packet_id
+           ), packet_lists AS (
+             SELECT trace_id, list(packet_id ORDER BY seq) AS packet_ids
+             FROM packets
+             GROUP BY trace_id
+           )
+           SELECT completion.trace_id,
+                  opening.packet_start_ns AS first_start_ns,
+                  opening.packet_end_ns AS first_end_ns,
+                  closing.packet_end_ns AS complete_end_ns,
+                  packet_lists.packet_ids
+           FROM coverage_completion AS completion
+           JOIN coverage_frames AS opening
+             ON opening.trace_id = completion.trace_id AND opening.seq = 1
+           JOIN coverage_frames AS closing
+             ON closing.trace_id = completion.trace_id AND closing.seq = completion.complete_seq
+           JOIN packet_lists ON packet_lists.trace_id = completion.trace_id"""
+    )
+    for table in ("coverage_completion", "coverage_frames", "coverage_targets"):
+        connection.execute(f"DROP TABLE {table}")
 
 
 def resolve(connection: duckdb.DuckDBPyConnection) -> None:
     """Materialize packet coverage for every selected object lifecycle."""
 
-    lifecycles = _select_targets(connection)
-    candidates_by_trace: dict[int, list[tuple]] = {}
-    for row in _candidates(connection):
-        candidates_by_trace.setdefault(int(row[0]), []).append(row[1:])
-
-    rows = []
-    for trace_id, connection_id, direction, stream_id, target_start, target_end in lifecycles:
-        if None in (connection_id, stream_id, target_start, target_end):
-            raise TraceError(f"object trace {trace_id} is missing transport metadata")
-        if target_end <= target_start:
-            raise TraceError(f"object trace {trace_id} has an empty transport range")
-        gaps = [(int(target_start), int(target_end))]
-        packet_ids = []
-        seen_packets = set()
-        first_start = first_end = complete_end = None
-        for offset_start, offset_end, packet_id, packet_start, packet_end in candidates_by_trace.get(int(trace_id), ()):
-            _subtract(
-                gaps,
-                max(int(offset_start), int(target_start)),
-                min(int(offset_end), int(target_end)),
-            )
-            if packet_id not in seen_packets:
-                seen_packets.add(packet_id)
-                packet_ids.append(int(packet_id))
-            if first_start is None:
-                first_start, first_end = int(packet_start), int(packet_end)
-            if not gaps:
-                complete_end = int(packet_end)
-                break
-        if complete_end is None:
-            raise TraceError(f"object trace {trace_id} does not have complete packet coverage")
-        rows.append(
-            {
-                "trace_id": trace_id,
-                "first_start_ns": first_start,
-                "first_end_ns": first_end,
-                "complete_end_ns": complete_end,
-                "packet_ids": packet_ids,
-            }
-        )
-    table = pa.Table.from_pylist(
-        rows,
-        schema=pa.schema(
-            [
-                ("trace_id", pa.uint64()),
-                ("first_start_ns", pa.uint64()),
-                ("first_end_ns", pa.uint64()),
-                ("complete_end_ns", pa.uint64()),
-                ("packet_ids", pa.list_(pa.uint64())),
-            ]
-        ),
-    )
-    connection.register("coverage_arrow", table)
-    connection.execute("CREATE TABLE object_packet_coverage AS SELECT * FROM coverage_arrow")
-    connection.unregister("coverage_arrow")
-    connection.execute("DROP TABLE coverage_targets")
+    _stage_targets(connection)
+    _resolve_targets(connection)

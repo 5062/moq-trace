@@ -30,7 +30,6 @@ from moq_trace.analyze import (  # noqa: E402
     run,
 )
 from moq_trace.artifact import open_artifact  # noqa: E402
-from moq_trace.coverage import _subtract  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 from moq_trace.metadata import Window, Workload  # noqa: E402
 
@@ -524,11 +523,16 @@ class SqlAnalysisTests(unittest.TestCase):
         self.connection.execute(f"INSERT INTO raw.{table} SELECT * FROM rows")
         self.connection.unregister("rows")
 
-    def test_bucketed_candidates_match_the_plain_overlap_join(self) -> None:
-        """The bucketed range join reports exactly the pairs a plain overlap join does."""
+    def _random_coverage_trace(self, seed: int, *, complete: bool) -> None:
+        """Insert random targets and frames around bucket boundaries.
+
+        When `complete` is set, every target is also tiled by frames sent in a
+        random order, so each one resolves while retransmissions, zero-length
+        frames, and failed packets still overlap it.
+        """
 
         bucket = coverage._BUCKET_BYTES
-        generator = random.Random(7)
+        generator = random.Random(seed)
         streams = [
             (connection_id, direction, stream_id)
             for connection_id in (1, 2)
@@ -537,41 +541,65 @@ class SqlAnalysisTests(unittest.TestCase):
         ]
         targets, packet_starts, packet_ends, frames = [], [], [], []
         clock = iter(range(1, 1_000_000))
+
+        def send(connection_id, direction, stream_id, ranges, outcome="success"):
+            trace_id = 1_000 + len(packet_starts)
+            packet_starts.append(
+                dict(
+                    ctf_timestamp_ns=next(clock),
+                    timestamp_ns=next(clock),
+                    trace_id=trace_id,
+                    connection_id=connection_id,
+                    direction=direction,
+                )
+            )
+            packet_ends.append(
+                dict(
+                    ctf_timestamp_ns=next(clock),
+                    timestamp_ns=generator.randrange(10**6, 10**6 + 50),
+                    trace_id=trace_id,
+                    outcome=outcome,
+                )
+            )
+            for start, end in ranges:
+                frames.append(
+                    dict(
+                        ctf_timestamp_ns=next(clock),
+                        # A narrow clock range makes frames tie on time, so the
+                        # packet end and ID tiebreaks are exercised too.
+                        timestamp_ns=generator.randrange(40),
+                        trace_id=trace_id,
+                        stream_id=stream_id,
+                        offset_start=start,
+                        offset_end=end,
+                        outcome=generator.choice(("success", "success", "malformed")) if not complete else "success",
+                    )
+                )
+
         for connection_id, direction, stream_id in streams:
             offset = generator.choice((0, bucket - 3))
             for _ in range(12):
                 size = generator.choice((1, 17, 1_200, bucket - 1, bucket, bucket + 1, 3 * bucket + 5))
                 targets.append((len(targets) + 1, connection_id, direction, stream_id, offset, offset + size))
                 offset += size
+            if complete:
+                first = targets[-12][4]
+                position = first
+                while position < offset:
+                    end = min(offset, position + generator.choice((1, 700, 1_200, bucket, 2 * bucket + 1)))
+                    send(connection_id, direction, stream_id, [(position, end)])
+                    position = end
             for _ in range(60):
                 start = generator.choice((generator.randrange(offset + 1), generator.randrange(4) * bucket))
                 length = generator.choice((0, 1, 1_200, bucket, 2 * bucket + 1, generator.randrange(3 * bucket)))
-                trace_id = 1_000 + len(packet_starts)
-                outcome = generator.choice(("success", "success", "success", "dropped"))
-                packet_starts.append(
-                    dict(
-                        ctf_timestamp_ns=next(clock),
-                        timestamp_ns=next(clock),
-                        trace_id=trace_id,
-                        connection_id=connection_id,
-                        direction=direction,
-                    )
+                ranges = [(start, start + length)] * generator.choice((1, 1, 2))
+                send(
+                    connection_id,
+                    direction,
+                    stream_id,
+                    ranges,
+                    outcome=generator.choice(("success", "success", "success", "dropped")),
                 )
-                packet_ends.append(
-                    dict(ctf_timestamp_ns=next(clock), timestamp_ns=next(clock), trace_id=trace_id, outcome=outcome)
-                )
-                for _ in range(generator.choice((1, 1, 2))):
-                    frames.append(
-                        dict(
-                            ctf_timestamp_ns=next(clock),
-                            timestamp_ns=generator.randrange(10**9),
-                            trace_id=trace_id,
-                            stream_id=stream_id,
-                            offset_start=start,
-                            offset_end=start + length,
-                            outcome=generator.choice(("success", "success", "malformed")),
-                        )
-                    )
         self.insert_rows("quic_packet_start", packet_starts)
         self.insert_rows("quic_packet_end", packet_ends)
         self.insert_rows("quic_stream_frame", frames)
@@ -581,7 +609,10 @@ class SqlAnalysisTests(unittest.TestCase):
         )
         self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?)", targets)
 
-        expected = self.connection.execute(
+    def _plain_overlaps(self) -> list[tuple]:
+        """Pair targets with frames by a plain overlap join, in send order."""
+
+        return self.connection.execute(
             """SELECT object.trace_id, frame.offset_start, frame.offset_end,
                       packet.trace_id, packet.start_ns, packet.end_ns
                FROM coverage_targets AS object
@@ -595,17 +626,89 @@ class SqlAnalysisTests(unittest.TestCase):
                 AND frame.stream_id = object.stream_id
                 AND frame.offset_start < object.stream_offset_end
                 AND object.stream_offset_start < frame.offset_end
-               ORDER BY object.trace_id, frame.timestamp_ns, packet.end_ns, packet.trace_id"""
+               ORDER BY object.trace_id, frame.timestamp_ns, packet.end_ns, packet.trace_id,
+                        frame.offset_start, frame.offset_end"""
         ).fetchall()
-        self.assertGreater(len(expected), 100)
-        self.assertEqual(coverage._candidates(self.connection), expected)
 
-    def test_coverage_subtracts_out_of_order_ranges(self) -> None:
-        gaps = [(0, 100)]
-        _subtract(gaps, 40, 60)
-        _subtract(gaps, 60, 100)
-        _subtract(gaps, 0, 40)
-        self.assertEqual(gaps, [])
+    def test_bucketed_frames_match_the_plain_overlap_join(self) -> None:
+        """The bucketed range join reports exactly the pairs a plain overlap join does."""
+
+        self._random_coverage_trace(7, complete=False)
+        expected = self._plain_overlaps()
+        self.assertGreater(len(expected), 100)
+        coverage._stage_frames(self.connection)
+        self.assertEqual(
+            self.connection.execute(
+                """SELECT trace_id, offset_start, offset_end, packet_id, packet_start_ns, packet_end_ns
+                   FROM coverage_frames ORDER BY trace_id, seq"""
+            ).fetchall(),
+            expected,
+        )
+
+    def test_coverage_matches_sequential_gap_subtraction(self) -> None:
+        """Set-based completion agrees with replaying frames one at a time."""
+
+        for seed in (7, 11, 23):
+            with self.subTest(seed=seed):
+                self.tearDown()
+                self.setUp()
+                self._random_coverage_trace(seed, complete=True)
+                targets = self.connection.execute(
+                    "SELECT trace_id, stream_offset_start, stream_offset_end FROM coverage_targets"
+                ).fetchall()
+                frames: dict[int, list[tuple]] = {}
+                for row in self._plain_overlaps():
+                    frames.setdefault(row[0], []).append(row[1:])
+                expected = sorted(
+                    (trace_id, *_sequential_coverage(start, end, frames.get(trace_id, ())))
+                    for trace_id, start, end in targets
+                )
+
+                coverage._resolve_targets(self.connection)
+
+                self.assertEqual(
+                    self.connection.execute("SELECT * FROM object_packet_coverage ORDER BY trace_id").fetchall(),
+                    expected,
+                )
+
+    def test_coverage_rejects_a_range_with_a_gap(self) -> None:
+        self.packet(3, "rx", 1)
+        self.connection.execute("UPDATE raw.quic_stream_frame SET offset_end = 8 WHERE trace_id = 3")
+        self.connection.execute(
+            """CREATE TEMP TABLE coverage_targets AS
+               SELECT 1::UBIGINT AS trace_id, 1::UBIGINT AS connection_id, 'rx' AS direction,
+                      10::UBIGINT AS stream_id, 0::UBIGINT AS stream_offset_start,
+                      16::UBIGINT AS stream_offset_end"""
+        )
+        with self.assertRaisesRegex(TraceError, "object trace 1 does not have complete packet coverage"):
+            coverage._resolve_targets(self.connection)
+
+
+def _sequential_coverage(start: int, end: int, frames) -> tuple:
+    """Replay `frames` in order until they cover `[start, end)`, as a reference."""
+
+    gaps = [(start, end)]
+    packet_ids: list[int] = []
+    first = None
+    for offset_start, offset_end, packet_id, packet_start, packet_end in frames:
+        covered_start, covered_end = max(offset_start, start), min(offset_end, end)
+        remaining = []
+        for left, right in gaps:
+            if covered_end <= left or right <= covered_start:
+                remaining.append((left, right))
+                continue
+            if left < covered_start:
+                remaining.append((left, covered_start))
+            if covered_end < right:
+                remaining.append((covered_end, right))
+        gaps = remaining
+        if packet_id not in packet_ids:
+            packet_ids.append(packet_id)
+        if first is None:
+            first = (packet_start, packet_end)
+        if not gaps:
+            return (*first, packet_end, packet_ids)
+    raise AssertionError(f"reference coverage of [{start}, {end}) is incomplete")
 
 
 def socket_start(trace_id: int = 3, *, vpid: int | None = 42, timestamp: int = 7, **overrides) -> Event:
