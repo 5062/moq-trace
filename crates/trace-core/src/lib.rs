@@ -5,6 +5,10 @@
 //! backend seam. This crate owns those three so that neither facade can drift
 //! from the other. Nothing here describes a MoQ or QUIC lifecycle; the schemas
 //! live in the facades.
+//!
+//! With the `lttng` feature, identifiers and time come from the native provider
+//! library, which the C++ facade calls too. The QUIC provider hosts them because
+//! MoQ tracing layers over QUIC tracing in both languages.
 
 mod backend;
 mod clock;

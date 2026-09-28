@@ -3,52 +3,32 @@
 
 #include <quic_trace/interface.h>
 
-#include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
-#include <time.h>
 #include <utility>
 
 namespace quic_trace {
 
 namespace detail {
 
-inline std::atomic<std::uint64_t> next_trace_id{1};
-inline std::atomic<std::uint64_t> next_span_id{1};
-inline std::atomic<std::uint64_t> next_connection_id{1};
-inline const auto fallback_epoch = std::chrono::steady_clock::now();
 inline std::once_flag provider_once;
 
 inline void initialize() { std::call_once(provider_once, quic_trace_provider_init); }
 
-inline std::uint64_t now_ns() {
-#if defined(CLOCK_MONOTONIC)
-  struct timespec value {
-    0,
-    0,
-  };
-  if (::clock_gettime(CLOCK_MONOTONIC, &value) == 0) {
-    return static_cast<std::uint64_t>(value.tv_sec) * 1'000'000'000ULL +
-           static_cast<std::uint64_t>(value.tv_nsec);
-  }
-#endif
-  const auto elapsed = std::chrono::steady_clock::now() - fallback_epoch;
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
-}
+// Identity and time come from the provider library rather than from this
+// header, so Rust and C++ hooks in one process share the same counters and
+// clock epoch instead of each allocating from its own.
+inline std::uint64_t now_ns() { return quic_trace_now_ns(); }
 
 }  // namespace detail
 
 /** Return a timestamp from the host monotonic clock in nanoseconds. */
 inline std::uint64_t now_ns() { return detail::now_ns(); }
 
-/** Allocate a process-local stable transport connection identifier. */
-inline std::uint64_t next_connection_id() {
-  return detail::next_connection_id.fetch_add(1, std::memory_order_relaxed);
-}
+/** Allocate a process-wide stable transport connection identifier. */
+inline std::uint64_t next_connection_id() { return quic_trace_next_connection_id(); }
 
 /** Metadata known when a QUIC packet trace starts. */
 struct PacketContext {
@@ -111,7 +91,7 @@ class PacketPhase {
   PacketPhase(std::uint64_t trace_id, quic_trace_packet_phase phase,
               std::uint64_t timestamp_ns)
       : trace_id_(trace_id),
-        span_id_(detail::next_span_id.fetch_add(1, std::memory_order_relaxed)),
+        span_id_(quic_trace_next_span_id()),
         phase_(phase) {
     emit(timestamp_ns, QUIC_TRACE_EDGE_START, std::nullopt);
   }
@@ -151,7 +131,7 @@ class Packet {
         !quic_trace_quic_stream_frame_enabled()) {
       return;
     }
-    trace_id_ = detail::next_trace_id.fetch_add(1, std::memory_order_relaxed);
+    trace_id_ = quic_trace_next_trace_id();
     if (quic_trace_quic_packet_start_enabled()) emit_start();
   }
 
@@ -274,7 +254,7 @@ class Socket {
     detail::initialize();
     if (!quic_trace_udp_socket_start_enabled() &&
         !quic_trace_udp_socket_end_enabled()) return;
-    trace_id_ = detail::next_trace_id.fetch_add(1, std::memory_order_relaxed);
+    trace_id_ = quic_trace_next_trace_id();
     if (quic_trace_udp_socket_start_enabled()) emit_start();
   }
 

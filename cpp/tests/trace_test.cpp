@@ -1,16 +1,19 @@
-#include <time.h>
+#include <quic_trace/trace.hpp>
+
+#include <cstdint>
+
+// The test links with `--wrap=quic_trace_now_ns`, so every read of the shared
+// clock the facade makes passes through here and can be counted.
+extern "C" std::uint64_t __real_quic_trace_now_ns(void);
 
 namespace {
 unsigned clock_reads = 0;
-int counted_clock_gettime(clockid_t clock, timespec* value) {
-  ++clock_reads;
-  return ::clock_gettime(clock, value);
-}
 }  // namespace
 
-#define clock_gettime counted_clock_gettime
-#include <quic_trace/trace.hpp>
-#undef clock_gettime
+extern "C" std::uint64_t __wrap_quic_trace_now_ns(void) {
+  ++clock_reads;
+  return __real_quic_trace_now_ns();
+}
 
 #include <cassert>
 #include <type_traits>
@@ -20,6 +23,8 @@ int main() {
   static_assert(std::is_move_constructible_v<quic_trace::Packet>);
   assert(quic_trace::next_connection_id() != quic_trace::next_connection_id());
   assert(quic_trace::now_ns() <= quic_trace::now_ns());
+  // Proves the wrap is live, so the counts below observe every clock read.
+  assert(clock_reads == 2);
 
   quic_trace::PacketContext context;
   context.connection_id = 7;

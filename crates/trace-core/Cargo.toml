@@ -6,5 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = []
+# Draw identifiers and time from the native provider library the C++ facade
+# also links, so both languages share one set of counters and one clock.
+lttng = ["dep:quic-trace-lttng-sys"]
+
 [dependencies]
 libc.workspace = true
+quic-trace-lttng-sys = { workspace = true, optional = true }

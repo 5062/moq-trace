@@ -129,6 +129,19 @@ bool quic_trace_udp_socket_end_enabled(void);
 void quic_trace_udp_socket_end(const struct quic_trace_udp_socket_end *event);
 void quic_trace_provider_init(void);
 
+/*
+ * Process-wide identity and time shared by every facade, in any language.
+ *
+ * Trace, span, and connection identifiers come from three counters that start
+ * at 1 and never repeat. Timestamps are CLOCK_MONOTONIC nanoseconds. A process
+ * that instruments some code from Rust and some from C++ must link one copy of
+ * this library so both draw from the same counters and clock.
+ */
+uint64_t quic_trace_next_trace_id(void);
+uint64_t quic_trace_next_span_id(void);
+uint64_t quic_trace_next_connection_id(void);
+uint64_t quic_trace_now_ns(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -18,12 +18,16 @@ in their MoQ and QUIC code.
   `scheduling`.
 - Event timestamps use the host monotonic clock. Rust and C++ implementations
   must use the same epoch when they run in one process.
-- Trace and span IDs are process-wide within the Rust facades. Analysis joins
-  providers through object and transport metadata rather than assuming an ID
-  from one provider is present in the other.
-- The Rust facades share identity allocation, the host clock, and the provider
-  seam through `trace-core`. Neither facade owns them, and neither may grow a
-  second copy.
+- Trace, span, and connection IDs and the clock come from the native QUIC
+  provider library (`quic_trace_next_*_id` and `quic_trace_now_ns`), so they are
+  process-wide across Rust and C++. Analysis joins providers through object and
+  transport metadata rather than assuming an ID from one provider is present in
+  the other.
+- No facade in either language owns identity or time, and none may grow a second
+  copy. The C++ headers call the provider library directly. The Rust facades
+  reach it through `trace-core`, which also owns the provider seam and keeps a
+  Rust fallback only for builds without the `lttng` feature, which link no
+  provider and emit nothing.
 - One capture can hold several processes. Every event carries the `vpid` it came
   from, and the analysis publishes one process's slice, so process-local IDs from
   a relay and a peer can never be paired with each other.

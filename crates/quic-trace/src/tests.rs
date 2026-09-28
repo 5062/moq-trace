@@ -234,3 +234,29 @@ fn disabled_global_is_noop_without_lttng() {
         .finish(PacketOutcome::Success);
     assert!(events(&handle).is_empty());
 }
+
+/// Rust and C++ hooks in one process must draw identifiers and time from the
+/// same native source, which the C++ facade calls directly. Interleaving the two
+/// callers shows one counter: any other test allocating concurrently only widens
+/// the gaps, never reorders or repeats a value.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+#[test]
+fn identifiers_and_clock_come_from_the_native_provider() {
+    use quic_trace_lttng_sys as ffi;
+
+    let rust = next_trace_id();
+    let native = unsafe { ffi::quic_trace_next_trace_id() };
+    assert!(rust < native && native < next_trace_id());
+
+    let rust = next_span_id();
+    let native = unsafe { ffi::quic_trace_next_span_id() };
+    assert!(rust < native && native < next_span_id());
+
+    let rust = next_connection_id();
+    let native = unsafe { ffi::quic_trace_next_connection_id() };
+    assert!(rust < native && native < next_connection_id());
+
+    let rust = now_ns();
+    let native = unsafe { ffi::quic_trace_now_ns() };
+    assert!(rust <= native && native <= now_ns());
+}

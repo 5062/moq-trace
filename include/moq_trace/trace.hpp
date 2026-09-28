@@ -118,8 +118,7 @@ class ObjectPhase {
   ObjectPhase(std::uint64_t trace_id, moq_trace_object_phase phase,
               std::uint64_t timestamp_ns)
       : trace_id_(trace_id),
-        span_id_(quic_trace::detail::next_span_id.fetch_add(
-            1, std::memory_order_relaxed)),
+        span_id_(quic_trace_next_span_id()),
         phase_(phase) {
     emit(timestamp_ns, MOQ_TRACE_EDGE_START, std::nullopt);
   }
@@ -159,8 +158,7 @@ class Object {
         !moq_trace_moq_object_phase_enabled()) {
       return;
     }
-    trace_id_ = quic_trace::detail::next_trace_id.fetch_add(
-        1, std::memory_order_relaxed);
+    trace_id_ = quic_trace_next_trace_id();
     if (moq_trace_moq_object_start_enabled()) emit_start();
   }
 

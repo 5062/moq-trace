@@ -236,6 +236,7 @@ name = "trace-core"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "quic-trace-lttng-sys",
 ]
 
 [[package]]

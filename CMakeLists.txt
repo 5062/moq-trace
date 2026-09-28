@@ -23,6 +23,7 @@ add_custom_command(
 
 add_library(quic_trace_provider STATIC
   "${QUIC_PROVIDER_DIR}/interface.c"
+  "${QUIC_PROVIDER_DIR}/identity.c"
   "${GENERATED_DIR}/quic/events.h"
 )
 add_library(quic_trace::provider ALIAS quic_trace_provider)
@@ -80,9 +81,12 @@ target_compile_features(moq_trace_cpp INTERFACE cxx_std_17)
 if(BUILD_TESTING)
   add_executable(quic_trace_cpp_test cpp/tests/trace_test.cpp)
   target_link_libraries(quic_trace_cpp_test PRIVATE quic_trace_cpp)
+  # The tests count clock reads at the shared C clock, which the facade calls.
+  target_link_options(quic_trace_cpp_test PRIVATE "LINKER:--wrap=quic_trace_now_ns")
   add_test(NAME quic_trace_cpp_test COMMAND quic_trace_cpp_test)
   add_executable(moq_trace_cpp_test cpp/tests/object_trace_test.cpp)
   target_link_libraries(moq_trace_cpp_test PRIVATE moq_trace_cpp)
+  target_link_options(moq_trace_cpp_test PRIVATE "LINKER:--wrap=quic_trace_now_ns")
   add_test(NAME moq_trace_cpp_test COMMAND moq_trace_cpp_test)
 endif()
 
