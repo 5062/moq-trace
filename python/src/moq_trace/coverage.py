@@ -7,6 +7,10 @@ import pyarrow as pa
 
 from .errors import TraceError
 
+# The stream offset span of one range-join bucket. Any value is exact; this one
+# keeps a large object to a few buckets while a bucket holds few frames.
+_BUCKET_BYTES = 16 * 1024
+
 
 def _subtract(gaps: list[tuple[int, int]], start: int, end: int) -> None:
     """Subtract one covered half-open range from the remaining gaps."""
@@ -23,11 +27,12 @@ def _subtract(gaps: list[tuple[int, int]], start: int, end: int) -> None:
     gaps[:] = remaining
 
 
-def resolve(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize packet coverage for every selected object lifecycle."""
+def _select_targets(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """Stage the selected object lifecycles in `coverage_targets` and return them."""
 
-    lifecycles = connection.execute(
-        """SELECT lifecycle.trace_id, lifecycle.connection_id, lifecycle.direction,
+    connection.execute(
+        """CREATE TEMP TABLE coverage_targets AS
+           SELECT lifecycle.trace_id, lifecycle.connection_id, lifecycle.direction,
                   lifecycle.stream_id, lifecycle.stream_offset_start, lifecycle.stream_offset_end
            FROM object_lifecycles AS lifecycle
            SEMI JOIN (
@@ -39,37 +44,67 @@ def resolve(connection: duckdb.DuckDBPyConnection) -> None:
              AND tx.logical_frame = rx.logical_frame
               AND tx.direction = 'tx' AND tx.outcome = 'success'
            ) AS selected USING (trace_id)"""
-    ).fetchall()
-    candidates_by_trace: dict[int, list[tuple]] = {}
-    for row in connection.execute(
-        """WITH selected_lifecycles AS (
-             SELECT lifecycle.*
-             FROM object_lifecycles AS lifecycle
-             SEMI JOIN (
-               SELECT trace_id FROM selected_rx
-               UNION ALL
-               SELECT tx.trace_id FROM selected_rx AS rx
-               JOIN object_lifecycles AS tx
-                ON tx.logical_group = rx.logical_group
-               AND tx.logical_frame = rx.logical_frame
-                AND tx.direction = 'tx' AND tx.outcome = 'success'
-             ) AS selected USING (trace_id)
+    )
+    return connection.execute("SELECT * FROM coverage_targets").fetchall()
+
+
+def _candidates(connection: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """Return every successful STREAM frame overlapping a staged target.
+
+    Each row is `(object trace ID, frame start, frame end, packet trace ID,
+    packet start, packet end)`, ordered by object and then by when the frame was
+    sent or received.
+
+    A connection carries few streams, so matching frames to objects on the stream
+    alone compares every object with every frame on it, and the work grows with
+    the square of the capture length. Both sides are split into the offset
+    buckets they cover and also matched on the bucket. An overlapping pair shares
+    the bucket where its overlap begins, and only that bucket reports it, so each
+    pair appears exactly once. A zero-length frame still occupies the bucket of
+    its offset, so it overlaps exactly the objects it did without buckets.
+    """
+
+    return connection.execute(
+        """WITH targets AS (
+             SELECT *, unnest(range(
+                      (stream_offset_start // $bucket)::BIGINT,
+                      ((greatest(stream_offset_end, stream_offset_start + 1) - 1) // $bucket + 1)::BIGINT
+                    )) AS bucket
+             FROM coverage_targets
+           ), frames AS (
+             SELECT packet.connection_id, packet.direction, frame.stream_id,
+                    frame.offset_start, frame.offset_end, frame.timestamp_ns,
+                    packet.trace_id, packet.start_ns, packet.end_ns,
+                    unnest(range(
+                      (frame.offset_start // $bucket)::BIGINT,
+                      ((greatest(frame.offset_end, frame.offset_start + 1) - 1) // $bucket + 1)::BIGINT
+                    )) AS bucket
+             FROM quic_stream_frame AS frame
+             JOIN packet_lifecycles AS packet USING (trace_id)
+             WHERE packet.outcome = 'success' AND frame.outcome = 'success'
            )
            SELECT object.trace_id, frame.offset_start, frame.offset_end,
-                  packet.trace_id, packet.start_ns, packet.end_ns
-           FROM selected_lifecycles AS object
-           JOIN packet_lifecycles AS packet
-             ON packet.connection_id = object.connection_id
-            AND packet.direction = object.direction
-            AND packet.outcome = 'success'
-           JOIN quic_stream_frame AS frame
-             ON frame.trace_id = packet.trace_id
-            AND frame.outcome = 'success'
+                  frame.trace_id, frame.start_ns, frame.end_ns
+           FROM targets AS object
+           JOIN frames AS frame
+             ON frame.connection_id = object.connection_id
+            AND frame.direction = object.direction
             AND frame.stream_id = object.stream_id
+            AND frame.bucket = object.bucket
             AND frame.offset_start < object.stream_offset_end
             AND object.stream_offset_start < frame.offset_end
-           ORDER BY object.trace_id, frame.timestamp_ns, packet.end_ns, packet.trace_id"""
-    ).fetchall():
+            AND object.bucket = greatest(object.stream_offset_start, frame.offset_start) // $bucket
+           ORDER BY object.trace_id, frame.timestamp_ns, frame.end_ns, frame.trace_id""",
+        {"bucket": _BUCKET_BYTES},
+    ).fetchall()
+
+
+def resolve(connection: duckdb.DuckDBPyConnection) -> None:
+    """Materialize packet coverage for every selected object lifecycle."""
+
+    lifecycles = _select_targets(connection)
+    candidates_by_trace: dict[int, list[tuple]] = {}
+    for row in _candidates(connection):
         candidates_by_trace.setdefault(int(row[0]), []).append(row[1:])
 
     rows = []
@@ -122,3 +157,4 @@ def resolve(connection: duckdb.DuckDBPyConnection) -> None:
     connection.register("coverage_arrow", table)
     connection.execute("CREATE TABLE object_packet_coverage AS SELECT * FROM coverage_arrow")
     connection.unregister("coverage_arrow")
+    connection.execute("DROP TABLE coverage_targets")

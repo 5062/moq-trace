@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import random
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,9 @@ import pyarrow as pa
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
+
+import trace_source  # noqa: E402
+from trace_source import Enum, Event  # noqa: E402
 
 from moq_trace import coverage, ctf  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
@@ -443,6 +447,89 @@ class SqlAnalysisTests(unittest.TestCase):
 
         self.assertEqual(intervals, [(10, 100, 130), (11, 110, 120)])
 
+    def insert_rows(self, table: str, rows: list[dict]) -> None:
+        for row in rows:
+            row.setdefault("pid", 0)
+        self.connection.register("rows", pa.Table.from_pylist(rows, schema=ctf.SCHEMAS[table]))
+        self.connection.execute(f"INSERT INTO raw.{table} SELECT * FROM rows")
+        self.connection.unregister("rows")
+
+    def test_bucketed_candidates_match_the_plain_overlap_join(self) -> None:
+        """The bucketed range join reports exactly the pairs a plain overlap join does."""
+
+        bucket = coverage._BUCKET_BYTES
+        generator = random.Random(7)
+        streams = [
+            (connection_id, direction, stream_id)
+            for connection_id in (1, 2)
+            for direction in ("rx", "tx")
+            for stream_id in (10, 11)
+        ]
+        targets, packet_starts, packet_ends, frames = [], [], [], []
+        clock = iter(range(1, 1_000_000))
+        for connection_id, direction, stream_id in streams:
+            offset = generator.choice((0, bucket - 3))
+            for _ in range(12):
+                size = generator.choice((1, 17, 1_200, bucket - 1, bucket, bucket + 1, 3 * bucket + 5))
+                targets.append((len(targets) + 1, connection_id, direction, stream_id, offset, offset + size))
+                offset += size
+            for _ in range(60):
+                start = generator.choice((generator.randrange(offset + 1), generator.randrange(4) * bucket))
+                length = generator.choice((0, 1, 1_200, bucket, 2 * bucket + 1, generator.randrange(3 * bucket)))
+                trace_id = 1_000 + len(packet_starts)
+                outcome = generator.choice(("success", "success", "success", "dropped"))
+                packet_starts.append(
+                    dict(
+                        ctf_timestamp_ns=next(clock),
+                        timestamp_ns=next(clock),
+                        trace_id=trace_id,
+                        connection_id=connection_id,
+                        direction=direction,
+                    )
+                )
+                packet_ends.append(
+                    dict(ctf_timestamp_ns=next(clock), timestamp_ns=next(clock), trace_id=trace_id, outcome=outcome)
+                )
+                for _ in range(generator.choice((1, 1, 2))):
+                    frames.append(
+                        dict(
+                            ctf_timestamp_ns=next(clock),
+                            timestamp_ns=generator.randrange(10**9),
+                            trace_id=trace_id,
+                            stream_id=stream_id,
+                            offset_start=start,
+                            offset_end=start + length,
+                            outcome=generator.choice(("success", "success", "malformed")),
+                        )
+                    )
+        self.insert_rows("quic_packet_start", packet_starts)
+        self.insert_rows("quic_packet_end", packet_ends)
+        self.insert_rows("quic_stream_frame", frames)
+        self.connection.execute(
+            """CREATE TEMP TABLE coverage_targets(trace_id UBIGINT, connection_id UBIGINT, direction VARCHAR,
+                   stream_id UBIGINT, stream_offset_start UBIGINT, stream_offset_end UBIGINT)"""
+        )
+        self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?)", targets)
+
+        expected = self.connection.execute(
+            """SELECT object.trace_id, frame.offset_start, frame.offset_end,
+                      packet.trace_id, packet.start_ns, packet.end_ns
+               FROM coverage_targets AS object
+               JOIN packet_lifecycles AS packet
+                 ON packet.connection_id = object.connection_id
+                AND packet.direction = object.direction
+                AND packet.outcome = 'success'
+               JOIN quic_stream_frame AS frame
+                 ON frame.trace_id = packet.trace_id
+                AND frame.outcome = 'success'
+                AND frame.stream_id = object.stream_id
+                AND frame.offset_start < object.stream_offset_end
+                AND object.stream_offset_start < frame.offset_end
+               ORDER BY object.trace_id, frame.timestamp_ns, packet.end_ns, packet.trace_id"""
+        ).fetchall()
+        self.assertGreater(len(expected), 100)
+        self.assertEqual(coverage._candidates(self.connection), expected)
+
     def test_coverage_subtracts_out_of_order_ranges(self) -> None:
         gaps = [(0, 100)]
         _subtract(gaps, 40, 60)
@@ -451,98 +538,124 @@ class SqlAnalysisTests(unittest.TestCase):
         self.assertEqual(gaps, [])
 
 
-class CtfRecordTests(unittest.TestCase):
+def socket_start(trace_id: int = 3, *, vpid: int | None = 42, timestamp: int = 7, **overrides) -> Event:
+    """Build a `quic_trace:udp_socket_start` event as the LTTng provider records it."""
+
+    payload = {
+        "timestamp_ns": 2,
+        "trace_id": trace_id,
+        "has_connection_id": 1,
+        "connection_id": 4,
+        "direction": Enum("tx"),
+    }
+    payload.update(overrides)
+    return Event("quic_trace:udp_socket_start", payload, timestamp=timestamp, vpid=vpid)
+
+
+@unittest.skipIf(ctf.bt2 is None, "the Babeltrace 2 Python bindings are unavailable")
+class CtfDecodeTests(unittest.TestCase):
+    """Decode real Babeltrace trace IR, so the native field reads are exercised."""
+
+    def decode(self, items, expected_pids=None, batch_size=65_536) -> dict[str, list[dict]]:
+        rows: dict[str, list[dict]] = {}
+        for name, batch in ctf._batches(trace_source.messages(items), expected_pids, batch_size):
+            self.assertEqual(batch.schema, ctf.SCHEMAS[name])
+            rows.setdefault(name, []).extend(batch.to_pylist())
+        return rows
+
+    def test_decodes_payload_context_and_clock(self) -> None:
+        rows = self.decode([socket_start()])
+        self.assertEqual(
+            rows,
+            {
+                "udp_socket_start": [
+                    {
+                        "pid": 42,
+                        "ctf_timestamp_ns": 7,
+                        "timestamp_ns": 2,
+                        "trace_id": 3,
+                        "connection_id": 4,
+                        "direction": "tx",
+                    }
+                ]
+            },
+        )
+
+    def test_optional_fields_respect_presence_flags(self) -> None:
+        rows = self.decode([socket_start(has_connection_id=0)])
+        self.assertIsNone(rows["udp_socket_start"][0]["connection_id"])
+
+    def test_ignores_additional_fields_without_decoding_them(self) -> None:
+        rows = self.decode([socket_start(future_field=trace_source.Text("not an integer"))])
+        self.assertEqual(set(rows["udp_socket_start"][0]), set(ctf.SCHEMAS["udp_socket_start"].names))
+
+    def test_unknown_provider_events_are_ignored(self) -> None:
+        """A provider may add events before the analyzer learns them."""
+
+        rows = self.decode(
+            [
+                Event("moq_trace:moq_object_gc", {"reason": trace_source.Text("unused")}),
+                Event("lttng_ust_statedump:procname", {"procname": trace_source.Text("relay")}),
+                Event("quic_trace:moq_object_start", {"trace_id": 1}),
+                socket_start(),
+            ]
+        )
+        self.assertEqual(set(rows), {"udp_socket_start"})
+
     def test_current_and_legacy_transport_providers_are_supported(self) -> None:
         self.assertTrue(ctf._supported("quic_trace", "quic_packet_start"))
         self.assertTrue(ctf._supported("moq_trace", "quic_packet_start"))
         self.assertTrue(ctf._supported("moq_trace", "moq_object_start"))
         self.assertFalse(ctf._supported("quic_trace", "moq_object_start"))
 
-    def test_unknown_provider_events_are_ignored(self) -> None:
-        """A provider may add events before the analyzer learns them."""
+    def test_requires_expected_fields(self) -> None:
+        event = socket_start()
+        del event.payload["connection_id"]
+        with self.assertRaisesRegex(ctf.CtfError, "missing=.*connection_id"):
+            self.decode([event])
 
-        class Message:
-            def __init__(self, name: str, payload: dict) -> None:
-                self.event = mock.Mock()
-                self.event.name = name
-                self.event.payload_field = payload
-                self.event.common_context_field = None
-                self.default_clock_snapshot = mock.Mock(ns_from_origin=7)
-                self.count = None
+    def test_rejects_fields_the_schema_types_differently(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "direction is a plain integer"):
+            self.decode([socket_start(direction=1)])
+        with self.assertRaisesRegex(ctf.CtfError, "trace_id is an enumeration"):
+            self.decode([socket_start(trace_id=Enum("three"))])
+        with self.assertRaisesRegex(ctf.CtfError, "timestamp_ns is not an unsigned integer"):
+            self.decode([socket_start(timestamp_ns=trace_source.Text("2"))])
 
-        known = {
-            "timestamp_ns": 1,
-            "trace_id": 2,
-            "stream_offset_end": 3,
-            "payload_bytes": 4,
-            "outcome": mock.Mock(labels=("success",)),
-        }
-        messages = [Message("moq_trace:moq_object_gc", {}), Message("moq_trace:moq_object_end", known)]
+    def test_rejects_enumeration_values_without_one_label(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "value 9 does not have exactly one label"):
+            self.decode([socket_start(), socket_start(direction=Enum(value=9))])
 
-        bt2 = mock.Mock()
-        bt2._DiscardedEventsMessageConst = type("DiscardedEvents", (), {})
-        bt2._DiscardedPacketsMessageConst = type("DiscardedPackets", (), {})
-        bt2._EventMessageConst = Message
-        bt2.TraceCollectionMessageIterator = mock.Mock(return_value=iter(messages))
+    def test_events_without_a_vpid_come_from_an_unknown_process(self) -> None:
+        rows = self.decode([socket_start(vpid=None)])
+        self.assertEqual(rows["udp_socket_start"][0]["pid"], ctf.UNKNOWN_PID)
+        with self.assertRaisesRegex(ctf.CtfError, "has no vpid context"):
+            self.decode([socket_start(vpid=None)], expected_pids=(42,))
 
-        with mock.patch.object(ctf, "bt2", bt2):
-            batches = dict(ctf.batches(pathlib.Path("unused.ctf")))
-
-        self.assertEqual(set(batches), {"moq_object_end"})
-        self.assertEqual(batches["moq_object_end"].num_rows, 1)
-        # No vpid context means the process is unknown, never a real VPID.
-        self.assertEqual(batches["moq_object_end"].column("pid").to_pylist(), [ctf.UNKNOWN_PID])
-
-    def test_batches_rejects_events_from_an_unexpected_process(self) -> None:
+    def test_rejects_events_from_an_unexpected_process(self) -> None:
         """A recording that reaches beyond the expected processes is not read silently."""
 
-        class Message:
-            def __init__(self, pid: int) -> None:
-                self.event = mock.Mock()
-                self.event.name = "moq_trace:moq_object_end"
-                self.event.payload_field = {
-                    "timestamp_ns": 1,
-                    "trace_id": 2,
-                    "stream_offset_end": 3,
-                    "payload_bytes": 4,
-                    "outcome": mock.Mock(labels=("success",)),
-                }
-                self.event.common_context_field = {"vpid": pid}
-                self.default_clock_snapshot = mock.Mock(ns_from_origin=7)
-                self.count = None
+        rows = self.decode([socket_start(vpid=42)], expected_pids=(42,))
+        self.assertEqual(rows["udp_socket_start"][0]["pid"], 42)
+        with self.assertRaisesRegex(ctf.CtfError, "came from VPID 43"):
+            self.decode([socket_start(vpid=43)], expected_pids=(42,))
 
-        bt2 = mock.Mock()
-        bt2._DiscardedEventsMessageConst = type("DiscardedEvents", (), {})
-        bt2._DiscardedPacketsMessageConst = type("DiscardedPackets", (), {})
-        bt2._EventMessageConst = Message
-        bt2.TraceCollectionMessageIterator = mock.Mock(return_value=iter([Message(42)]))
+    def test_rejects_traces_that_discarded_events(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "discarded 5 events"):
+            self.decode([socket_start(), trace_source.Discarded(5)])
 
-        with mock.patch.object(ctf, "bt2", bt2):
-            accepted = dict(ctf.batches(pathlib.Path("unused.ctf"), (42,)))
-        self.assertEqual(accepted["moq_object_end"].column("pid").to_pylist(), [42])
+    def test_rejects_traces_without_analyzer_events(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "contains no MoQ or QUIC trace events"):
+            self.decode([Event("lttng_ust_statedump:procname", {"procname": trace_source.Text("relay")})])
 
-        bt2.TraceCollectionMessageIterator = mock.Mock(return_value=iter([Message(43)]))
-        with mock.patch.object(ctf, "bt2", bt2), self.assertRaisesRegex(ctf.CtfError, "came from VPID 43"):
-            list(ctf.batches(pathlib.Path("unused.ctf"), (42,)))
-
-    def message(self, **payload):
-        return mock.Mock(event=mock.Mock(payload_field=payload), default_clock_snapshot=mock.Mock(ns_from_origin=1))
-
-    def test_ignores_additional_fields_without_decoding_them(self) -> None:
-        message = self.message(timestamp_ns=2, trace_id=3, connection_id=4, direction=0, future_field=object())
-        record = ctf._record(message, "udp_socket_start", 9)
-        self.assertEqual(set(record), set(ctf.SCHEMAS["udp_socket_start"].names))
-        self.assertEqual(record["pid"], 9)
-
-    def test_optional_fields_respect_presence_flags(self) -> None:
-        message = self.message(timestamp_ns=2, trace_id=3, connection_id=4, has_connection_id=0, direction=0)
-        self.assertIsNone(ctf._record(message, "udp_socket_start", 0)["connection_id"])
-        message.event.payload_field["has_connection_id"] = 1
-        self.assertEqual(ctf._record(message, "udp_socket_start", 0)["connection_id"], 4)
-
-    def test_requires_expected_fields(self) -> None:
-        with self.assertRaisesRegex(ctf.CtfError, "missing=.*connection_id"):
-            ctf._record(self.message(timestamp_ns=2, trace_id=3, direction=0), "udp_socket_start", 0)
+    def test_bounds_batches_and_keeps_event_order(self) -> None:
+        events = [socket_start(trace_id, timestamp=trace_id) for trace_id in range(5)]
+        batches = list(ctf._batches(trace_source.messages(events), None, 2))
+        self.assertEqual([batch.num_rows for _, batch in batches], [2, 2, 1])
+        self.assertEqual(
+            [trace_id for _, batch in batches for trace_id in batch.column("trace_id").to_pylist()],
+            list(range(5)),
+        )
 
     def test_missing_babeltrace_bindings_have_an_actionable_error(self) -> None:
         with mock.patch.object(ctf, "bt2", None):
