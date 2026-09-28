@@ -14,7 +14,7 @@ pub use trace_core::now_ns;
 mod backend;
 
 mod ids;
-pub use ids::{next_logical_id, next_session_id};
+pub use ids::{next_logical_group, next_logical_id, next_session_id};
 
 mod object;
 pub use object::{

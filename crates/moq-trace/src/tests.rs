@@ -317,6 +317,6 @@ fn session_and_logical_ids_come_from_the_native_provider() {
 
     let rust = next_logical_id();
     let native = unsafe { ffi::moq_trace_next_logical_group() };
-    assert!(rust.group() < native && native < next_logical_id().group());
+    assert!(rust.group() < native && native < next_logical_group());
     assert_eq!(rust.frame(), 0);
 }

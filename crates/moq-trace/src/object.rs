@@ -13,7 +13,7 @@ pub struct LogicalId {
 impl LogicalId {
     /// Create an identity from a process-unique group instance and frame ordinal.
     ///
-    /// Take the group from [`crate::next_logical_id`], which stays unique across
+    /// Take the group from [`crate::next_logical_group`], which stays unique across
     /// Rust and C++ hooks in one process.
     pub fn new(group: u64, frame: u64) -> Self {
         Self { group, frame }
