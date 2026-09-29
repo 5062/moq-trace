@@ -234,9 +234,12 @@ class _Row:
 # the end-to-end latencies, are left out; `latency_cdf` shows those. The RX
 # `application` phase is left out too: only a stack that runs MoQ inside packet
 # processing records it, and that time already appears in the MoQ rows.
-_SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
+# Each section keeps its CDF line style beside its rows, so colors can repeat
+# while the phase curves remain distinct.
+_SECTIONS: tuple[tuple[str, str, tuple[_Row, ...]], ...] = (
     (
         "RX QUIC",
+        "-",
         (
             _Row("Header parse", "packet", "rx", "header_parse"),
             _Row("Routing", "packet", "rx", "routing"),
@@ -250,6 +253,7 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     ),
     (
         "RX MoQ",
+        "--",
         (
             _Row("Header parse", "object", "rx", "header_parse"),
             _Row("Create", "object", "rx", "create"),
@@ -259,6 +263,7 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     ),
     (
         "TX MoQ",
+        "-.",
         (
             _Row("Clone", "object", "tx", "clone"),
             _Row("Header encode", "object", "tx", "header_encode"),
@@ -267,6 +272,7 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     ),
     (
         "TX QUIC",
+        ":",
         (
             _Row("Frame encode", "packet", "tx", "frame_encode"),
             _Row("Packet encrypt", "packet", "tx", "packet_encrypt"),
@@ -322,16 +328,6 @@ def _row_summary(connection: duckdb.DuckDBPyConnection, row: _Row) -> tuple[floa
     return tuple(max(float(value), _FLOOR_US) for value in summary[1])
 
 
-# Line style per section of phase rows, so phases stay distinct once the color
-# cycle repeats. Sections without phases of their own are absent.
-_SECTION_STYLES = {
-    "RX QUIC": "-",
-    "RX MoQ": "--",
-    "TX MoQ": "-.",
-    "TX QUIC": ":",
-}
-
-
 def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
     """Draw one ECDF per processing phase on a log time axis.
 
@@ -340,10 +336,7 @@ def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
     """
 
     drawn = 0
-    for section, rows in _SECTIONS:
-        style = _SECTION_STYLES.get(section)
-        if style is None:
-            continue
+    for section, style, rows in _SECTIONS:
         color = 0
         for row in rows:
             query, parameters = _row_query(row)
@@ -376,7 +369,7 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
     labels: list[str] = []
     y = 0.0
     single = len(runs) == 1
-    for section, rows in _SECTIONS:
+    for section, _style, rows in _SECTIONS:
         summaries = [(row, [_row_summary(run.connection, row) for run in runs]) for row in rows]
         summaries = [(row, values) for row, values in summaries if any(value is not None for value in values)]
         if not summaries:
@@ -447,7 +440,7 @@ def _breakdown_figure(
     subtitle: str,
     runs: Sequence[ComparisonRun],
 ) -> None:
-    rows = sum(len(rows) + 1 for _section, rows in _SECTIONS)
+    rows = sum(len(rows) + 1 for _section, _style, rows in _SECTIONS)
     fig, axis = plt.subplots(figsize=(12, 1.8 + rows * 0.24 * max(1, len(runs) ** 0.5)))
     _draw_breakdown(axis, runs)
     # Only a comparison needs a legend, to name the run behind each color.
