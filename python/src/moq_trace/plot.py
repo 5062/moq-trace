@@ -527,8 +527,8 @@ def plot_stability(
 ) -> None:
     """Render per-second object and packet latency on one shared time axis.
 
-    Objects slower than the run's p99 are marked individually, so a stall in the
-    object panel can be read straight down to the packet phase that caused it.
+    The shared axis lets a stall in the object panel be read straight down to
+    the packet phase that caused it.
     """
 
     fig, (objects, packets) = plt.subplots(2, 1, figsize=(13, 7.5), sharex=True, height_ratios=(3, 2))
@@ -537,22 +537,8 @@ def plot_stability(
         if not windows:
             raise ValueError(f"cannot plot stability without {metric} samples")
         _draw_windows(objects, windows, label, index)
-        outliers = connection.execute(
-            f"""SELECT elapsed_ns / 1e9, latency_ns / 1000.0 FROM {table}
-                WHERE metric = $metric AND latency_ns > (
-                  SELECT quantile_cont(latency_ns, 0.99) FROM {table} WHERE metric = $metric
-                )""",
-            {"metric": metric},
-        ).fetchall()
-        objects.scatter(
-            [second for second, _us in outliers],
-            [us for _second, us in outliers],
-            s=12,
-            color=f"C{index}",
-            zorder=3,
-        )
     objects.set_ylabel("Object copy latency (µs)")
-    objects.set_title("Object copies per second: solid p50, dashed p99, dots are copies above the run p99")
+    objects.set_title("Object copies per second: solid p50, dashed p99")
     objects.legend(loc="upper right", fontsize=8)
     objects.grid(alpha=0.25)
 
