@@ -19,6 +19,51 @@ def _model(path: pathlib.Path, model):
         raise ValueError(f"failed to load {path}: {error}") from error
 
 
+def _relays(value: str) -> tuple[str, ...]:
+    from .bench import profiles
+
+    names = tuple(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+    if not names:
+        raise argparse.ArgumentTypeError("name at least one relay")
+    unknown = [name for name in names if name not in profiles()]
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown relay {', '.join(unknown)}; available: {', '.join(profiles())}")
+    return names
+
+
+def _checkout(value: str) -> tuple[str, pathlib.Path]:
+    name, separator, path = value.partition("=")
+    if not separator or not name or not path:
+        raise argparse.ArgumentTypeError("expected RELAY=PATH")
+    return name, pathlib.Path(path)
+
+
+# `bench` flags that map one-to-one onto `ExperimentConfig` fields. A flag left
+# unset keeps the configuration default, so the defaults live in one place.
+_BENCH_SETTINGS = (
+    ("--subscribers", int, "Subscriber sessions, one subscription each."),
+    ("--object-size", int, "Bytes per object."),
+    ("--fps", int, "Objects published per second."),
+    ("--warmup-seconds", float, "Run time trimmed from the front of the window."),
+    ("--duration-seconds", float, "Steady-state window length."),
+    ("--cooldown-seconds", float, "Run time trimmed from the back of the window."),
+    ("--port", int, "UDP port every relay listens on."),
+    ("--relay-cpu", int, "Pin each relay to this CPU."),
+    ("--bench-bin", pathlib.Path, "Workload peer binary."),
+)
+
+
+def _setting(flag: str) -> str:
+    return flag.removeprefix("--").replace("-", "_")
+
+
+def _default(flag: str) -> str:
+    # Defaults that validators rewrite, such as the resolved peer path, are shown
+    # as written in the configuration model.
+    value = ExperimentConfig.model_fields[_setting(flag)].default
+    return "unpinned" if value is None else str(value)
+
+
 def parser() -> argparse.ArgumentParser:
     """Build the complete command parser."""
 
@@ -31,6 +76,42 @@ def parser() -> argparse.ArgumentParser:
 
     compare = commands.add_parser("compare", help="Run one comparison from TOML configuration.")
     compare.add_argument("config", type=pathlib.Path)
+
+    from .bench import profiles
+
+    bench = commands.add_parser("bench", help="Run one workload against one or more relay implementations.")
+    bench.add_argument(
+        "--relay",
+        type=_relays,
+        required=True,
+        help=f"Comma-separated relay profiles, run in order: {', '.join(profiles())}.",
+    )
+    bench.add_argument(
+        "--trace",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Capture and analyze LTTng traces. --no-trace keeps only the peers' logs (default: on).",
+    )
+    bench.add_argument(
+        "--output",
+        type=pathlib.Path,
+        help="Directory holding one subdirectory per relay (default: artifacts/bench-<UTC time>).",
+    )
+    bench.add_argument(
+        "--checkout",
+        type=_checkout,
+        action="append",
+        default=[],
+        metavar="RELAY=PATH",
+        help="Use this checkout instead of the profile's. Repeatable.",
+    )
+    for flag, kind, description in _BENCH_SETTINGS:
+        bench.add_argument(flag, type=kind, help=f"{description} (default: {_default(flag)})")
+    bench.add_argument(
+        "--render",
+        action=argparse.BooleanOptionalAction,
+        help="Render figures for each traced run (default: on).",
+    )
 
     analyze = commands.add_parser("analyze", help="Analyze one LTTng CTF trace.")
     analyze.add_argument("input", type=pathlib.Path)
@@ -85,6 +166,24 @@ def _run(args: argparse.Namespace) -> None:
         from .experiment import compare
 
         print(compare(_model(args.config, ComparisonConfig)))
+    elif args.command == "bench":
+        from .bench import bench, default_output
+
+        names = [_setting(flag) for flag, _, _ in _BENCH_SETTINGS] + ["render"]
+        settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
+        settings["trace"] = args.trace
+        try:
+            results = bench(args.relay, args.output or default_output(), settings, dict(args.checkout))
+        except ValidationError as error:
+            raise ValueError(str(error)) from error
+        for result in results:
+            if result.error is None:
+                print(f"{result.relay}: {result.path}")
+            else:
+                print(f"{result.relay}: error: {result.error}", file=sys.stderr)
+        failed = [result.relay for result in results if result.error is not None]
+        if failed:
+            raise RuntimeError(f"{len(failed)} of {len(results)} relay runs failed: {', '.join(failed)}")
     elif args.command == "analyze":
         from .analyze import run
         from .metadata import Window, Workload

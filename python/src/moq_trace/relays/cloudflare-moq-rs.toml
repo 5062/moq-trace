@@ -1,0 +1,15 @@
+# https://github.com/5062/moq-rs
+# Build: `cargo build --release -p moq-relay-ietf --features trace` in 5062/moq-rs.
+#
+# The certificate placeholders make the runner generate a throwaway TLS pair.
+# The relay logs "listening on <addr>", which the default ready marker matches.
+# It installs no SIGINT handler, so a graceful stop would read as a crash.
+checkout = "~/cloudflare-moq-rs"
+relay_bin = "target/release/moq-relay-ietf"
+relay_args = [
+  "--bind", "[::]:{port}",
+  "--tls-cert", "{certificate}",
+  "--tls-key", "{key}",
+]
+relay_graceful_stop = false
+transport_profile = "quinn"

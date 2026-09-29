@@ -38,9 +38,12 @@ class ExperimentError(RuntimeError):
 
 @dataclasses.dataclass(frozen=True)
 class Capture:
-    """One CTF recording and the processes it holds."""
+    """One CTF recording and the processes it holds.
 
-    trace: pathlib.Path
+    `trace` is `None` when the run had tracing off and recorded nothing.
+    """
+
+    trace: pathlib.Path | None
     relay_pid: int
     pids: tuple[int, ...]
 
@@ -153,7 +156,7 @@ def _validate_environment(config: ExperimentConfig) -> None:
 
 def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path) -> Capture:
     ctf = output / "trace"
-    session = LttngSession(ctf)
+    session = LttngSession(ctf) if config.trace else None
     processes: list[ManagedProcess] = []
     try:
         relay = ManagedProcess("relay", command.relay, output, output / "relay.log")
@@ -163,8 +166,9 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
             wait_for_log(output / "relay.log", relay, lambda value: marker in value, marker, 15)
         else:
             wait_for_startup(relay, config.relay_startup_seconds)
-        session.wait_for_provider(relay.pid)
-        session.start([relay.pid])
+        if session is not None:
+            session.wait_for_provider(relay.pid)
+            session.start([relay.pid])
         tracked = [relay.pid]
 
         subscriber = ManagedProcess("subscriber", command.subscriber, output, output / "subscriber.log")
@@ -172,7 +176,8 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
         # A remote subscriber runs behind ssh, so this process is the ssh client
         # and recording it would capture none of the subscriber's own events.
         if config.subscriber is None:
-            session.track(subscriber.pid)
+            if session is not None:
+                session.track(subscriber.pid)
             tracked.append(subscriber.pid)
         # Both bench binaries report live sessions and subscriptions in their stats
         # line, so the same readiness gate works for the reference peers and for the
@@ -190,7 +195,8 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
         processes.append(publisher)
         # Track on spawn rather than after readiness, so the connection setup that
         # the lifecycle metrics start from is recorded.
-        session.track(publisher.pid)
+        if session is not None:
+            session.track(publisher.pid)
         tracked.append(publisher.pid)
         wait_for_log(
             output / "publisher.log",
@@ -214,12 +220,15 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
         processes.remove(publisher)
         relay.stop(config.relay_graceful_stop)
         processes.remove(relay)
+        if session is None:
+            return Capture(trace=None, relay_pid=relay.pid, pids=tuple(tracked))
         session.finish()
         return Capture(trace=ctf, relay_pid=relay.pid, pids=tuple(tracked))
     finally:
         for process in reversed(processes):
             process.close()
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def _file_hash(path: pathlib.Path) -> str | None:
@@ -274,7 +283,11 @@ def _validate_workload(database: pathlib.Path) -> None:
 
 
 def run(config: ExperimentConfig) -> pathlib.Path:
-    """Capture, analyze, and optionally render one workload."""
+    """Capture, analyze, and optionally render one workload.
+
+    Returns the analysis database, or the run directory holding the peers' logs
+    when tracing is off.
+    """
 
     _validate_environment(config)
     output = config.output.resolve()
@@ -284,6 +297,8 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     _generate_certificate(config, output)
     command = commands(config, output)
     capture = _capture(config, command, output)
+    if capture.trace is None:
+        return output
     database = output / "analysis.duckdb"
     analyze(
         capture.trace,

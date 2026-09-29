@@ -251,6 +251,29 @@ class ExperimentTests(unittest.TestCase):
 
         self.wait_for_startup.assert_called_once_with(mock.ANY, 0.25)
 
+    def test_capture_without_tracing_opens_no_session(self) -> None:
+        config = ExperimentConfig(output=pathlib.Path("run"), trace=False)
+        with mock.patch.object(experiment, "LttngSession") as session_class:
+            command = CommandSet(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
+            with tempfile.TemporaryDirectory() as directory:
+                with (
+                    mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()),
+                    mock.patch.object(experiment, "wait_for_log"),
+                ):
+                    result = experiment._capture(config, command, pathlib.Path(directory))
+
+        session_class.assert_not_called()
+        self.assertIsNone(result.trace)
+        self.assertEqual(result.relay_pid, 2000)
+
+    def test_comparison_requires_tracing(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "requires tracing"):
+            ComparisonConfig(
+                experiment=ExperimentConfig(output=pathlib.Path("run"), trace=False),
+                dimension="subscribers",
+                values=(1, 2),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

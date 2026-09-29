@@ -1,0 +1,20 @@
+# https://github.com/5062/quiche/moq-trace
+#
+# The relay binds IPv4 loopback only and logs no readiness marker, so the
+# runner waits a fixed startup delay and the subscriber dials the address it
+# bound. It installs no SIGINT handler, so a graceful stop would read as a
+# crash. QUICHE emits no Quinn routing or scheduling phases.
+checkout = "~/google-quiche"
+relay_bin = "bazel-bin/quiche/moqt_relay"
+relay_args = [
+  "--bind_address", "127.0.0.1",
+  "--port", "{port}",
+  "--certificate_file", "{certificate}",
+  "--key_file", "{key}",
+  "--v=1",
+]
+relay_ready_log = ""
+relay_startup_seconds = 0.5
+relay_graceful_stop = false
+relay_url = "https://127.0.0.1:{port}"
+transport_profile = "generic"

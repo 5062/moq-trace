@@ -17,6 +17,9 @@ dependencies = [
 [project.scripts]
 moq-trace = "moq_trace.cli:main"
 
+[tool.setuptools.package-data]
+moq_trace = ["relays/*.toml"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

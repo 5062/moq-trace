@@ -20,7 +20,9 @@ boundaries being measured.
 - `crates/trace-core` owns the process-wide identity counters, the host clock,
   and the provider seam that both Rust facades share.
 - `include` provides equivalent C++17 scoped APIs.
-- `python` captures relay workloads and builds combined DuckDB artifacts.
+- `python` captures relay workloads and builds combined DuckDB artifacts. Its
+  `relays/` directory holds the launch profile for each relay implementation that
+  `moq-trace bench` runs.
 - `moq-bench` provides implementation-independent MoQ client and server peers used
   as a baseline and a fixture. It builds against the MoQ implementation under test,
   so it sits outside the workspace; see `moq-bench/README.md`.
@@ -112,6 +114,30 @@ certificate placeholders trigger generation of a throwaway TLS pair. Relays
 without a readiness log marker can set `relay_ready_log = ""` and use
 `relay_startup_seconds`. `moq-trace run --output` overrides the configured run
 directory without changing the checked-in experiment profile.
+
+`moq-trace bench` runs one workload against several relay implementations in
+turn, from the toolkit root so the default peer path resolves:
+
+```sh
+moq-trace bench --relay moq-dev-moq,cloudflare-moq-rs,google-quiche \
+  --subscribers 4 --object-size 16384 --fps 30 --duration-seconds 20
+```
+
+Each relay gets its own subdirectory under `--output`, which defaults to
+`artifacts/bench-<UTC time>`. The relays come from the launch profiles in
+`python/src/moq_trace/relays/`. A profile names the relay's checkout, binary,
+arguments, readiness marker, and stop behavior, and may not set any workload key,
+so every relay in one invocation runs the same workload. The workload flags
+default to the experiment defaults. `--checkout RELAY=PATH` points one relay at
+another checkout, and a relay whose binary is missing fails before any run starts.
+A failed run does not stop the relays after it. Build each relay with its tracing
+hooks first, linked against the LTTng-UST release of the `lttng` tools that run
+the capture.
+
+`--no-trace` runs the same workload without an LTTng session. Its runs keep only
+the peers' logs, which report throughput, frame rates, and mismatches, and
+produce no analysis artifact. `compare` requires tracing, because a comparison
+indexes analysis artifacts.
 
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that

@@ -56,6 +56,9 @@ class ExperimentConfig(StrictModel):
     cooldown_seconds: float = Field(default=1.0, ge=0)
     port: int = Field(default=4443, gt=0, le=65_535)
     transport_profile: TransportProfile = "generic"
+    # Off runs the same workload without an LTTng session, so the run keeps only the
+    # peers' logs and produces no analysis artifact.
+    trace: bool = True
     render: bool = True
 
     @field_validator("relay_bin", "bench_bin")
@@ -95,4 +98,12 @@ class ComparisonConfig(StrictModel):
             raise ValueError("comparison values must be unique")
         if any(value <= 0 for value in self.values):
             raise ValueError("comparison values must be positive")
+        return self
+
+    @model_validator(mode="after")
+    def runs_are_traced(self) -> "ComparisonConfig":
+        """Require tracing, because a comparison indexes analysis artifacts."""
+
+        if not self.experiment.trace:
+            raise ValueError("a comparison requires tracing")
         return self

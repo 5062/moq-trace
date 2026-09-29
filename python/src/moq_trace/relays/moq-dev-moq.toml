@@ -1,0 +1,6 @@
+# https://github.com/5062/moq/tree/moq-trace
+# Build: `just trace-build`
+# The runner's default relay arguments are this relay's own CLI, so none are set here
+checkout = "~/moq-dev-moq"
+relay_bin = "target/release/moq-relay"
+transport_profile = "quinn"

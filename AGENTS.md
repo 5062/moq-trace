@@ -36,12 +36,22 @@ in their MoQ and QUIC code.
   a relay and a peer can never be paired with each other.
 - Keep implementation-specific types and control flow outside this repository.
 
-`moq-bench/` is the single, bounded exception to that boundary. It is an
-implementation-independent client and server used as a measurement fixture and
-baseline, and it builds against the MoQ implementation under test, so it lives
-outside the workspace (`Cargo.toml` excludes it) and keeps `just check` working from
-a standalone checkout. MoQ semantics must not leak from `moq-bench/` into `crates/`
-or `python/`, and relay policy must not leak the other way.
+Two bounded exceptions to that boundary exist.
+
+`moq-bench/` is an implementation-independent client and server used as a
+measurement fixture and baseline, and it builds against the MoQ implementation
+under test, so it lives outside the workspace (`Cargo.toml` excludes it) and keeps
+`just check` working from a standalone checkout. MoQ semantics must not leak from
+`moq-bench/` into `crates/` or `python/`, and relay policy must not leak the other
+way.
+
+`python/src/moq_trace/relays/` holds one launch profile per relay implementation,
+so `moq-trace bench` can run one workload against all of them. A profile is data
+only: where the relay's checkout lives, its binary, its arguments, and how to wait
+for and stop it. `bench.LAUNCH_KEYS` lists the keys a profile may set, and it
+excludes every workload key so that one invocation cannot run relays under
+different workloads. Relay-specific behavior belongs in a profile's keys, never in
+branches on a relay's name in the runner or the analysis.
 
 Treat provider event names, enum values, fields, and units as a compatibility
 contract. Additive schema changes must remain readable by older analysis where
