@@ -198,10 +198,23 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
         ("moq_object_phase", "object_phase_intervals"),
         ("quic_packet_phase", "packet_phase_intervals"),
     ):
-        boundaries = _count(connection, f"SELECT count(*) FROM {table}")
-        pairs = _count(connection, f"SELECT count(*) * 2 FROM {intervals}")
-        if boundaries != pairs:
-            raise TraceError(f"{table} contains unmatched phase boundaries")
+        _require_zero(
+            connection,
+            f"""SELECT count(*) FROM (
+                  SELECT trace_id, span_id, phase, edge FROM {table}
+                  GROUP BY ALL HAVING count(*) > 1
+                )""",
+            f"{table} contains duplicate phase boundaries",
+        )
+        _require_zero(
+            connection,
+            f"""SELECT count(*) FROM {table} AS done
+                ANTI JOIN {table} AS start
+                  ON start.trace_id = done.trace_id AND start.span_id = done.span_id
+                 AND start.phase = done.phase AND start.edge = 'start'
+                WHERE done.edge = 'done'""",
+            f"{table} contains unmatched phase boundaries",
+        )
         _require_zero(
             connection,
             f"SELECT count(*) FROM {intervals} WHERE end_ns < start_ns",
@@ -248,7 +261,7 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
 
 
 def _validate_truncation(connection: duckdb.DuckDBPyConnection) -> None:
-    """Reject lifecycles that never complete, unless the recording cut them off.
+    """Reject starts without ends inside the window, allowing a cut-off tail.
 
     A relay without a graceful stop is killed, and an object or packet it was
     handling then never records its end. Those start after the window closes,
@@ -267,6 +280,17 @@ def _validate_truncation(connection: duckdb.DuckDBPyConnection) -> None:
             f"""SELECT count(*) FROM {start} ANTI JOIN {finish} USING (trace_id)
                 WHERE timestamp_ns <= (SELECT end_ns FROM analysis_window)""",
             f"{kind} starts without completions inside the analysis window",
+        )
+    for table in ("moq_object_phase", "quic_packet_phase"):
+        _require_zero(
+            connection,
+            f"""SELECT count(*) FROM {table} AS start
+                ANTI JOIN {table} AS done
+                  ON done.trace_id = start.trace_id AND done.span_id = start.span_id
+                 AND done.phase = start.phase AND done.edge = 'done'
+                WHERE start.edge = 'start'
+                  AND start.timestamp_ns <= (SELECT end_ns FROM analysis_window)""",
+            f"{table} contains unmatched phase boundaries inside the analysis window",
         )
 
 

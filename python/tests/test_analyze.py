@@ -184,6 +184,52 @@ class SqlAnalysisTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "object starts without completions inside the analysis window"):
             _validate_truncation(self.connection)
 
+    def test_phases_cut_off_after_the_window_are_accepted(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.unfinished_object(3, 900_000)
+        self.insert(
+            "quic_packet_start",
+            ctf_timestamp_ns=4_000,
+            timestamp_ns=900_000,
+            trace_id=4,
+            connection_id=1,
+            direction="rx",
+        )
+        for table, trace_id, phase in (("moq_object_phase", 3, "payload_read"), ("quic_packet_phase", 4, "routing")):
+            self.insert(
+                table,
+                ctf_timestamp_ns=trace_id * 1_000 + 1,
+                timestamp_ns=950_000,
+                trace_id=trace_id,
+                span_id=trace_id * 100,
+                phase=phase,
+                edge="start",
+            )
+
+        _validate_raw(self.connection)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        _validate_truncation(self.connection)
+
+    def test_phase_unfinished_inside_the_window_is_rejected(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.insert(
+            "quic_packet_phase",
+            ctf_timestamp_ns=3_001,
+            timestamp_ns=95_000,
+            trace_id=3,
+            span_id=300,
+            phase="routing",
+            edge="start",
+        )
+
+        _validate_raw(self.connection)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        with self.assertRaisesRegex(TraceError, "quic_packet_phase contains unmatched phase boundaries"):
+            _validate_truncation(self.connection)
+
     def test_analysis_accepts_nonconsecutive_groups(self) -> None:
         for trace_id, direction in ((1, "rx"), (2, "tx"), (3, "rx"), (4, "tx")):
             self.object_start(trace_id, direction, trace_id)

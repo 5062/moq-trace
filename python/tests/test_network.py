@@ -88,6 +88,24 @@ class DatagramTests(unittest.TestCase):
             with self.assertRaisesRegex(TraceError, "LINUX_SLL2"):
                 list(network.read_datagrams(path, RELAY_PORT, ()))
 
+    def test_a_truncated_pcap_record_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.pcap"
+            _pcap(path, [])
+            with path.open("ab") as handle:
+                handle.write(struct.pack("<IIII", 1, 0, 100, 100) + b"partial")
+            with self.assertRaisesRegex(TraceError, "truncated pcap record"):
+                list(network.read_datagrams(path, RELAY_PORT, ()))
+
+    def test_a_truncated_pcap_record_header_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.pcap"
+            _pcap(path, [])
+            with path.open("ab") as handle:
+                handle.write(b"partial")
+            with self.assertRaisesRegex(TraceError, "truncated pcap record header"):
+                list(network.read_datagrams(path, RELAY_PORT, ()))
+
 
 class QlogTests(unittest.TestCase):
     """qlog events are placed on the monotonic clock the relay recorded."""

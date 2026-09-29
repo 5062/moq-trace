@@ -99,9 +99,13 @@ def _pcap_records(path: pathlib.Path) -> Iterator[tuple[int, bytes]]:
         raise TraceError(f"{path} has link type {linktype}; capture with tcpdump -i any -y LINUX_SLL2")
     offset = 24
     header = struct.Struct(f"{endian}IIII")
-    while offset + header.size <= len(data):
+    while offset < len(data):
+        if offset + header.size > len(data):
+            raise TraceError(f"{path} has a truncated pcap record header at byte {offset}")
         seconds, fraction, included, _original = header.unpack_from(data, offset)
         offset += header.size
+        if offset + included > len(data):
+            raise TraceError(f"{path} has a truncated pcap record at byte {offset}")
         yield seconds * 1_000_000_000 + fraction * fraction_ns, data[offset : offset + included]
         offset += included
 
