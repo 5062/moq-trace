@@ -129,6 +129,17 @@ class CommandSet(ArtifactModel):
     subscriber: tuple[str, ...]
 
 
+class NetworkCapabilities(ArtifactModel):
+    """Network measurements a run captured beside its trace.
+
+    `packets` records whether a packet capture on the relay host was analyzed,
+    and `qlog_connections` how many QUIC connections the relay's qlog described.
+    """
+
+    packets: bool
+    qlog_connections: int = Field(ge=0)
+
+
 class RunMetadata(ArtifactModel):
     """Everything one run artifact records about the measurement it holds."""
 
@@ -147,6 +158,9 @@ class RunMetadata(ArtifactModel):
     affinity: Affinity = Field(default_factory=Affinity)
     binaries: Binaries | None = None
     commands: CommandSet | None = None
+    # Absent from artifacts written before network capture existed, and from runs
+    # that captured nothing beside the trace.
+    network: NetworkCapabilities | None = None
 
 
 class ComparisonRun(ArtifactModel):

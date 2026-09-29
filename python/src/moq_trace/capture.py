@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 import os
 import pathlib
 import re
@@ -10,7 +11,7 @@ import signal
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 
 class CaptureError(RuntimeError):
@@ -144,13 +145,21 @@ class LttngSession:
 class ManagedProcess:
     """One child process with deterministic logging and group cleanup."""
 
-    def __init__(self, name: str, command: Sequence[str], cwd: pathlib.Path, log: pathlib.Path) -> None:
+    def __init__(
+        self,
+        name: str,
+        command: Sequence[str],
+        cwd: pathlib.Path,
+        log: pathlib.Path,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self.name = name
         self.log_handle = log.open("w")
         try:
             self.process = subprocess.Popen(
                 command,
                 cwd=cwd,
+                env=None if env is None else {**os.environ, **env},
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -269,3 +278,49 @@ def _provider_listed(listing: str, pid: int, event: str) -> bool:
         if target and _event_name(line) == event:
             return True
     return False
+
+
+def packet_capture_command(pcap: pathlib.Path, port: int) -> list[str]:
+    """Capture the headers of every UDP datagram on `port`, on every interface.
+
+    Capturing needs privileges, so tcpdump runs under non-interactive sudo and
+    drops them to the invoking user before writing, which keeps the file readable
+    by the analysis. `LINUX_SLL2` records the interface and direction of each
+    packet, which the analysis needs to count a loopback datagram once. The first
+    128 bytes hold every header, and the UDP header carries the full length.
+    """
+
+    return [
+        "sudo",
+        "-n",
+        "tcpdump",
+        "-i",
+        "any",
+        "-y",
+        "LINUX_SLL2",
+        "-s",
+        "128",
+        "--time-stamp-precision",
+        "nano",
+        "-U",
+        "-Z",
+        getpass.getuser(),
+        "-w",
+        str(pcap),
+        "udp",
+        "port",
+        str(port),
+    ]
+
+
+def start_packet_capture(pcap: pathlib.Path, port: int, cwd: pathlib.Path) -> ManagedProcess:
+    """Start a packet capture and wait until tcpdump is listening."""
+
+    log = cwd / "tcpdump.log"
+    process = ManagedProcess("tcpdump", packet_capture_command(pcap, port), cwd, log)
+    try:
+        wait_for_log(log, process, lambda value: "listening on" in value, "tcpdump listening", 10)
+    except CaptureError as error:
+        process.close()
+        raise CaptureError(f"{error}; packet capture needs passwordless sudo for tcpdump, see {log}") from error
+    return process

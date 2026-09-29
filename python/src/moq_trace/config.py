@@ -59,6 +59,13 @@ class ExperimentConfig(StrictModel):
     # Off runs the same workload without an LTTng session, so the run keeps only the
     # peers' logs and produces no analysis artifact.
     trace: bool = True
+    # Record a header-only packet capture of the relay's port with tcpdump, which
+    # needs passwordless sudo. The analysis derives throughput per direction from it.
+    capture_packets: bool = False
+    # Point the relay at a qlog directory through `QLOGDIR`. Off by default: a
+    # relay that honors it serializes an event per packet, which costs relay CPU
+    # and so perturbs the latency being measured.
+    qlog: bool = False
     render: bool = True
 
     @field_validator("relay_bin", "bench_bin")

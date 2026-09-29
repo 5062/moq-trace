@@ -15,7 +15,7 @@ sys.path.insert(0, str(SOURCE))
 
 from support import run_metadata  # noqa: E402
 
-from moq_trace import capture, experiment  # noqa: E402
+from moq_trace import capture, experiment, network  # noqa: E402
 from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.capture import _provider_listed  # noqa: E402
 from moq_trace.config import ComparisonConfig, ExperimentConfig, SubscriberHost  # noqa: E402
@@ -200,14 +200,26 @@ class ExperimentTests(unittest.TestCase):
 
         created = []
 
-        def start(name, command, cwd, log):
+        def start(name, command, cwd, log, env=None):
             process = mock.Mock()
             process.name = name
+            process.env = env
             process.pid = 2000 + len(created)
             created.append(process)
             return process
 
         return start
+
+    def _capture_with(self, config: ExperimentConfig) -> experiment.Capture:
+        """Run a capture with every process and LTTng call stubbed."""
+
+        command = CommandSet(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(experiment, "wait_for_log"),
+                mock.patch.object(experiment, "LttngSession"),
+            ):
+                return experiment._capture(config, command, pathlib.Path(directory))
 
     def _capture(self, config: ExperimentConfig) -> experiment.Capture:
         command = CommandSet(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
@@ -243,6 +255,39 @@ class ExperimentTests(unittest.TestCase):
         # The subscriber's local PID is the ssh client, which emits nothing.
         self.assertEqual(result.pids, (2000, 2002))
         self.assertEqual(self.session.track.call_args_list, [mock.call(2002)])
+
+    def test_capture_points_the_relay_at_a_qlog_directory(self) -> None:
+        with mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()) as process:
+            command = CommandSet(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
+            with tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory)
+                with (
+                    mock.patch.object(experiment, "wait_for_log"),
+                    mock.patch.object(experiment, "LttngSession"),
+                ):
+                    config = ExperimentConfig(output=output, qlog=True)
+                    result = experiment._capture(config, command, output)
+                manifest = network.read_manifest(result.network)
+
+        relay_env = process.call_args_list[0].kwargs["env"]
+        self.assertEqual(relay_env, {"QLOGDIR": str(output / "qlog")})
+        self.assertIsNone(manifest.pcap)
+        self.assertEqual(manifest.qlog_dir, "qlog")
+
+    def test_capture_leaves_qlog_off_by_default(self) -> None:
+        with mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()) as process:
+            self._capture_with(ExperimentConfig(output=pathlib.Path("run")))
+
+        self.assertIsNone(process.call_args_list[0].kwargs["env"])
+
+    def test_capture_records_packets_around_the_relay(self) -> None:
+        config = ExperimentConfig(output=pathlib.Path("run"), capture_packets=True)
+        with mock.patch.object(experiment, "start_packet_capture") as start_capture:
+            self._capture(config)
+
+        start_capture.assert_called_once()
+        self.assertEqual(start_capture.call_args.args[1], config.port)
+        start_capture.return_value.stop.assert_called_once_with(True)
 
     def test_capture_can_use_a_startup_delay_instead_of_a_log_marker(self) -> None:
         config = ExperimentConfig(output=pathlib.Path("run"), relay_ready_log="", relay_startup_seconds=0.25)

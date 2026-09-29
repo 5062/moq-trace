@@ -139,6 +139,24 @@ the peers' logs, which report throughput, frame rates, and mismatches, and
 produce no analysis artifact. `compare` requires tracing, because a comparison
 indexes analysis artifacts.
 
+Every run also measures the network the relay saw, and renders it as
+`network.png` when anything was captured. `--capture-packets` (or
+`capture_packets = true`) records a header-only `tcpdump` of the relay's UDP port
+on the relay host, which gives throughput per direction. It runs tcpdump through
+`sudo -n`, so it needs passwordless sudo for tcpdump. RTT, lost packets, and
+congestion window come from the relay's own qlog: `--qlog` (or `qlog = true`)
+sets `QLOGDIR` to the run's `qlog/` directory, and a relay that honors it writes
+one JSON-SEQ qlog there. qlog serializes an event per packet on the relay, so
+measure latency without it and turn it on for network runs. qlog times are relative to a start instant the relay picks, so the relay
+must record that instant's `CLOCK_MONOTONIC` nanoseconds as
+`monotonic_start_ns=<n>` in the qlog title; the analysis rejects a qlog without
+it. RTT is read in milliseconds, as the qlog specification defines it, unless the
+title also says `rtt_unit=s`; Quinn 0.11 writes seconds. `network.json` in the run directory records what was captured and the
+offset between the capture's wall clock and the trace clock, and `analyze
+--network` reads it for a trace analyzed by hand. A capture sees UDP sockets, not
+connections, so it splits traffic by direction; the qlog panels show the
+publisher and up to two subscriber connections.
+
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that
 recording, so process-local trace and span IDs from different processes never

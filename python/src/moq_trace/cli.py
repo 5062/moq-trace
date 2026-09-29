@@ -108,6 +108,17 @@ def parser() -> argparse.ArgumentParser:
     for flag, kind, description in _BENCH_SETTINGS:
         bench.add_argument(flag, type=kind, help=f"{description} (default: {_default(flag)})")
     bench.add_argument(
+        "--capture-packets",
+        action=argparse.BooleanOptionalAction,
+        help="Record a header-only tcpdump of the relay's port for throughput; needs passwordless sudo (default: off).",
+    )
+    bench.add_argument(
+        "--qlog",
+        action=argparse.BooleanOptionalAction,
+        help="Ask the relay for qlog through QLOGDIR, for RTT, loss, and congestion window. "
+        "Costs relay CPU, so latency is best measured without it (default: off).",
+    )
+    bench.add_argument(
         "--render",
         action=argparse.BooleanOptionalAction,
         help="Render figures for each traced run (default: on).",
@@ -149,6 +160,13 @@ def parser() -> argparse.ArgumentParser:
         help="Require implementation-specific transport metrics (default: generic).",
     )
 
+    analyze.add_argument(
+        "--network",
+        type=pathlib.Path,
+        metavar="MANIFEST",
+        help="network.json from a run directory, to analyze its packet capture and qlog.",
+    )
+
     plot = commands.add_parser("plot", help="Render figures from a DuckDB artifact.")
     plot.add_argument("database", type=pathlib.Path)
     return root
@@ -169,7 +187,7 @@ def _run(args: argparse.Namespace) -> None:
     elif args.command == "bench":
         from .bench import bench, default_output
 
-        names = [_setting(flag) for flag, _, _ in _BENCH_SETTINGS] + ["render"]
+        names = [_setting(flag) for flag, _, _ in _BENCH_SETTINGS] + ["capture_packets", "qlog", "render"]
         settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
         settings["trace"] = args.trace
         try:
@@ -196,6 +214,7 @@ def _run(args: argparse.Namespace) -> None:
             expected_pids=args.expected_pid,
             pid=args.pid,
             transport_profile=args.transport_profile,
+            network=args.network,
         )
         print(args.output.resolve())
     elif args.command == "plot":

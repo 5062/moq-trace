@@ -7,13 +7,16 @@ import hashlib
 import os
 import pathlib
 import shlex
+import socket
 import subprocess
+import time
 
 import duckdb
 
+from . import network
 from .analyze import run as analyze
 from .artifact import open_artifact, write_metadata
-from .capture import LttngSession, ManagedProcess, wait_for_log, wait_for_startup
+from .capture import LttngSession, ManagedProcess, start_packet_capture, wait_for_log, wait_for_startup
 from .config import ComparisonConfig, ExperimentConfig
 from .metadata import (
     Affinity,
@@ -24,6 +27,7 @@ from .metadata import (
     Window,
     Workload,
 )
+from .network import NetworkManifest
 from .render import render
 
 # Pinned for every implementation, so a run cannot silently negotiate a version
@@ -41,11 +45,14 @@ class Capture:
     """One CTF recording and the processes it holds.
 
     `trace` is `None` when the run had tracing off and recorded nothing.
+    `network` is the manifest describing the packet capture and qlog taken
+    beside the trace.
     """
 
     trace: pathlib.Path | None
     relay_pid: int
     pids: tuple[int, ...]
+    network: pathlib.Path | None = None
 
 
 def _bench_command(config: ExperimentConfig, url: str, binary: str) -> list[str]:
@@ -154,12 +161,53 @@ def _validate_environment(config: ExperimentConfig) -> None:
             raise ExperimentError(f"relay CPU {config.relay_cpu} is unavailable to this process")
 
 
+def _loopback_ifindexes() -> tuple[int, ...]:
+    """Indexes of the host's loopback interfaces, read from their device flags."""
+
+    indexes = []
+    for index, name in socket.if_nameindex():
+        try:
+            flags = int((pathlib.Path("/sys/class/net") / name / "flags").read_text(), 16)
+        except (OSError, ValueError):
+            flags = 0x8 if name == "lo" else 0
+        if flags & 0x8:
+            indexes.append(index)
+    return tuple(indexes)
+
+
+def _network_manifest(config: ExperimentConfig, output: pathlib.Path) -> pathlib.Path:
+    """Describe the run's network capture so analysis can place it on the trace clock."""
+
+    manifest = NetworkManifest(
+        relay_port=config.port,
+        realtime_offset_ns=time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(time.CLOCK_MONOTONIC),
+        loopback_ifindexes=_loopback_ifindexes(),
+        pcap="relay.pcap" if config.capture_packets else None,
+        qlog_dir="qlog" if config.qlog else None,
+    )
+    path = output / network.MANIFEST
+    path.write_text(manifest.model_dump_json(indent=2) + "\n")
+    return path
+
+
 def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path) -> Capture:
     ctf = output / "trace"
     session = LttngSession(ctf) if config.trace else None
     processes: list[ManagedProcess] = []
     try:
-        relay = ManagedProcess("relay", command.relay, output, output / "relay.log")
+        manifest = _network_manifest(config, output)
+        if config.qlog:
+            (output / "qlog").mkdir()
+        if config.capture_packets:
+            processes.append(start_packet_capture(output / "relay.pcap", config.port, output))
+        # A relay that supports qlog writes it here. The capture works without it.
+        relay = ManagedProcess(
+            "relay",
+            command.relay,
+            output,
+            output / "relay.log",
+            env={network.QLOG_ENVIRONMENT: str(output / "qlog")} if config.qlog else None,
+        )
         processes.append(relay)
         if config.relay_ready_log:
             marker = config.relay_ready_log
@@ -220,10 +268,13 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
         processes.remove(publisher)
         relay.stop(config.relay_graceful_stop)
         processes.remove(relay)
+        for recorder in processes:
+            recorder.stop(True)
+        processes.clear()
         if session is None:
-            return Capture(trace=None, relay_pid=relay.pid, pids=tuple(tracked))
+            return Capture(trace=None, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
         session.finish()
-        return Capture(trace=ctf, relay_pid=relay.pid, pids=tuple(tracked))
+        return Capture(trace=ctf, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
     finally:
         for process in reversed(processes):
             process.close()
@@ -331,6 +382,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
             bench_sha256=_file_hash(config.bench_bin),
         ),
         commands=command,
+        network=capture.network,
     )
     _validate_workload(database)
     if config.render:

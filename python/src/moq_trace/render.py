@@ -19,6 +19,7 @@ from .plot import (
     plot_breakdown_comparison,
     plot_latency_cdf,
     plot_latency_comparison,
+    plot_network,
     plot_object_timelines,
     plot_stability,
 )
@@ -47,6 +48,9 @@ def _render_run(
     plot_latency_cdf(plots / "latency_cdf.png", options, connection)
     plot_breakdown(plots / "breakdown.png", options, connection)
     plot_stability(plots / "stability.png", options, connection)
+    network = metadata.network
+    if network is not None and (network.packets or network.qlog_connections):
+        plot_network(plots / "network.png", options, connection, network.packets, network.qlog_connections > 0)
     plot_object_timelines(plots / "object_timeline.png", options, connection)
 
 

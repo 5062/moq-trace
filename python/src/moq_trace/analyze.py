@@ -11,6 +11,7 @@ import duckdb
 import pyarrow as pa
 
 from . import coverage, ctf, macros
+from . import network as network_capture
 from .artifact import write_metadata
 from .errors import TraceError
 from .metadata import (
@@ -18,6 +19,7 @@ from .metadata import (
     Binaries,
     CommandSet,
     Counts,
+    NetworkCapabilities,
     Population,
     Processes,
     RunMetadata,
@@ -616,6 +618,7 @@ def _write_run_metadata(
     affinity: Affinity,
     binaries: Binaries | None,
     commands: CommandSet | None,
+    network: NetworkCapabilities | None = None,
 ) -> None:
     """Record the workload, counts, and experiment provenance in the artifact."""
 
@@ -656,6 +659,7 @@ def _write_run_metadata(
             affinity=affinity,
             binaries=binaries,
             commands=commands,
+            network=network,
         ),
     )
 
@@ -673,6 +677,7 @@ def run(
     affinity: Affinity | None = None,
     binaries: Binaries | None = None,
     commands: CommandSet | None = None,
+    network: pathlib.Path | None = None,
 ) -> None:
     """Analyze CTF into one atomically published DuckDB database.
 
@@ -686,6 +691,10 @@ def run(
     is measured from the steady state. Both are recorded in the artifact as
     given, so their optional fields carry whatever the caller knows about the
     run, as do `protocol`, `affinity`, `binaries`, and `commands`.
+
+    `network` names the manifest of a packet capture and qlog taken beside the
+    trace. Their measurements are placed on the same time axis as the latency
+    samples.
     """
 
     if output.exists():
@@ -713,6 +722,7 @@ def run(
             _define_metrics(connection)
             _verify_transport_metrics(connection, transport_profile)
             _define_timelines(connection)
+            capabilities = None if network is None else network_capture.ingest(connection, network, origin)
             _write_run_metadata(
                 connection,
                 pid=analyzed,
@@ -724,6 +734,7 @@ def run(
                 affinity=affinity or Affinity(),
                 binaries=binaries,
                 commands=commands,
+                network=capabilities,
             )
             connection.execute("CHECKPOINT")
         finally:
