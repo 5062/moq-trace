@@ -11,14 +11,19 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import logging
+import os
 import pathlib
 import shlex
 import subprocess
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 
 from .capture import CaptureError, ManagedProcess
 from .config import Host
+
+_log = logging.getLogger(__name__)
 
 # Reports the relay host's clocks and loopback interfaces in one process, so the
 # realtime and monotonic readings are taken back to back.
@@ -37,14 +42,41 @@ print(json.dumps({"realtime_offset_ns": offset, "loopback_ifindexes": indexes}))
 """
 
 
+# How long a host's shared connection outlives its last use, so consecutive runs
+# of one bench reuse it too.
+_CONTROL_PERSIST = "10m"
+
+
+@functools.cache
+def _control_path() -> str:
+    """The socket template for shared connections, private to this user.
+
+    It lives in the user's runtime directory rather than `TMPDIR`, which a
+    development shell points at a directory it deletes on exit, so a connection
+    outlives the shell that opened it and later runs can reuse it.
+    """
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    base = pathlib.Path(runtime) if runtime and os.path.isdir(runtime) else pathlib.Path("/tmp")
+    directory = base / f"moq-trace-ssh-{os.getuid()}"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    return str(directory / "%C")
+
+
+def _ssh_options() -> list[str]:
+    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", f"ControlPath={_control_path()}"]
+
+
 def ssh_command(host: Host, script: str) -> list[str]:
     """Run a shell script on `host` without a terminal or a password prompt.
 
-    An unreachable host fails after the connect timeout rather than after the
-    command's own, so the error names the connection as the problem.
+    The command rides the host's shared connection when `RemoteHost.connect`
+    opened one, and connects on its own otherwise. An unreachable host fails
+    after the connect timeout rather than after the command's own, so the error
+    names the connection as the problem.
     """
 
-    return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host.ssh, script]
+    return ["ssh", "-T", *_ssh_options(), "-o", "ControlMaster=no", host.ssh, script]
 
 
 class RemoteHost:
@@ -80,6 +112,46 @@ class RemoteHost:
             detail = result.stderr.strip() or result.stdout.strip()
             raise CaptureError(f"ssh {self.name} `{script}` failed with status {result.returncode}: {detail}")
         return result.stdout
+
+    def connect(self) -> None:
+        """Open one shared connection that every later command on this host reuses.
+
+        A run issues many short commands. Logging in once instead of once per
+        command makes a run one authentication: faster behind a jump host, and a
+        gateway whose machines present different host keys is met only once.
+        """
+
+        check = subprocess.run(
+            ["ssh", *_ssh_options(), "-O", "check", self.host.ssh],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            return
+        command = [
+            "ssh",
+            *_ssh_options(),
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            f"ControlPersist={_CONTROL_PERSIST}",
+            "-f",
+            "-N",
+            self.host.ssh,
+        ]
+        # The connection moves to the background and keeps its output open, so
+        # errors go to a file: a pipe would never reach end of file.
+        with tempfile.TemporaryFile() as errors:
+            try:
+                status = subprocess.run(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors, timeout=60
+                ).returncode
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise CaptureError(f"ssh {self.name} failed: {error}") from error
+            errors.seek(0)
+            detail = errors.read().decode(errors="replace").strip()
+        if status != 0:
+            raise CaptureError(f"ssh {self.name} failed with status {status}: {detail}")
 
     @functools.cached_property
     def home(self) -> str:
@@ -119,10 +191,21 @@ class RemoteHost:
         script = f"cd {shlex.quote(self.path(checkout))} && {command}"
         with log.open("w") as handle:
             try:
-                command = ssh_command(self.host, script)
-                status = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT).returncode
+                build = subprocess.Popen(
+                    ssh_command(self.host, script),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                )
             except OSError as error:
                 raise CaptureError(f"ssh {self.name} failed: {error}") from error
+            # A first build can take many minutes, so its output is shown as it
+            # arrives rather than only kept in the log.
+            for line in build.stdout:
+                handle.write(line)
+                _log.info("  %s | %s", self.name, line.rstrip())
+            status = build.wait()
         if status != 0:
             raise CaptureError(f"build on {self.name} failed with status {status}; see {log}")
 

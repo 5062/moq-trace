@@ -4,5 +4,5 @@
 checkout = "~/moq-dev-moq"
 relay_bin = "target/release/moq-relay"
 # Run in the checkout on a remote relay host before each run.
-relay_build = "nix develop --command just trace-build"
+relay_build = "nix --extra-experimental-features 'nix-command flakes' develop --command just trace-build"
 transport_profile = "quinn"

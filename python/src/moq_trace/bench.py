@@ -10,12 +10,15 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import importlib.resources
+import logging
 import pathlib
 import tomllib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .config import ExperimentConfig, Hosts
+
+_log = logging.getLogger(__name__)
 
 # Keys a profile may set besides `checkout`. Workload and window keys are left out
 # on purpose: letting one profile override them would silently make its results
@@ -162,14 +165,17 @@ def bench(
         raise ExperimentError(f"bench output already exists: {output.resolve()}")
 
     results = []
-    for name, config in configs.items():
+    for index, (name, config) in enumerate(configs.items(), start=1):
+        _log.info("[%d/%d] %s", index, len(configs), name)
         try:
             results.append(BenchResult(relay=name, path=run(config)))
         except (OSError, RuntimeError, ValueError) as error:
+            _log.info("%s failed: %s", name, error)
             results.append(BenchResult(relay=name, error=str(error)))
     databases = {
         result.relay: result.path for result in results if result.path is not None and result.path.suffix == ".duckdb"
     }
     if settings.get("render", True) and len(databases) >= 2:
+        _log.info("rendering the relay comparison into %s", output / "plots")
         render_relays(output, databases)
     return results

@@ -7,7 +7,7 @@
 checkout = "~/cloudflare-moq-rs"
 relay_bin = "target/release/moq-relay-ietf"
 # Run in the checkout on a remote relay host before each run.
-relay_build = "nix develop --command cargo build --release -p moq-relay-ietf --features trace"
+relay_build = "nix --extra-experimental-features 'nix-command flakes' develop --command cargo build --release -p moq-relay-ietf --features trace"
 relay_args = [
   "--bind", "[::]:{port}",
   "--tls-cert", "{certificate}",

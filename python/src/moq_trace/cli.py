@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import pathlib
 import sys
 import tomllib
@@ -234,6 +235,9 @@ def _run(args: argparse.Namespace) -> None:
 def main() -> None:
     """Run the selected command with concise expected-error reporting."""
 
+    # Progress goes to stderr, so stdout keeps only the paths a command reports.
+    logging.basicConfig(format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=sys.stderr)
+    logging.getLogger("moq_trace").setLevel(logging.INFO)
     try:
         _run(parser().parse_args())
     except (OSError, RuntimeError, ValueError) as error:

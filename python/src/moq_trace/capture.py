@@ -350,5 +350,7 @@ def start_packet_capture(
         wait_for_log(log, process, lambda value: "listening on" in value, "tcpdump listening", 10)
     except CaptureError as error:
         process.close()
-        raise CaptureError(f"{error}; packet capture needs passwordless sudo for tcpdump, see {log}") from error
+        output = log.read_text(errors="replace").strip() if log.exists() else ""
+        reason = output.splitlines()[-1] if output else str(error)
+        raise CaptureError(f"packet capture failed: {reason} (tcpdump needs passwordless sudo; see {log})") from error
     return process

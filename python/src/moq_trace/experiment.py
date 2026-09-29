@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 import os
 import pathlib
 import shlex
@@ -39,8 +40,11 @@ from .render import render
 PROTOCOL = "moq-transport-16"
 
 
-# Builds the reference peers in a moq-trace checkout on a peer host.
-_BENCH_BUILD = "nix develop --command just moq-bench-build"
+_log = logging.getLogger(__name__)
+
+# Builds the reference peers in a moq-trace checkout on a peer host. The flags
+# enable flakes for this command alone, since a host's Nix may leave them off.
+_BENCH_BUILD = "nix --extra-experimental-features 'nix-command flakes' develop --command just moq-bench-build"
 # The reference peers' binary, relative to a moq-trace checkout.
 _BENCH_BINARY = "moq-bench/target/release/moq-bench"
 
@@ -77,6 +81,12 @@ class _Roles:
         if host is None:
             return str(self.output)
         return f"{host.path(host.host.workdir)}/{self.output.name}-{self._suffix}"
+
+    @staticmethod
+    def where(host: RemoteHost | None) -> str:
+        """Name a role's host for progress messages."""
+
+        return "this machine" if host is None else host.name
 
     def launch(
         self,
@@ -236,6 +246,25 @@ def commands(
     return CommandSet(relay=tuple(relay), publisher=tuple(publisher), subscriber=tuple(subscriber))
 
 
+def _check_hosts(roles: _Roles) -> None:
+    """Connect to every remote host once before anything slow starts.
+
+    The connection stays open for the run's later commands, and a host that ssh
+    cannot reach, or whose host key it refuses, fails the run in seconds instead
+    of after another host's build.
+    """
+
+    checked = set()
+    for host in (roles.relay, roles.publisher, roles.subscriber):
+        if host is None or host.name in checked:
+            continue
+        checked.add(host.name)
+        _log.info("connecting to %s", host.name)
+        host.connect()
+        # Reading the home directory caches it for every later remote path.
+        host.home
+
+
 def _build(config: ExperimentConfig, roles: _Roles) -> None:
     """Build each remote role's binary in its checkout, once per host and checkout."""
 
@@ -257,7 +286,11 @@ def _build(config: ExperimentConfig, roles: _Roles) -> None:
         if not command or key in built:
             continue
         built.add(key)
-        host.build(placement.checkout, command, roles.output / f"build-{role}.log")
+        log = roles.output / f"build-{role}.log"
+        _log.info("building the %s on %s: %s (log: %s)", role, host.name, command, log)
+        started = time.monotonic()
+        host.build(placement.checkout, command, log)
+        _log.info("built the %s on %s in %.0fs", role, host.name, time.monotonic() - started)
 
 
 def _validate_environment(config: ExperimentConfig) -> None:
@@ -336,6 +369,7 @@ def _capture(
                 wrap=lambda argv: ssh_command(relay_host.host, f"{lttng} {shlex.join(argv[1:])}"),
             )
     processes: list[ManagedProcess] = []
+    where = roles.where
     try:
         manifest = _network_manifest(config, output, relay_host)
         if relay_host is not None:
@@ -343,6 +377,7 @@ def _capture(
         elif config.qlog:
             (output / "qlog").mkdir()
         if config.capture_packets:
+            _log.info("starting the packet capture on %s", where(relay_host))
             if relay_host is None:
                 processes.append(start_packet_capture(output / "relay.pcap", config.port, output))
             else:
@@ -355,6 +390,7 @@ def _capture(
                         user=relay_host.user,
                     )
                 )
+        _log.info("starting the relay on %s", where(relay_host))
         # A relay that supports qlog writes it here. The capture works without it.
         relay = roles.launch(
             relay_host,
@@ -369,10 +405,12 @@ def _capture(
         else:
             wait_for_startup(relay, config.relay_startup_seconds)
         if session is not None:
+            _log.info("waiting for the relay's trace providers, then starting the trace")
             session.wait_for_provider(relay.pid)
             session.start([relay.pid])
         tracked = [relay.pid]
 
+        _log.info("starting %d subscriber(s) on %s", config.subscribers, where(roles.subscriber))
         subscriber = roles.launch(roles.subscriber, "subscriber", command.subscriber)
         processes.append(subscriber)
         # A peer is recorded only on the relay's own host, because the session
@@ -393,6 +431,7 @@ def _capture(
             20,
         )
 
+        _log.info("subscribers connected; starting the publisher on %s", where(roles.publisher))
         publisher = roles.launch(roles.publisher, "publisher", command.publisher)
         processes.append(publisher)
         # Track on spawn rather than after readiness, so the connection setup that
@@ -416,7 +455,15 @@ def _capture(
             "subscriber connections and subscriptions",
             20,
         )
+        _log.info(
+            "workload running for %gs (%gs warm-up, %gs measured, %gs cool-down)",
+            _run_seconds(config),
+            config.warmup_seconds,
+            config.duration_seconds,
+            config.cooldown_seconds,
+        )
         subscriber.wait(_run_seconds(config) + 15)
+        _log.info("workload finished; stopping the publisher and relay")
         processes.remove(subscriber)
         subscriber.log_handle.close()
         publisher.stop(True)
@@ -430,7 +477,10 @@ def _capture(
             session.finish()
         if relay_host is not None:
             recorded = (("trace", session is not None), ("relay.pcap", config.capture_packets), ("qlog", config.qlog))
-            relay_host.fetch(relay_directory, [name for name, present in recorded if present], output)
+            names = [name for name, present in recorded if present]
+            if names:
+                _log.info("copying %s back from %s", ", ".join(names), relay_host.name)
+            relay_host.fetch(relay_directory, names, output)
         trace = None if session is None else ctf
         return Capture(trace=trace, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
     finally:
@@ -520,7 +570,9 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     if output.exists():
         raise ExperimentError(f"run output already exists: {output}")
     output.mkdir(parents=True)
+    _log.info("run directory: %s", output)
     roles = _Roles(config, output)
+    _check_hosts(roles)
     _build(config, roles)
     _generate_certificate(config, output)
     command = commands(config, output, roles)
@@ -528,6 +580,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     if capture.trace is None:
         return output
     database = output / "analysis.duckdb"
+    _log.info("analyzing the trace")
     analyze(
         capture.trace,
         database,
@@ -558,6 +611,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     )
     _validate_workload(database)
     if config.render:
+        _log.info("rendering figures into %s", output / "plots")
         render(database)
     return database
 

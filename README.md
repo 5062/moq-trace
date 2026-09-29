@@ -145,7 +145,7 @@ tables go under `[hosts.relay]` and so on in a `run` configuration.
 [relay]
 ssh = "me@relay-host"
 address = "10.0.0.1"      # what the peers dial; defaults to the ssh host name
-lttng = "nix develop ~/moq-trace --command lttng"   # when lttng is not on the ssh PATH
+lttng = "nix --extra-experimental-features 'nix-command flakes' develop ~/moq-trace --command lttng"   # when lttng is not on the ssh PATH
 
 [publisher]
 ssh = "me@pub-host"
@@ -160,6 +160,8 @@ Every path is a path on that host, and `~/` or a relative path resolves against
 the remote home. Before each run, every remote host with a `checkout` builds
 its role there, once per host and checkout: the relay with its profile's
 `relay_build`, and the peers with `just moq-bench-build` through `nix develop`.
+The default commands enable flakes themselves, so a host whose Nix leaves them
+off still builds.
 `build` overrides the command, and an empty `build` uses the existing binary.
 A remote relay builds from `--checkout` for that relay when given, then its
 host's `checkout`, then the profile's path. `binary` overrides where a role's

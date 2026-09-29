@@ -49,11 +49,11 @@ class ExperimentTests(unittest.TestCase):
                 popen.return_value.poll.return_value = 0
         command = popen.call_args.args[0]
 
+        self.assertEqual(command[:6], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+        self.assertIn("ControlMaster=no", command)
+        self.assertEqual(command[-2], "me@peer.example")
         self.assertEqual(
-            command[:7], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "me@peer.example"]
-        )
-        self.assertEqual(
-            command[7],
+            command[-1],
             "mkdir -p '/tmp/a run' && cd '/tmp/a run' && echo $$ > '/tmp/a run/.subscriber.pid' && "
             "exec env K='a b' '/opt/a dir/moq-bench' --x",
         )
@@ -105,6 +105,21 @@ class ExperimentTests(unittest.TestCase):
             [(call.args[0], call.args[1]) for call in build.call_args_list],
             [("/srv/relay", "make relay"), ("/srv/moq-trace", experiment._BENCH_BUILD)],
         )
+
+    def test_every_remote_host_is_checked_once_before_building(self) -> None:
+        relay = Host(ssh="me@relay.example", binary="/opt/relay")
+        peer = Host(ssh="me@peer.example")
+        config = ExperimentConfig(output=pathlib.Path("run"), hosts=Hosts(relay=relay, publisher=peer, subscriber=peer))
+        with tempfile.TemporaryDirectory() as directory:
+            roles = experiment._Roles(config, pathlib.Path(directory))
+            with (
+                mock.patch.object(remote.RemoteHost, "connect") as connect,
+                mock.patch.object(remote.RemoteHost, "run", return_value="/home/me\n") as run,
+            ):
+                experiment._check_hosts(roles)
+
+        self.assertEqual(connect.call_count, 2)
+        self.assertEqual([call.args[0] for call in run.call_args_list], ["pwd", "pwd"])
 
     def test_a_remote_relay_without_a_build_command_is_rejected(self) -> None:
         relay = Host(ssh="me@relay.example", checkout="/srv/relay", binary="bin/relay", workdir="/tmp/runs")
