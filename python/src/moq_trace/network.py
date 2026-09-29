@@ -21,9 +21,10 @@ import ipaddress
 import json
 import pathlib
 import re
-import struct
 from collections.abc import Iterator
+from decimal import Decimal
 
+import dpkt
 import duckdb
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,11 +39,7 @@ MANIFEST = "network.json"
 # and several other QUIC stacks read the same name.
 QLOG_ENVIRONMENT = "QLOGDIR"
 
-_LINKTYPE_LINUX_SLL2 = 276
 _PACKET_OUTGOING = 4
-_ETHERTYPE_IPV4 = 0x0800
-_ETHERTYPE_IPV6 = 0x86DD
-_UDP = 17
 _MONOTONIC_START = re.compile(r"monotonic_start_ns=(\d+)")
 # The qlog specification gives RTT in milliseconds, but some producers write
 # seconds; Quinn 0.11, for one, serializes `Duration::as_secs_f32`. A producer
@@ -77,36 +74,44 @@ def read_manifest(path: pathlib.Path) -> NetworkManifest:
         raise TraceError(f"failed to read network manifest {path}: {error}") from error
 
 
-def _pcap_records(path: pathlib.Path) -> Iterator[tuple[int, bytes]]:
-    """Yield `(realtime_ns, frame)` for every record of a classic pcap file."""
+class _CheckedPcapStream:
+    """Reject partial reads that dpkt's pcap iterator otherwise accepts.
 
-    data = path.read_bytes()
-    if len(data) < 24:
-        raise TraceError(f"{path} is not a pcap file")
-    magic = data[:4]
-    formats = {
-        b"\xd4\xc3\xb2\xa1": ("<", 1_000),
-        b"\x4d\x3c\xb2\xa1": ("<", 1),
-        b"\xa1\xb2\xc3\xd4": (">", 1_000),
-        b"\xa1\xb2\x3c\x4d": (">", 1),
-    }
-    if magic not in formats:
-        raise TraceError(f"{path} is not a classic pcap file; capture with tcpdump -w")
-    endian, fraction_ns = formats[magic]
-    (linktype,) = struct.unpack_from(f"{endian}I", data, 20)
-    if linktype & 0x0FFFFFFF != _LINKTYPE_LINUX_SLL2:
-        raise TraceError(f"{path} has link type {linktype}; capture with tcpdump -i any -y LINUX_SLL2")
-    offset = 24
-    header = struct.Struct(f"{endian}IIII")
-    while offset < len(data):
-        if offset + header.size > len(data):
-            raise TraceError(f"{path} has a truncated pcap record header at byte {offset}")
-        seconds, fraction, included, _original = header.unpack_from(data, offset)
-        offset += header.size
-        if offset + included > len(data):
-            raise TraceError(f"{path} has a truncated pcap record at byte {offset}")
-        yield seconds * 1_000_000_000 + fraction * fraction_ns, data[offset : offset + included]
-        offset += included
+    dpkt reads one file header, then alternating record headers and record data.
+    Only an empty read for the next record header is a clean end of file.
+    """
+
+    def __init__(self, stream, path: pathlib.Path) -> None:
+        self.stream = stream
+        self.path = path
+        self.part = "file header"
+
+    def read(self, size: int) -> bytes:
+        offset = self.stream.tell()
+        data = self.stream.read(size)
+        if self.part == "record header" and not data:
+            return data
+        if len(data) != size:
+            if self.part == "file header":
+                raise TraceError(f"{self.path} is not a pcap file")
+            raise TraceError(f"{self.path} has a truncated pcap {self.part} at byte {offset}")
+        self.part = "record" if self.part == "record header" else "record header"
+        return data
+
+
+def _pcap_records(path: pathlib.Path) -> Iterator[tuple[int, bytes]]:
+    """Yield `(realtime_ns, frame)` from a checked classic pcap stream."""
+
+    with path.open("rb") as stream:
+        try:
+            reader = dpkt.pcap.Reader(_CheckedPcapStream(stream, path))
+        except ValueError as error:
+            raise TraceError(f"{path} is not a classic pcap file; capture with tcpdump -w") from error
+        if reader.datalink() & 0x0FFFFFFF != dpkt.pcap.DLT_LINUX_SLL2:
+            raise TraceError(f"{path} has link type {reader.datalink()}; capture with tcpdump -i any -y LINUX_SLL2")
+        for timestamp, frame in reader:
+            # dpkt returns Decimal for nanosecond captures and float for microsecond captures.
+            yield int(Decimal(str(timestamp)) * 1_000_000_000), frame
 
 
 def _endpoint(address: bytes, port: int) -> str:
@@ -129,26 +134,22 @@ def read_datagrams(
     """
 
     for realtime_ns, frame in _pcap_records(path):
-        if len(frame) < 20:
+        try:
+            packet = dpkt.sll2.SLL2(frame)
+        except dpkt.UnpackError:
             continue
-        protocol, _reserved, ifindex, _hatype, packet_type = struct.unpack_from(">HHIHB", frame)
-        if ifindex in loopback_ifindexes and packet_type == _PACKET_OUTGOING:
+        if packet.intindex in loopback_ifindexes and packet.type == _PACKET_OUTGOING:
             continue
-        ip = frame[20:]
-        if protocol == _ETHERTYPE_IPV4 and len(ip) >= 20 and ip[9] == _UDP:
-            header_length = (ip[0] & 0x0F) * 4
-            source, destination, udp = ip[12:16], ip[16:20], ip[header_length:]
-        elif protocol == _ETHERTYPE_IPV6 and len(ip) >= 40 and ip[6] == _UDP:
-            source, destination, udp = ip[8:24], ip[24:40], ip[40:]
-        else:
+        ip = packet.data
+        if not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)) or not isinstance(ip.data, dpkt.udp.UDP):
             continue
-        if len(udp) < 8:
+        udp = ip.data
+        if udp.ulen < 8:
             continue
-        source_port, destination_port, length = struct.unpack_from(">HHH", udp)
-        if source_port == relay_port:
-            yield realtime_ns, "egress", _endpoint(destination, destination_port), length - 8
-        elif destination_port == relay_port:
-            yield realtime_ns, "ingress", _endpoint(source, source_port), length - 8
+        if udp.sport == relay_port:
+            yield realtime_ns, "egress", _endpoint(ip.dst, udp.dport), udp.ulen - 8
+        elif udp.dport == relay_port:
+            yield realtime_ns, "ingress", _endpoint(ip.src, udp.sport), udp.ulen - 8
 
 
 def _qlog_records(path: pathlib.Path) -> Iterator[dict]:

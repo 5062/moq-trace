@@ -81,6 +81,19 @@ class DatagramTests(unittest.TestCase):
             ],
         )
 
+    def test_pcap_timestamps_keep_nanosecond_and_microsecond_precision(self) -> None:
+        frame = _frame(ETHERNET, 0, "10.0.0.2", "10.0.0.1", 50000, RELAY_PORT, 1200)
+        seconds = 1_700_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.pcap"
+            for magic, fraction, scale in ((0xA1B23C4D, 123_456_789, 1), (0xA1B2C3D4, 123_456, 1_000)):
+                with self.subTest(scale=scale):
+                    header = struct.pack("<IHHiIII", magic, 2, 4, 0, 0, 128, 276)
+                    record = struct.pack("<IIII", seconds, fraction, len(frame), len(frame))
+                    path.write_bytes(header + record + frame)
+                    datagrams = list(network.read_datagrams(path, RELAY_PORT, ()))
+                    self.assertEqual(datagrams[0][0], seconds * 1_000_000_000 + fraction * scale)
+
     def test_a_capture_without_interface_direction_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "relay.pcap"

@@ -30,6 +30,7 @@
         python = pkgs.python3.withPackages (
           packages: with packages; [
             babeltrace2
+            dpkt
             duckdb
             matplotlib
             pyarrow
@@ -44,6 +45,7 @@
           build-system = [ pkgs.python3Packages.setuptools ];
           dependencies = with pkgs.python3Packages; [
             babeltrace2
+            dpkt
             duckdb
             matplotlib
             pyarrow
