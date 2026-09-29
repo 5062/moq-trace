@@ -262,6 +262,43 @@ class ExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(capture.CaptureError, "relay exited with status 7"):
             capture.wait_for_startup(process, 0)
 
+    def test_sudo_reads_a_password_from_stdin_only_when_one_is_given(self) -> None:
+        self.assertEqual(capture.packet_capture_command("a.pcap", 4443, "me")[:3], ["sudo", "-n", "tcpdump"])
+        self.assertEqual(
+            capture.packet_capture_command("a.pcap", 4443, "me", password=True)[:5], ["sudo", "-S", "-p", "", "tcpdump"]
+        )
+
+    def test_the_sudo_password_reaches_the_capture_only_on_stdin(self) -> None:
+        launched = []
+
+        def launch(name, argv, log, stdin):
+            launched.append((argv, stdin))
+            return mock.Mock()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(capture, "wait_for_log"):
+                capture.start_packet_capture("a.pcap", 4443, pathlib.Path(directory), launch, "me", "s3cret")
+
+        argv, stdin = launched[0]
+        self.assertEqual(stdin, b"s3cret\n")
+        self.assertNotIn("s3cret", " ".join(argv))
+
+    def test_the_sudo_password_leaves_the_environment(self) -> None:
+        with (
+            mock.patch.dict(capture.os.environ, {capture.SUDO_PASSWORD_ENVIRONMENT: "s3cret"}),
+            mock.patch.object(capture, "_sudo_password", None),
+        ):
+            self.assertEqual(capture.take_sudo_password(), "s3cret")
+            self.assertNotIn(capture.SUDO_PASSWORD_ENVIRONMENT, capture.os.environ)
+            self.assertEqual(capture.take_sudo_password(), "s3cret")
+
+    def test_a_process_receives_its_stdin_and_then_end_of_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "cat.log"
+            process = capture.ManagedProcess("cat", ["cat"], pathlib.Path(directory), log, stdin=b"hello\n")
+            process.wait(10)
+            self.assertEqual(log.read_text(), "hello\n")
+
     def test_capture_tracks_every_process_it_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(capture, "_run_lttng") as run_lttng:
@@ -278,7 +315,7 @@ class ExperimentTests(unittest.TestCase):
 
         created = []
 
-        def start(name, *_args, env=None):
+        def start(name, *_args, env=None, stdin=None):
             process = mock.Mock()
             process.name = name
             process.env = env

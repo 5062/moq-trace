@@ -232,7 +232,9 @@ class _Row:
 # Rows in pipeline order. Phase rows sum every occurrence of the phase within one
 # unit (packet, object, or copy), because a phase that repeats per chunk only
 # means something as the unit's total. Spans are drawn hollow: they contain the
-# phases below them rather than adding to them.
+# phases below them rather than adding to them. The RX `application` phase is
+# left out: only a stack that runs MoQ inside packet processing records it, and
+# that time already appears in the MoQ rows.
 _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     (
         "End to end",
@@ -251,7 +253,6 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
             _Row("Header unprotect", "packet", "rx", "header_unprotect"),
             _Row("Payload decrypt", "packet", "rx", "payload_decrypt"),
             _Row("Frame process", "packet", "rx", "frame_process"),
-            _Row("Application", "packet", "rx", "application"),
         ),
     ),
     (
@@ -437,7 +438,7 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
     _plain_log(axis.xaxis)
     axis.set_xlabel(
         "Duration (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. "
-        f"Durations under {_FLOOR_US} µs are drawn at {_FLOOR_US} µs."
+        # f"Durations under {_FLOOR_US} µs are drawn at {_FLOOR_US} µs."
     )
     axis.grid(axis="x", alpha=0.25)
     if single:
@@ -832,7 +833,8 @@ def plot_object_timelines(
         ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
         ("rx", "quic_payload_decrypt", "RX QUIC Payload Decrypt"),
         ("rx", "quic_frame_process", "RX QUIC Frame Process"),
-        ("rx", "quic_application", "RX QUIC Application"),
+        # The application phase is left out, as in the breakdown: it is the MoQ
+        # work drawn in the rows below.
     )
     moq_rows = (
         ("rx", "header_parse", "RX Header Parse"),

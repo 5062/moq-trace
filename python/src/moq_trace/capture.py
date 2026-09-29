@@ -160,7 +160,11 @@ class LttngSession:
 
 
 class ManagedProcess:
-    """One child process with deterministic logging and group cleanup."""
+    """One child process with deterministic logging and group cleanup.
+
+    `stdin`, when given, is the command's entire standard input, which keeps a
+    secret off its command line.
+    """
 
     def __init__(
         self,
@@ -169,6 +173,7 @@ class ManagedProcess:
         cwd: pathlib.Path,
         log: pathlib.Path,
         env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
     ) -> None:
         self.name = name
         self.log_handle = log.open("w")
@@ -177,6 +182,7 @@ class ManagedProcess:
                 command,
                 cwd=cwd,
                 env=None if env is None else {**os.environ, **env},
+                stdin=None if stdin is None else subprocess.PIPE,
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -184,6 +190,11 @@ class ManagedProcess:
         except OSError as error:
             self.log_handle.close()
             raise CaptureError(f"failed to start {name}: {command[0]}") from error
+        if stdin is not None:
+            # Closed right away, so the command sees end of input after `stdin`.
+            with contextlib.suppress(BrokenPipeError):
+                self.process.stdin.write(stdin)
+            self.process.stdin.close()
 
     @property
     def pid(self) -> int:
@@ -297,19 +308,46 @@ def _provider_listed(listing: str, pid: int, event: str) -> bool:
     return False
 
 
-def packet_capture_command(pcap: pathlib.Path | str, port: int, user: str | None = None) -> list[str]:
-    """Capture the headers of every UDP datagram on `port`, on every interface.
+# Environment variable holding the sudo password for the packet capture, for
+# hosts where sudo asks for one.
+SUDO_PASSWORD_ENVIRONMENT = "MOQ_TRACE_SUDO_PASSWORD"
+_sudo_password: str | None = None
 
-    Capturing needs privileges, so tcpdump runs under non-interactive sudo and
-    drops them to `user` (the invoking user by default) before writing, which
-    keeps the file readable by the analysis. `LINUX_SLL2` records the interface and direction of each
-    packet, which the analysis needs to count a loopback datagram once. The first
-    128 bytes hold every header, and the UDP header carries the full length.
+
+def take_sudo_password() -> str | None:
+    """Move the sudo password out of the environment and keep it in memory.
+
+    Taken before the first child process starts, it is inherited by none of
+    them: not the relay, the peers, or an LTTng session daemon that outlives
+    the run. It then reaches only sudo, through standard input.
     """
 
+    global _sudo_password
+    if SUDO_PASSWORD_ENVIRONMENT in os.environ:
+        _sudo_password = os.environ.pop(SUDO_PASSWORD_ENVIRONMENT)
+    return _sudo_password
+
+
+def packet_capture_command(
+    pcap: pathlib.Path | str,
+    port: int,
+    user: str | None = None,
+    password: bool = False,
+) -> list[str]:
+    """Capture the headers of every UDP datagram on `port`, on every interface.
+
+    Capturing needs privileges, so tcpdump runs under sudo and drops them to
+    `user` (the invoking user by default) before writing, which keeps the file
+    readable by the analysis. With `password`, sudo reads the password from
+    standard input without prompting; otherwise it must not need one.
+    `LINUX_SLL2` records the interface and direction of each packet, which the
+    analysis needs to count a loopback datagram once. The first 128 bytes hold
+    every header, and the UDP header carries the full length.
+    """
+
+    sudo = ["sudo", "-S", "-p", ""] if password else ["sudo", "-n"]
     return [
-        "sudo",
-        "-n",
+        *sudo,
         "tcpdump",
         "-i",
         "any",
@@ -334,23 +372,32 @@ def start_packet_capture(
     pcap: pathlib.Path | str,
     port: int,
     cwd: pathlib.Path,
-    launch: Callable[[str, Sequence[str], pathlib.Path], ManagedProcess] | None = None,
+    launch: Callable[[str, Sequence[str], pathlib.Path, bytes | None], ManagedProcess] | None = None,
     user: str | None = None,
+    password: str | None = None,
 ) -> ManagedProcess:
     """Start a packet capture and wait until tcpdump is listening.
 
-    `launch` starts the command on the relay's host, and `user` is the login
-    tcpdump drops to there. The log stays in the local `cwd`.
+    `launch` starts the command on the relay's host with the given standard
+    input, and `user` is the login tcpdump drops to there. `password` is sent to
+    sudo on standard input. The log stays in the local `cwd`.
     """
 
     log = cwd / "tcpdump.log"
-    command = packet_capture_command(pcap, port, user)
-    process = (launch or (lambda name, argv, path: ManagedProcess(name, argv, cwd, path)))("tcpdump", command, log)
+    command = packet_capture_command(pcap, port, user, password is not None)
+    stdin = None if password is None else f"{password}\n".encode()
+
+    def local(name: str, argv: Sequence[str], path: pathlib.Path, data: bytes | None) -> ManagedProcess:
+        return ManagedProcess(name, argv, cwd, path, stdin=data)
+
+    process = (launch or local)("tcpdump", command, log, stdin)
     try:
         wait_for_log(log, process, lambda value: "listening on" in value, "tcpdump listening", 10)
     except CaptureError as error:
         process.close()
         output = log.read_text(errors="replace").strip() if log.exists() else ""
         reason = output.splitlines()[-1] if output else str(error)
-        raise CaptureError(f"packet capture failed: {reason} (tcpdump needs passwordless sudo; see {log})") from error
+        sudo = "password" in reason or "sudo" in reason
+        hint = f"tcpdump needs sudo: set {SUDO_PASSWORD_ENVIRONMENT} or allow it without a password; " if sudo else ""
+        raise CaptureError(f"packet capture failed: {reason} ({hint}see {log})") from error
     return process

@@ -19,7 +19,14 @@ import duckdb
 from . import network
 from .analyze import run as analyze
 from .artifact import open_artifact, write_metadata
-from .capture import LttngSession, ManagedProcess, start_packet_capture, wait_for_log, wait_for_startup
+from .capture import (
+    LttngSession,
+    ManagedProcess,
+    start_packet_capture,
+    take_sudo_password,
+    wait_for_log,
+    wait_for_startup,
+)
 from .config import ComparisonConfig, ExperimentConfig, Host
 from .metadata import (
     Affinity,
@@ -73,14 +80,14 @@ class _Roles:
         self.subscriber = remote(config.hosts.subscriber)
         # Distinguishes this run's remote directory from an earlier run's of the
         # same name, which is left in place.
-        self._suffix = uuid.uuid4().hex[:8]
+        self.suffix = uuid.uuid4().hex[:8]
 
     def directory(self, host: RemoteHost | None) -> str:
         """The run directory on `host`, or the local one."""
 
         if host is None:
             return str(self.output)
-        return f"{host.path(host.host.workdir)}/{self.output.name}-{self._suffix}"
+        return f"{host.path(host.host.workdir)}/{self.output.name}-{self.suffix}"
 
     @staticmethod
     def where(host: RemoteHost | None) -> str:
@@ -94,13 +101,14 @@ class _Roles:
         name: str,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
     ) -> ManagedProcess:
         """Start one role's process on its host, logging to the local run directory."""
 
         log = self.output / f"{name}.log"
         if host is None:
-            return ManagedProcess(name, command, self.output, log, env=env)
-        return RemoteProcess(name, host, command, self.directory(host), log, env=env)
+            return ManagedProcess(name, command, self.output, log, env=env, stdin=stdin)
+        return RemoteProcess(name, host, command, self.directory(host), log, env=env, stdin=stdin)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -338,6 +346,18 @@ def _network_manifest(config: ExperimentConfig, output: pathlib.Path, relay: Rem
     return path
 
 
+def _capture_directory(roles: _Roles, relay: RemoteHost) -> str:
+    """Where tcpdump writes on a remote relay host: a private directory on local disk.
+
+    tcpdump opens its file after dropping from root to the user, and that
+    process may lack the credentials a network home directory requires, as with
+    Kerberos NFS, so it cannot write the run directory there. The directory is
+    removed once the capture is copied back.
+    """
+
+    return f"/tmp/moq-trace-{relay.user}-{roles.suffix}"
+
+
 def _prepare_relay_host(output: pathlib.Path, relay: RemoteHost, directory: str, qlog: bool) -> None:
     """Create the relay's run directory on its host and copy the TLS pair there."""
 
@@ -379,15 +399,20 @@ def _capture(
         if config.capture_packets:
             _log.info("starting the packet capture on %s", where(relay_host))
             if relay_host is None:
-                processes.append(start_packet_capture(output / "relay.pcap", config.port, output))
+                processes.append(
+                    start_packet_capture(output / "relay.pcap", config.port, output, password=take_sudo_password())
+                )
             else:
+                capture_directory = _capture_directory(roles, relay_host)
+                relay_host.run(f"mkdir -m 700 -p {shlex.quote(capture_directory)}")
                 processes.append(
                     start_packet_capture(
-                        f"{relay_directory}/relay.pcap",
+                        f"{capture_directory}/relay.pcap",
                         config.port,
                         output,
-                        launch=lambda name, argv, _log: roles.launch(relay_host, name, argv),
+                        launch=lambda name, argv, _log, stdin: roles.launch(relay_host, name, argv, stdin=stdin),
                         user=relay_host.user,
+                        password=take_sudo_password(),
                     )
                 )
         _log.info("starting the relay on %s", where(relay_host))
@@ -476,11 +501,17 @@ def _capture(
         if session is not None:
             session.finish()
         if relay_host is not None:
-            recorded = (("trace", session is not None), ("relay.pcap", config.capture_packets), ("qlog", config.qlog))
+            recorded = (("trace", session is not None), ("qlog", config.qlog))
             names = [name for name, present in recorded if present]
+            if config.capture_packets:
+                names.append("relay.pcap")
             if names:
                 _log.info("copying %s back from %s", ", ".join(names), relay_host.name)
-            relay_host.fetch(relay_directory, names, output)
+            relay_host.fetch(relay_directory, [name for name in names if name != "relay.pcap"], output)
+            if config.capture_packets:
+                capture_directory = _capture_directory(roles, relay_host)
+                relay_host.fetch(capture_directory, ["relay.pcap"], output)
+                relay_host.run(f"rm -rf {shlex.quote(capture_directory)}")
         trace = None if session is None else ctf
         return Capture(trace=trace, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
     finally:

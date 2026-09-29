@@ -185,7 +185,10 @@ Every run also measures the network the relay saw, and renders it as
 `network.png` when anything was captured. `--capture-packets` (or
 `capture_packets = true`) records a header-only `tcpdump` of the relay's UDP port
 on the relay host, which gives throughput per direction. It runs tcpdump through
-`sudo -n`, so it needs passwordless sudo for tcpdump. RTT, lost packets, and
+sudo. Where sudo asks for a password, export `MOQ_TRACE_SUDO_PASSWORD`: the
+runner removes it from its environment at startup, so no child process inherits
+it, and sends it only to sudo's standard input, over ssh for a remote relay.
+Without it, sudo must not need a password. RTT, lost packets, and
 congestion window come from the relay's own qlog: `--qlog` (or `qlog = true`)
 sets `QLOGDIR` to the run's `qlog/` directory, and a relay that honors it writes
 one JSON-SEQ qlog there. qlog serializes an event per packet on the relay, so

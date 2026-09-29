@@ -10,6 +10,7 @@ import tomllib
 
 from pydantic import ValidationError
 
+from .capture import take_sudo_password
 from .config import ComparisonConfig, ExperimentConfig, Hosts
 
 
@@ -238,6 +239,8 @@ def main() -> None:
     # Progress goes to stderr, so stdout keeps only the paths a command reports.
     logging.basicConfig(format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=sys.stderr)
     logging.getLogger("moq_trace").setLevel(logging.INFO)
+    # Before any child process starts, so none of them inherits the password.
+    take_sudo_password()
     try:
         _run(parser().parse_args())
     except (OSError, RuntimeError, ValueError) as error:

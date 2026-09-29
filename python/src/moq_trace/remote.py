@@ -268,6 +268,7 @@ class RemoteProcess(ManagedProcess):
         cwd: str,
         log: pathlib.Path,
         env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
     ) -> None:
         self.host = host
         self.pidfile = f"{cwd}/.{name}.pid"
@@ -277,7 +278,7 @@ class RemoteProcess(ManagedProcess):
             f"echo $$ > {shlex.quote(self.pidfile)} && exec {prefix}{shlex.join(command)}"
         )
         self._remote_pid: int | None = None
-        super().__init__(name, ssh_command(host.host, script), log.parent, log)
+        super().__init__(name, ssh_command(host.host, script), log.parent, log, stdin=stdin)
 
     @property
     def pid(self) -> int:
