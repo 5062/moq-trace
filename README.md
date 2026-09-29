@@ -202,6 +202,35 @@ offset between the capture's wall clock and the trace clock, and `analyze
 connections, so it splits traffic by direction; the qlog panels show the
 publisher and up to two subscriber connections.
 
+### Figures
+
+`run`, `compare`, and `bench` render figures when a traced run finishes, unless
+the configuration sets `render = false` or `bench` is given `--no-render`.
+`moq-trace plot` renders them again
+from an existing artifact, for example after changing the plotting code:
+
+```sh
+moq-trace plot artifacts/bench-<UTC time>/moq-dev-moq/analysis.duckdb
+moq-trace plot artifacts/bench-<UTC time>
+moq-trace plot <comparison output>/comparison.duckdb
+```
+
+A run's figures go to `plots/` beside its `analysis.duckdb`. Given a bench
+output directory, `plot` compares the relays whose runs it holds, which must
+share one workload, and writes to that directory's `plots/`. A comparison
+artifact renders the runs it indexes. Rendering overwrites figures of the same
+name and leaves any others in place.
+
+| Figure | Shows |
+|---|---|
+| `latency_cdf.png` | Object latency per copy for the MoQ span and the QUIC+MoQ span, beside one CDF per processing phase |
+| `breakdown.png` | Each processing phase as a box of p25 to p75 with p1 to p99 whiskers, on a log time axis |
+| `stability.png` | Per-second p50 and p99 of object copies and of QUIC packets, on one time axis |
+| `object_timeline.png` | Every QUIC and MoQ phase of the mean, median, and p99 object, from its first RX packet |
+| `network.png` | Throughput, RTT, lost packets, and congestion window; only when a capture or qlog was taken |
+| `relays_cdf.png`, `relays_breakdown.png` | The relays of one bench, overlaid |
+| `comparison_cdf.png`, `comparison_breakdown.png` | The runs of one `compare`, overlaid |
+
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that
 recording, so process-local trace and span IDs from different processes never

@@ -248,8 +248,10 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
         (
             _Row("Header parse", "packet", "rx", "header_parse"),
             _Row("Routing", "packet", "rx", "routing"),
-            _Row("Scheduling", "packet", "rx", "scheduling"),
-            _Row("Processing after scheduling", "packet_samples", "", "rx_packet_processing_span", True),
+            # Quinn's `scheduling` phase is the wait in the connection's queue,
+            # including waking its task, so it is labeled for what it measures.
+            _Row("Queuing", "packet", "rx", "scheduling"),
+            _Row("Processing after queuing", "packet_samples", "", "rx_packet_processing_span", True),
             _Row("Header unprotect", "packet", "rx", "header_unprotect"),
             _Row("Payload decrypt", "packet", "rx", "payload_decrypt"),
             _Row("Frame process", "packet", "rx", "frame_process"),
@@ -461,13 +463,10 @@ def _breakdown_figure(
     rows = sum(len(rows) + 1 for _section, rows in _SECTIONS)
     fig, axis = plt.subplots(figsize=(12, 1.8 + rows * 0.24 * max(1, len(runs) ** 0.5)))
     _draw_breakdown(axis, runs)
-    handles = [
-        Patch(facecolor="C0", edgecolor="C0", label="Phase"),
-        Patch(facecolor="white", edgecolor="C0", label="Span containing the phases below it"),
-    ]
+    # Only a comparison needs a legend, to name the run behind each color.
     if len(runs) > 1:
         handles = [Patch(color=f"C{index}", label=run.label) for index, run in enumerate(runs)]
-    axis.legend(handles=handles, loc="lower right", fontsize=8)
+        axis.legend(handles=handles, loc="lower right", fontsize=8)
     _save(fig, path, f"{title} | {subtitle}")
 
 
@@ -543,7 +542,7 @@ def plot_stability(
 
     available = _metrics(connection, "packet_samples")
     candidates = [
-        ("rx_scheduling", "RX scheduling"),
+        ("rx_scheduling", "RX queuing"),
         (_rx_packet_metric(available), "RX processing"),
         ("tx_packet_span", "TX packet span"),
     ]
