@@ -15,7 +15,7 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .config import ExperimentConfig
+from .config import ExperimentConfig, Hosts
 
 # Keys a profile may set besides `checkout`. Workload and window keys are left out
 # on purpose: letting one profile override them would silently make its results
@@ -24,6 +24,8 @@ LAUNCH_KEYS = frozenset(
     {
         "relay_bin",
         "relay_args",
+        "relay_build",
+        "relay_local_host",
         "relay_ready_log",
         "relay_startup_seconds",
         "relay_graceful_stop",
@@ -93,15 +95,29 @@ def experiment_config(
     settings: Mapping[str, Any],
     checkout: pathlib.Path | None = None,
 ) -> ExperimentConfig:
-    """Combine one relay's launch keys with the shared workload settings."""
+    """Combine one relay's launch keys with the shared workload settings.
 
-    root = (checkout or profile.checkout).expanduser().resolve()
+    A remote relay host builds and runs the relay from a checkout on that host:
+    `checkout` when given, then the host's own `checkout`, then the profile's
+    path, which assumes the host lays its checkouts out like the controller.
+    """
+
     launch = dict(profile.launch)
-    launch["relay_bin"] = root / launch["relay_bin"]
+    hosts = Hosts.model_validate(settings.get("hosts") or {})
+    if hosts.relay is None:
+        root = (checkout or profile.checkout).expanduser().resolve()
+        launch["relay_bin"] = root / launch["relay_bin"]
+    else:
+        remote_checkout = str(checkout) if checkout is not None else hosts.relay.checkout or str(profile.checkout)
+        relay = hosts.relay.model_copy(
+            update={"checkout": remote_checkout, "binary": hosts.relay.binary or str(launch.pop("relay_bin"))}
+        )
+        launch.pop("relay_bin", None)
+        hosts = hosts.model_copy(update={"relay": relay})
     port = settings.get("port", ExperimentConfig.model_fields["port"].default)
     if launch.get("relay_url") is not None:
         launch["relay_url"] = launch["relay_url"].format(port=port)
-    return ExperimentConfig.model_validate({**launch, **settings, "output": output})
+    return ExperimentConfig.model_validate({**launch, **settings, "hosts": hosts, "output": output})
 
 
 def default_output() -> pathlib.Path:
@@ -138,7 +154,8 @@ def bench(
     configs = {}
     for name in relays:
         config = experiment_config(load_profile(name), output / name, settings, checkouts.get(name))
-        if not config.relay_bin.is_file():
+        # A remote relay is built on its host at the start of its run.
+        if config.hosts.relay is None and not config.relay_bin.is_file():
             raise ValueError(f"{name}: relay binary not found at {config.relay_bin}; build it first")
         configs[name] = config
     if output.exists():

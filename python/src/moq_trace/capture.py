@@ -24,10 +24,19 @@ _LEGACY_PROCESS = re.compile(r"^PID:\s*(\d+)\b")
 _EVENT = re.compile(r"(?<![\w:])([A-Za-z0-9_]+:[A-Za-z0-9_]+)(?![\w:])")
 
 
-def _run_lttng(*args: str, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+# Turns one command into the command that runs it on the traced host. The
+# identity runs it on the controller; a remote relay wraps it in ssh.
+Wrap = Callable[[Sequence[str]], Sequence[str]]
+
+
+def _local(command: Sequence[str]) -> Sequence[str]:
+    return command
+
+
+def _run_lttng(*args: str, capture_output: bool = False, wrap: Wrap = _local) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
-            ("lttng", *args),
+            wrap(("lttng", *args)),
             check=False,
             text=True,
             capture_output=capture_output,
@@ -42,15 +51,20 @@ def _run_lttng(*args: str, capture_output: bool = False) -> subprocess.Completed
 
 
 class LttngSession:
-    """One discard-mode LTTng session scoped to the processes it traces."""
+    """One discard-mode LTTng session scoped to the processes it traces.
 
-    def __init__(self, output: pathlib.Path) -> None:
+    `wrap` runs every lttng command on the traced host, so a session can record
+    a relay on another host; `output` is then a path on that host.
+    """
+
+    def __init__(self, output: pathlib.Path | str, wrap: Wrap = _local) -> None:
         self.name = f"moq-trace-{os.getpid()}-{uuid.uuid4().hex}"
         self.active = False
-        _run_lttng("create", self.name, "--output", str(output))
+        self.wrap = wrap
+        self._lttng("create", self.name, "--output", str(output))
         self.active = True
         try:
-            _run_lttng(
+            self._lttng(
                 "enable-channel",
                 "--userspace",
                 "--session",
@@ -66,12 +80,15 @@ class LttngSession:
             self.close()
             raise
 
+    def _lttng(self, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+        return _run_lttng(*args, capture_output=capture_output, wrap=self.wrap)
+
     def wait_for_provider(self, pid: int, timeout: float = 10.0) -> None:
         """Wait until one process has registered both trace providers."""
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            listing = _run_lttng("list", "--userspace", capture_output=True).stdout
+            listing = self._lttng("list", "--userspace", capture_output=True).stdout
             if _provider_listed(listing, pid, "moq_trace:moq_object_end") and _provider_listed(
                 listing, pid, "quic_trace:udp_socket_end"
             ):
@@ -89,15 +106,15 @@ class LttngSession:
         it is spawned and its earliest events are still recorded.
         """
 
-        _run_lttng("track", "--userspace", "--session", self.name, f"--vpid={pid}")
+        self._lttng("track", "--userspace", "--session", self.name, f"--vpid={pid}")
 
     def start(self, pids: Sequence[int]) -> None:
         """Restrict recording to the given processes and start the session."""
 
-        _run_lttng("untrack", "--userspace", "--session", self.name, "--vpid", "--all")
+        self._lttng("untrack", "--userspace", "--session", self.name, "--vpid", "--all")
         for pid in pids:
             self.track(pid)
-        _run_lttng(
+        self._lttng(
             "add-context",
             "--userspace",
             "--session",
@@ -107,7 +124,7 @@ class LttngSession:
             "--type",
             "vpid",
         )
-        _run_lttng(
+        self._lttng(
             "enable-event",
             "--userspace",
             "--session",
@@ -116,7 +133,7 @@ class LttngSession:
             "moq",
             "moq_trace:*",
         )
-        _run_lttng(
+        self._lttng(
             "enable-event",
             "--userspace",
             "--session",
@@ -125,20 +142,20 @@ class LttngSession:
             "moq",
             "quic_trace:*",
         )
-        _run_lttng("start", self.name)
+        self._lttng("start", self.name)
 
     def finish(self) -> None:
         """Stop and atomically finalize the CTF recording."""
 
-        _run_lttng("stop", self.name)
-        _run_lttng("destroy", self.name)
+        self._lttng("stop", self.name)
+        self._lttng("destroy", self.name)
         self.active = False
 
     def close(self) -> None:
         """Destroy an unfinished session during cleanup."""
 
         if self.active:
-            subprocess.run(("lttng", "destroy", self.name), check=False)
+            subprocess.run(self.wrap(("lttng", "destroy", self.name)), check=False)
             self.active = False
 
 
@@ -280,12 +297,12 @@ def _provider_listed(listing: str, pid: int, event: str) -> bool:
     return False
 
 
-def packet_capture_command(pcap: pathlib.Path, port: int) -> list[str]:
+def packet_capture_command(pcap: pathlib.Path | str, port: int, user: str | None = None) -> list[str]:
     """Capture the headers of every UDP datagram on `port`, on every interface.
 
     Capturing needs privileges, so tcpdump runs under non-interactive sudo and
-    drops them to the invoking user before writing, which keeps the file readable
-    by the analysis. `LINUX_SLL2` records the interface and direction of each
+    drops them to `user` (the invoking user by default) before writing, which
+    keeps the file readable by the analysis. `LINUX_SLL2` records the interface and direction of each
     packet, which the analysis needs to count a loopback datagram once. The first
     128 bytes hold every header, and the UDP header carries the full length.
     """
@@ -304,7 +321,7 @@ def packet_capture_command(pcap: pathlib.Path, port: int) -> list[str]:
         "nano",
         "-U",
         "-Z",
-        getpass.getuser(),
+        user or getpass.getuser(),
         "-w",
         str(pcap),
         "udp",
@@ -313,11 +330,22 @@ def packet_capture_command(pcap: pathlib.Path, port: int) -> list[str]:
     ]
 
 
-def start_packet_capture(pcap: pathlib.Path, port: int, cwd: pathlib.Path) -> ManagedProcess:
-    """Start a packet capture and wait until tcpdump is listening."""
+def start_packet_capture(
+    pcap: pathlib.Path | str,
+    port: int,
+    cwd: pathlib.Path,
+    launch: Callable[[str, Sequence[str], pathlib.Path], ManagedProcess] | None = None,
+    user: str | None = None,
+) -> ManagedProcess:
+    """Start a packet capture and wait until tcpdump is listening.
+
+    `launch` starts the command on the relay's host, and `user` is the login
+    tcpdump drops to there. The log stays in the local `cwd`.
+    """
 
     log = cwd / "tcpdump.log"
-    process = ManagedProcess("tcpdump", packet_capture_command(pcap, port), cwd, log)
+    command = packet_capture_command(pcap, port, user)
+    process = (launch or (lambda name, argv, path: ManagedProcess(name, argv, cwd, path)))("tcpdump", command, log)
     try:
         wait_for_log(log, process, lambda value: "listening on" in value, "tcpdump listening", 10)
     except CaptureError as error:

@@ -1,4 +1,4 @@
-"""Run local or two-host relay latency experiments."""
+"""Run relay latency experiments on the controller or across several hosts."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import shlex
 import socket
 import subprocess
 import time
+import uuid
+from collections.abc import Mapping, Sequence
 
 import duckdb
 
@@ -17,7 +19,7 @@ from . import network
 from .analyze import run as analyze
 from .artifact import open_artifact, write_metadata
 from .capture import LttngSession, ManagedProcess, start_packet_capture, wait_for_log, wait_for_startup
-from .config import ComparisonConfig, ExperimentConfig
+from .config import ComparisonConfig, ExperimentConfig, Host
 from .metadata import (
     Affinity,
     Binaries,
@@ -28,6 +30,7 @@ from .metadata import (
     Workload,
 )
 from .network import NetworkManifest
+from .remote import RemoteHost, RemoteProcess, ssh_command
 from .render import render
 
 # Pinned for every implementation, so a run cannot silently negotiate a version
@@ -36,8 +39,58 @@ from .render import render
 PROTOCOL = "moq-transport-16"
 
 
+# Builds the reference peers in a moq-trace checkout on a peer host.
+_BENCH_BUILD = "nix develop --command just moq-bench-build"
+# The reference peers' binary, relative to a moq-trace checkout.
+_BENCH_BINARY = "moq-bench/target/release/moq-bench"
+
+
 class ExperimentError(RuntimeError):
     """Experiment configuration, capture, or analysis failed."""
+
+
+class _Roles:
+    """The host each role runs on for one run, and the run directory on it.
+
+    A role without a host runs on the controller. Roles that name the same ssh
+    destination share one `RemoteHost`, so identity decides whether two roles
+    are on one host.
+    """
+
+    def __init__(self, config: ExperimentConfig, output: pathlib.Path) -> None:
+        self.output = output
+        remotes: dict[str, RemoteHost] = {}
+
+        def remote(host: Host | None) -> RemoteHost | None:
+            return None if host is None else remotes.setdefault(host.ssh, RemoteHost(host))
+
+        self.relay = remote(config.hosts.relay)
+        self.publisher = remote(config.hosts.publisher)
+        self.subscriber = remote(config.hosts.subscriber)
+        # Distinguishes this run's remote directory from an earlier run's of the
+        # same name, which is left in place.
+        self._suffix = uuid.uuid4().hex[:8]
+
+    def directory(self, host: RemoteHost | None) -> str:
+        """The run directory on `host`, or the local one."""
+
+        if host is None:
+            return str(self.output)
+        return f"{host.path(host.host.workdir)}/{self.output.name}-{self._suffix}"
+
+    def launch(
+        self,
+        host: RemoteHost | None,
+        name: str,
+        command: Sequence[str],
+        env: Mapping[str, str] | None = None,
+    ) -> ManagedProcess:
+        """Start one role's process on its host, logging to the local run directory."""
+
+        log = self.output / f"{name}.log"
+        if host is None:
+            return ManagedProcess(name, command, self.output, log, env=env)
+        return RemoteProcess(name, host, command, self.directory(host), log, env=env)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,11 +137,46 @@ def _run_seconds(config: ExperimentConfig) -> float:
     return config.warmup_seconds + config.duration_seconds + config.cooldown_seconds
 
 
-def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> CommandSet:
-    """Construct exact argv arrays without invoking a shell."""
+def _relay_url(config: ExperimentConfig, roles: _Roles, peer: RemoteHost | None) -> str:
+    """The URL a peer dials: loopback on the relay's host, the relay's address elsewhere."""
 
-    relay_binary = str(config.relay_bin)
-    bench_binary = str(config.bench_bin)
+    if peer is roles.relay:
+        return f"https://{config.relay_local_host}:{config.port}"
+    if config.relay_url is not None:
+        return config.relay_url
+    if config.hosts.relay is None:
+        raise ExperimentError("relay_url is required when a peer runs on another host than a local relay")
+    return f"https://{config.hosts.relay.reachable_address}:{config.port}"
+
+
+def _bench_binary(config: ExperimentConfig, host: RemoteHost | None, placement: Host | None) -> str:
+    """The peer binary on the host a peer role runs on."""
+
+    if host is None or placement is None:
+        return str(config.bench_bin)
+    default = _BENCH_BINARY if placement.checkout is not None else "moq-bench"
+    return host.binary(placement.binary or default, placement.checkout)
+
+
+def _relay_binary(config: ExperimentConfig, roles: _Roles) -> str:
+    """The relay binary on the relay's host."""
+
+    if roles.relay is None or config.hosts.relay is None:
+        return str(config.relay_bin)
+    return roles.relay.binary(config.hosts.relay.binary or "moq-relay", config.hosts.relay.checkout)
+
+
+def commands(
+    config: ExperimentConfig,
+    output: pathlib.Path | None = None,
+    roles: _Roles | None = None,
+) -> CommandSet:
+    """Construct exact argv arrays, each as it runs on its role's host, without a shell."""
+
+    run_output = (output or config.output).resolve()
+    roles = roles or _Roles(config, run_output)
+    relay_directory = roles.directory(roles.relay)
+    relay_binary = _relay_binary(config, roles)
     if config.relay_args is None:
         relay = [
             relay_binary,
@@ -104,12 +192,11 @@ def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> Co
             "",
         ]
     else:
-        run_output = (output or config.output).resolve()
         values = {
             "port": str(config.port),
-            "output": str(run_output),
-            "certificate": str(run_output / "relay.crt"),
-            "key": str(run_output / "relay.key"),
+            "output": relay_directory,
+            "certificate": f"{relay_directory}/relay.crt",
+            "key": f"{relay_directory}/relay.key",
         }
         try:
             relay = [relay_binary, *(argument.format_map(values) for argument in config.relay_args)]
@@ -118,12 +205,18 @@ def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> Co
     if config.relay_cpu is not None:
         relay[:0] = ["taskset", "-c", str(config.relay_cpu)]
 
-    local_url = f"https://localhost:{config.port}"
-    publisher = _bench_command(config, local_url, bench_binary)
+    publisher = _bench_command(
+        config,
+        _relay_url(config, roles, roles.publisher),
+        _bench_binary(config, roles.publisher, config.hosts.publisher),
+    )
     publisher.extend(["--name", "relay-latency", "--connections", "1", "--broadcasts", "1", "--subscribe", "0"])
 
-    subscriber_binary = config.subscriber.binary if config.subscriber is not None else bench_binary
-    subscriber = _bench_command(config, config.relay_url or local_url, subscriber_binary)
+    subscriber = _bench_command(
+        config,
+        _relay_url(config, roles, roles.subscriber),
+        _bench_binary(config, roles.subscriber, config.hosts.subscriber),
+    )
     # One session per subscriber, each taking a single subscription, so the relay
     # emits `subscribers` copies of every group for the analysis to compare against.
     subscriber.extend(
@@ -140,23 +233,36 @@ def commands(config: ExperimentConfig, output: pathlib.Path | None = None) -> Co
             f"{_run_seconds(config):g}s",
         ]
     )
-    if config.subscriber is not None:
-        remote = f"exec {shlex.join(subscriber)}"
-        if config.subscriber.workdir is not None:
-            remote = f"cd {shlex.quote(config.subscriber.workdir)} && {remote}"
-        subscriber = [
-            "ssh",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            config.subscriber.ssh,
-            remote,
-        ]
     return CommandSet(relay=tuple(relay), publisher=tuple(publisher), subscriber=tuple(subscriber))
 
 
+def _build(config: ExperimentConfig, roles: _Roles) -> None:
+    """Build each remote role's binary in its checkout, once per host and checkout."""
+
+    built = set()
+    for role, host, placement, default in (
+        ("relay", roles.relay, config.hosts.relay, config.relay_build),
+        ("publisher", roles.publisher, config.hosts.publisher, _BENCH_BUILD),
+        ("subscriber", roles.subscriber, config.hosts.subscriber, _BENCH_BUILD),
+    ):
+        if host is None or placement is None or placement.checkout is None:
+            continue
+        command = placement.build if placement.build is not None else default
+        if command is None:
+            raise ExperimentError(
+                f"no build command for the {role} on {host.name}; set relay_build, hosts.{role}.build, "
+                "or an empty build to use the existing binary"
+            )
+        key = (host.name, host.path(placement.checkout), command)
+        if not command or key in built:
+            continue
+        built.add(key)
+        host.build(placement.checkout, command, roles.output / f"build-{role}.log")
+
+
 def _validate_environment(config: ExperimentConfig) -> None:
-    if config.relay_cpu is not None and hasattr(os, "sched_getaffinity"):
+    # A remote relay's CPUs are checked by taskset on that host when it starts.
+    if config.hosts.relay is None and config.relay_cpu is not None and hasattr(os, "sched_getaffinity"):
         if config.relay_cpu not in os.sched_getaffinity(0):
             raise ExperimentError(f"relay CPU {config.relay_cpu} is unavailable to this process")
 
@@ -175,13 +281,22 @@ def _loopback_ifindexes() -> tuple[int, ...]:
     return tuple(indexes)
 
 
-def _network_manifest(config: ExperimentConfig, output: pathlib.Path) -> pathlib.Path:
-    """Describe the run's network capture so analysis can place it on the trace clock."""
+def _network_manifest(config: ExperimentConfig, output: pathlib.Path, relay: RemoteHost | None) -> pathlib.Path:
+    """Describe the run's network capture so analysis can place it on the trace clock.
 
+    The clocks and interfaces are the relay host's, because the capture and the
+    trace are both taken there.
+    """
+
+    if relay is None:
+        offset = time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        loopbacks = _loopback_ifindexes()
+    else:
+        offset, loopbacks = relay.clock()
     manifest = NetworkManifest(
         relay_port=config.port,
-        realtime_offset_ns=time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(time.CLOCK_MONOTONIC),
-        loopback_ifindexes=_loopback_ifindexes(),
+        realtime_offset_ns=offset,
+        loopback_ifindexes=loopbacks,
         pcap="relay.pcap" if config.capture_packets else None,
         qlog_dir="qlog" if config.qlog else None,
     )
@@ -190,23 +305,62 @@ def _network_manifest(config: ExperimentConfig, output: pathlib.Path) -> pathlib
     return path
 
 
-def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path) -> Capture:
+def _prepare_relay_host(output: pathlib.Path, relay: RemoteHost, directory: str, qlog: bool) -> None:
+    """Create the relay's run directory on its host and copy the TLS pair there."""
+
+    directories = [directory, f"{directory}/qlog"] if qlog else [directory]
+    relay.run(f"mkdir -p {shlex.join(directories)}")
+    for name in ("relay.crt", "relay.key"):
+        if (output / name).exists():
+            relay.put(output / name, f"{directory}/{name}")
+
+
+def _capture(
+    config: ExperimentConfig,
+    command: CommandSet,
+    output: pathlib.Path,
+    roles: _Roles | None = None,
+) -> Capture:
+    roles = roles or _Roles(config, output)
+    relay_host = roles.relay
+    relay_directory = roles.directory(relay_host)
     ctf = output / "trace"
-    session = LttngSession(ctf) if config.trace else None
+    session = None
+    if config.trace:
+        if relay_host is None:
+            session = LttngSession(ctf)
+        else:
+            lttng = relay_host.host.lttng
+            session = LttngSession(
+                f"{relay_directory}/trace",
+                wrap=lambda argv: ssh_command(relay_host.host, f"{lttng} {shlex.join(argv[1:])}"),
+            )
     processes: list[ManagedProcess] = []
     try:
-        manifest = _network_manifest(config, output)
-        if config.qlog:
+        manifest = _network_manifest(config, output, relay_host)
+        if relay_host is not None:
+            _prepare_relay_host(output, relay_host, relay_directory, config.qlog)
+        elif config.qlog:
             (output / "qlog").mkdir()
         if config.capture_packets:
-            processes.append(start_packet_capture(output / "relay.pcap", config.port, output))
+            if relay_host is None:
+                processes.append(start_packet_capture(output / "relay.pcap", config.port, output))
+            else:
+                processes.append(
+                    start_packet_capture(
+                        f"{relay_directory}/relay.pcap",
+                        config.port,
+                        output,
+                        launch=lambda name, argv, _log: roles.launch(relay_host, name, argv),
+                        user=relay_host.user,
+                    )
+                )
         # A relay that supports qlog writes it here. The capture works without it.
-        relay = ManagedProcess(
+        relay = roles.launch(
+            relay_host,
             "relay",
             command.relay,
-            output,
-            output / "relay.log",
-            env={network.QLOG_ENVIRONMENT: str(output / "qlog")} if config.qlog else None,
+            env={network.QLOG_ENVIRONMENT: f"{relay_directory}/qlog"} if config.qlog else None,
         )
         processes.append(relay)
         if config.relay_ready_log:
@@ -219,11 +373,11 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
             session.start([relay.pid])
         tracked = [relay.pid]
 
-        subscriber = ManagedProcess("subscriber", command.subscriber, output, output / "subscriber.log")
+        subscriber = roles.launch(roles.subscriber, "subscriber", command.subscriber)
         processes.append(subscriber)
-        # A remote subscriber runs behind ssh, so this process is the ssh client
-        # and recording it would capture none of the subscriber's own events.
-        if config.subscriber is None:
+        # A peer is recorded only on the relay's own host, because the session
+        # records one host and every relay metric stays on that host's clock.
+        if roles.subscriber is relay_host:
             if session is not None:
                 session.track(subscriber.pid)
             tracked.append(subscriber.pid)
@@ -239,13 +393,14 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
             20,
         )
 
-        publisher = ManagedProcess("publisher", command.publisher, output, output / "publisher.log")
+        publisher = roles.launch(roles.publisher, "publisher", command.publisher)
         processes.append(publisher)
         # Track on spawn rather than after readiness, so the connection setup that
         # the lifecycle metrics start from is recorded.
-        if session is not None:
-            session.track(publisher.pid)
-        tracked.append(publisher.pid)
+        if roles.publisher is relay_host:
+            if session is not None:
+                session.track(publisher.pid)
+            tracked.append(publisher.pid)
         wait_for_log(
             output / "publisher.log",
             publisher,
@@ -271,10 +426,13 @@ def _capture(config: ExperimentConfig, command: CommandSet, output: pathlib.Path
         for recorder in processes:
             recorder.stop(True)
         processes.clear()
-        if session is None:
-            return Capture(trace=None, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
-        session.finish()
-        return Capture(trace=ctf, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
+        if session is not None:
+            session.finish()
+        if relay_host is not None:
+            recorded = (("trace", session is not None), ("relay.pcap", config.capture_packets), ("qlog", config.qlog))
+            relay_host.fetch(relay_directory, [name for name, present in recorded if present], output)
+        trace = None if session is None else ctf
+        return Capture(trace=trace, relay_pid=relay.pid, pids=tuple(tracked), network=manifest)
     finally:
         for process in reversed(processes):
             process.close()
@@ -324,6 +482,23 @@ def _generate_certificate(config: ExperimentConfig, output: pathlib.Path) -> Non
         raise ExperimentError("failed to generate the relay TLS certificate with openssl") from error
 
 
+def _binaries(config: ExperimentConfig, roles: _Roles) -> Binaries:
+    """Name and hash the relay and publisher binaries on the hosts they ran on.
+
+    A remote binary is named `<ssh destination>:<path>`, so a result from one
+    host is never mistaken for another's.
+    """
+
+    def describe(host: RemoteHost | None, path: str) -> tuple[str, str | None]:
+        if host is None:
+            return path, _file_hash(pathlib.Path(path))
+        return f"{host.name}:{path}", host.sha256(path)
+
+    relay, relay_sha256 = describe(roles.relay, _relay_binary(config, roles))
+    bench, bench_sha256 = describe(roles.publisher, _bench_binary(config, roles.publisher, config.hosts.publisher))
+    return Binaries(relay=relay, relay_sha256=relay_sha256, bench=bench, bench_sha256=bench_sha256)
+
+
 def _validate_workload(database: pathlib.Path) -> None:
     with open_artifact(database, "run") as (connection, _, _metadata):
         count, first, last = connection.execute(
@@ -345,9 +520,11 @@ def run(config: ExperimentConfig) -> pathlib.Path:
     if output.exists():
         raise ExperimentError(f"run output already exists: {output}")
     output.mkdir(parents=True)
+    roles = _Roles(config, output)
+    _build(config, roles)
     _generate_certificate(config, output)
-    command = commands(config, output)
-    capture = _capture(config, command, output)
+    command = commands(config, output, roles)
+    capture = _capture(config, command, output, roles)
     if capture.trace is None:
         return output
     database = output / "analysis.duckdb"
@@ -375,12 +552,7 @@ def run(config: ExperimentConfig) -> pathlib.Path:
             if config.relay_cpu is None
             else Affinity(mode="single-core", cpu=config.relay_cpu)
         ),
-        binaries=Binaries(
-            relay=str(config.relay_bin),
-            relay_sha256=_file_hash(config.relay_bin),
-            bench=str(config.bench_bin),
-            bench_sha256=_file_hash(config.bench_bin),
-        ),
+        binaries=_binaries(config, roles),
         commands=command,
         network=capture.network,
     )

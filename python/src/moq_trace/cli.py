@@ -9,7 +9,7 @@ import tomllib
 
 from pydantic import ValidationError
 
-from .config import ComparisonConfig, ExperimentConfig
+from .config import ComparisonConfig, ExperimentConfig, Hosts
 
 
 def _model(path: pathlib.Path, model):
@@ -108,6 +108,12 @@ def parser() -> argparse.ArgumentParser:
     for flag, kind, description in _BENCH_SETTINGS:
         bench.add_argument(flag, type=kind, help=f"{description} (default: {_default(flag)})")
     bench.add_argument(
+        "--hosts",
+        type=pathlib.Path,
+        metavar="TOML",
+        help="Place the relay, publisher, and subscriber on ssh hosts; see README (default: all local).",
+    )
+    bench.add_argument(
         "--capture-packets",
         action=argparse.BooleanOptionalAction,
         help="Record a header-only tcpdump of the relay's port for throughput; needs passwordless sudo (default: off).",
@@ -190,6 +196,8 @@ def _run(args: argparse.Namespace) -> None:
         names = [_setting(flag) for flag, _, _ in _BENCH_SETTINGS] + ["capture_packets", "qlog", "render"]
         settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
         settings["trace"] = args.trace
+        if args.hosts is not None:
+            settings["hosts"] = _model(args.hosts, Hosts)
         try:
             results = bench(args.relay, args.output or default_output(), settings, dict(args.checkout))
         except ValidationError as error:

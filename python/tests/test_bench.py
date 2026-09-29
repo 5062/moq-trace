@@ -34,6 +34,16 @@ class BenchTests(unittest.TestCase):
         config = experiment_config(_profile(), pathlib.Path("run"), {}, pathlib.Path("/srv/other"))
         self.assertEqual(config.relay_bin, pathlib.Path("/srv/other/bin/relay"))
 
+    def test_a_remote_relay_resolves_its_checkout_on_the_relay_host(self) -> None:
+        settings = {"hosts": {"relay": {"ssh": "me@relay.example"}}}
+
+        config = experiment_config(_profile(relay_build="make"), pathlib.Path("run"), settings)
+        self.assertEqual((config.hosts.relay.checkout, config.hosts.relay.binary), ("/opt/relay", "bin/relay"))
+        self.assertEqual(config.relay_build, "make")
+
+        config = experiment_config(_profile(), pathlib.Path("run"), settings, pathlib.Path("~/other"))
+        self.assertEqual(config.hosts.relay.checkout, "~/other")
+
     def test_relay_url_follows_the_shared_port(self) -> None:
         profile = _profile(relay_url="https://127.0.0.1:{port}")
 

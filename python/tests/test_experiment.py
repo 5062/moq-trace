@@ -15,10 +15,10 @@ sys.path.insert(0, str(SOURCE))
 
 from support import run_metadata  # noqa: E402
 
-from moq_trace import capture, experiment, network  # noqa: E402
+from moq_trace import capture, experiment, network, remote  # noqa: E402
 from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.capture import _provider_listed  # noqa: E402
-from moq_trace.config import ComparisonConfig, ExperimentConfig, SubscriberHost  # noqa: E402
+from moq_trace.config import ComparisonConfig, ExperimentConfig, Host, Hosts  # noqa: E402
 from moq_trace.experiment import ExperimentError, _validate_workload, commands  # noqa: E402
 from moq_trace.metadata import CommandSet  # noqa: E402
 
@@ -38,21 +38,80 @@ class ExperimentTests(unittest.TestCase):
                 connection.execute("INSERT INTO selected_rx VALUES (5)")
             _validate_workload(database)
 
-    def test_remote_subscriber_uses_standard_shell_quoting(self) -> None:
+    def test_remote_process_records_its_pid_and_quotes_its_command(self) -> None:
+        host = remote.RemoteHost(Host(ssh="me@peer.example"))
         with tempfile.TemporaryDirectory() as directory:
-            config = ExperimentConfig(
-                output=pathlib.Path(directory) / "run",
-                subscriber=SubscriberHost(
-                    ssh="relay@example.com",
-                    workdir="/tmp/a directory",
-                ),
-                relay_url="https://relay.example.com:4443",
-            )
+            log = pathlib.Path(directory) / "subscriber.log"
+            with mock.patch.object(capture.subprocess, "Popen") as popen:
+                remote.RemoteProcess(
+                    "subscriber", host, ["/opt/a dir/moq-bench", "--x"], "/tmp/a run", log, env={"K": "a b"}
+                )
+                popen.return_value.poll.return_value = 0
+        command = popen.call_args.args[0]
 
-            command = commands(config).subscriber
+        self.assertEqual(
+            command[:7], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "me@peer.example"]
+        )
+        self.assertEqual(
+            command[7],
+            "mkdir -p '/tmp/a run' && cd '/tmp/a run' && echo $$ > '/tmp/a run/.subscriber.pid' && "
+            "exec env K='a b' '/opt/a dir/moq-bench' --x",
+        )
 
-            self.assertEqual(command[:4], ("ssh", "-T", "-o", "BatchMode=yes"))
-            self.assertIn("cd '/tmp/a directory' && exec", command[-1])
+    def test_peers_dial_loopback_on_the_relay_host_and_its_address_elsewhere(self) -> None:
+        relay = Host(ssh="me@relay.example", address="10.0.0.1", binary="/opt/relay/moq-relay", workdir="/tmp/runs")
+        peer = Host(ssh="me@peer.example", checkout="/srv/moq-trace", workdir="/tmp/runs")
+        config = ExperimentConfig(
+            output=pathlib.Path("run"),
+            relay_args=("--cert", "{certificate}"),
+            relay_local_host="127.0.0.1",
+            hosts=Hosts(relay=relay, publisher=relay, subscriber=peer),
+        )
+
+        command = commands(config)
+
+        self.assertEqual(command.relay[0], "/opt/relay/moq-relay")
+        self.assertRegex(command.relay[2], r"^/tmp/runs/run-[0-9a-f]{8}/relay.crt$")
+        self.assertEqual(command.publisher[command.publisher.index("--client-connect") + 1], "https://127.0.0.1:4443")
+        self.assertEqual(command.subscriber[command.subscriber.index("--client-connect") + 1], "https://10.0.0.1:4443")
+        self.assertEqual(command.subscriber[0], "/srv/moq-trace/moq-bench/target/release/moq-bench")
+
+    def test_a_local_relay_needs_a_url_for_remote_peers(self) -> None:
+        config = ExperimentConfig(
+            output=pathlib.Path("run"),
+            relay_url="https://relay.example.com:4443",
+            hosts=Hosts(subscriber=Host(ssh="me@peer.example", binary="/usr/bin/moq-bench")),
+        )
+
+        command = commands(config)
+
+        self.assertEqual(command.subscriber[command.subscriber.index("--client-connect") + 1], config.relay_url)
+        self.assertEqual(command.publisher[command.publisher.index("--client-connect") + 1], "https://localhost:4443")
+
+    def test_each_host_and_checkout_builds_once(self) -> None:
+        relay = Host(ssh="me@relay.example", checkout="/srv/relay", binary="bin/relay", workdir="/tmp/runs")
+        peer = Host(ssh="me@peer.example", checkout="/srv/moq-trace", workdir="/tmp/runs")
+        config = ExperimentConfig(
+            output=pathlib.Path("run"),
+            relay_build="make relay",
+            hosts=Hosts(relay=relay, publisher=peer, subscriber=peer),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            roles = experiment._Roles(config, pathlib.Path(directory))
+            with mock.patch.object(remote.RemoteHost, "build") as build:
+                experiment._build(config, roles)
+
+        self.assertEqual(
+            [(call.args[0], call.args[1]) for call in build.call_args_list],
+            [("/srv/relay", "make relay"), ("/srv/moq-trace", experiment._BENCH_BUILD)],
+        )
+
+    def test_a_remote_relay_without_a_build_command_is_rejected(self) -> None:
+        relay = Host(ssh="me@relay.example", checkout="/srv/relay", binary="bin/relay", workdir="/tmp/runs")
+        config = ExperimentConfig(output=pathlib.Path("run"), hosts=Hosts(relay=relay))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ExperimentError, "no build command for the relay"):
+                experiment._build(config, experiment._Roles(config, pathlib.Path(directory)))
 
     def test_local_binaries_are_absolute_before_working_directory_changes(self) -> None:
         config = ExperimentConfig(
@@ -85,11 +144,15 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(pinned, [experiment.PROTOCOL])
 
     def test_remote_subscriber_requires_relay_url(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "relay_url is required"):
             ExperimentConfig(
                 output=pathlib.Path("run"),
-                subscriber=SubscriberHost(ssh="relay@example.com"),
+                hosts=Hosts(subscriber=Host(ssh="relay@example.com")),
             )
+
+    def test_remote_relay_requires_a_binary(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "hosts.relay.binary"):
+            ExperimentConfig(output=pathlib.Path("run"), hosts=Hosts(relay=Host(ssh="relay@example.com")))
 
     def test_experiment_validates_workload_and_window(self) -> None:
         with self.assertRaises(ValidationError):
@@ -200,7 +263,7 @@ class ExperimentTests(unittest.TestCase):
 
         created = []
 
-        def start(name, command, cwd, log, env=None):
+        def start(name, *_args, env=None):
             process = mock.Mock()
             process.name = name
             process.env = env
@@ -224,13 +287,16 @@ class ExperimentTests(unittest.TestCase):
     def _capture(self, config: ExperimentConfig) -> experiment.Capture:
         command = CommandSet(relay=("relay",), publisher=("publisher",), subscriber=("subscriber",))
         with tempfile.TemporaryDirectory() as directory:
+            processes = self._processes()
             with (
-                mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()),
+                mock.patch.object(experiment, "ManagedProcess", side_effect=processes),
+                mock.patch.object(experiment, "RemoteProcess", side_effect=processes),
                 mock.patch.object(experiment, "wait_for_log"),
                 mock.patch.object(experiment, "wait_for_startup") as wait_for_startup,
                 mock.patch.object(experiment, "LttngSession") as session_class,
             ):
                 capture_result = experiment._capture(config, command, pathlib.Path(directory))
+        self.session_class = session_class
         self.session = session_class.return_value
         self.wait_for_startup = wait_for_startup
         return capture_result
@@ -247,14 +313,33 @@ class ExperimentTests(unittest.TestCase):
     def test_capture_skips_a_remote_subscriber(self) -> None:
         config = ExperimentConfig(
             output=pathlib.Path("run"),
-            subscriber=SubscriberHost(ssh="relay@example.com"),
+            hosts=Hosts(subscriber=Host(ssh="relay@example.com", workdir="/tmp/runs")),
             relay_url="https://relay.example.com:4443",
         )
         result = self._capture(config)
 
-        # The subscriber's local PID is the ssh client, which emits nothing.
+        # The session records the relay's host, which the subscriber is not on.
         self.assertEqual(result.pids, (2000, 2002))
         self.assertEqual(self.session.track.call_args_list, [mock.call(2002)])
+
+    def test_a_remote_relay_is_traced_on_its_host_and_copied_back(self) -> None:
+        relay = Host(ssh="me@relay.example", binary="/opt/relay", workdir="/tmp/runs")
+        config = ExperimentConfig(output=pathlib.Path("run"), hosts=Hosts(relay=relay), qlog=True)
+        with (
+            mock.patch.object(remote.RemoteHost, "clock", return_value=(5, (1,))),
+            mock.patch.object(remote.RemoteHost, "run") as run,
+            mock.patch.object(remote.RemoteHost, "fetch") as fetch,
+        ):
+            result = self._capture(config)
+
+        output, wrap = self.session_class.call_args.args[0], self.session_class.call_args.kwargs["wrap"]
+        self.assertRegex(output, r"^/tmp/runs/[^/]+-[0-9a-f]{8}/trace$")
+        self.assertEqual(wrap(["lttng", "list"])[-2:], ["me@relay.example", "lttng list"])
+        self.assertIn("mkdir -p", run.call_args_list[0].args[0])
+        self.assertEqual(fetch.call_args.args[1], ["trace", "qlog"])
+        # Neither peer shares the relay's host, so only the relay is recorded.
+        self.assertEqual(result.pids, (2000,))
+        self.assertEqual(self.session.track.call_args_list, [])
 
     def test_capture_points_the_relay_at_a_qlog_directory(self) -> None:
         with mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()) as process:

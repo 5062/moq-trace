@@ -16,16 +16,43 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class SubscriberHost(StrictModel):
-    """Optional remote host running the subscriber workload.
+class Host(StrictModel):
+    """A remote host one role runs on, reached with non-interactive ssh.
 
-    `binary` is resolved on that host, which is expected to have the peers installed
-    under a name on `PATH` rather than in a local build tree.
+    Every path is a path on that host, and a relative path or one starting with
+    `~/` resolves against the remote home. When `checkout` is set, `build` runs
+    in it before each run, and a relative `binary` resolves against it. A role
+    has a default for both, so a host usually names only `ssh` and `checkout`.
+    An empty `build` skips building.
     """
 
     ssh: str
-    binary: str = "moq-bench"
-    workdir: str | None = None
+    # How the other hosts reach this one. Defaults to the host part of `ssh`,
+    # which is wrong when `ssh` is an alias from an ssh config file.
+    address: str | None = None
+    checkout: str | None = None
+    build: str | None = None
+    binary: str | None = None
+    # Each run gets a directory under this one, left in place for inspection.
+    workdir: str = "moq-trace-runs"
+    # The shell command that runs lttng on this host, for a relay host whose
+    # non-interactive PATH lacks it, such as `nix develop ~/moq-trace --command lttng`.
+    # Only lttng is wrapped, so the relay's recorded PID stays its own.
+    lttng: str = "lttng"
+
+    @property
+    def reachable_address(self) -> str:
+        """The address the other hosts use for this one."""
+
+        return self.address or self.ssh.rpartition("@")[2]
+
+
+class Hosts(StrictModel):
+    """Where each role runs. A role without a host runs on the controller."""
+
+    relay: Host | None = None
+    publisher: Host | None = None
+    subscriber: Host | None = None
 
 
 class ExperimentConfig(StrictModel):
@@ -44,8 +71,16 @@ class ExperimentConfig(StrictModel):
     # Defaults to the reference peers, which are the constant side of a measurement.
     # `just moq-bench-build` writes it, and a run from the toolkit root picks it up.
     bench_bin: pathlib.Path = pathlib.Path("moq-bench/target/release/moq-bench")
+    # Run in the relay's checkout on a remote relay host before each run.
+    relay_build: str | None = None
+    # The address a peer on the relay's own host dials. A relay that listens on
+    # IPv4 only needs `127.0.0.1`, because `localhost` may resolve to IPv6 first.
+    relay_local_host: str = "localhost"
+    # The URL a peer on another host dials. Required when the relay runs on the
+    # controller, whose address the runner cannot know; otherwise it defaults to
+    # the relay host's address.
     relay_url: str | None = None
-    subscriber: SubscriberHost | None = None
+    hosts: Hosts = Field(default_factory=Hosts)
     relay_cpu: int | None = Field(default=None, ge=0)
     subscribers: int = Field(default=1, gt=0)
     object_size: int = Field(default=16_384, gt=0)
@@ -81,10 +116,14 @@ class ExperimentConfig(StrictModel):
 
     @model_validator(mode="after")
     def remote_relay_is_reachable(self) -> "ExperimentConfig":
-        """Require an explicit relay URL for remote subscribers."""
+        """Require a relay address every remote peer can dial, and a remote relay binary."""
 
-        if self.subscriber is not None and self.relay_url is None:
-            raise ValueError("relay_url is required when subscriber is remote")
+        relay = self.hosts.relay
+        remote_peers = [host for host in (self.hosts.publisher, self.hosts.subscriber) if host is not None]
+        if relay is None and remote_peers and self.relay_url is None:
+            raise ValueError("relay_url is required when a peer runs on another host than a local relay")
+        if relay is not None and relay.binary is None:
+            raise ValueError("hosts.relay.binary is required; bench fills it from the relay profile")
         return self
 
 

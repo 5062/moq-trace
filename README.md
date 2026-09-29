@@ -134,6 +134,46 @@ A failed run does not stop the relays after it. Build each relay with its tracin
 hooks first, linked against the LTTng-UST release of the `lttng` tools that run
 the capture.
 
+### Distributed runs
+
+`--hosts hosts.toml` places the relay, the publisher, and the subscriber on
+other hosts, reached with non-interactive ssh (key authentication, host keys
+already accepted). A role without a table runs on the controller. The same
+tables go under `[hosts.relay]` and so on in a `run` configuration.
+
+```toml
+[relay]
+ssh = "me@relay-host"
+address = "10.0.0.1"      # what the peers dial; defaults to the ssh host name
+lttng = "nix develop ~/moq-trace --command lttng"   # when lttng is not on the ssh PATH
+
+[publisher]
+ssh = "me@pub-host"
+checkout = "~/moq-trace"  # a moq-trace checkout that builds moq-bench
+
+[subscriber]
+ssh = "me@sub-host"
+checkout = "~/moq-trace"
+```
+
+Every path is a path on that host, and `~/` or a relative path resolves against
+the remote home. Before each run, every remote host with a `checkout` builds
+its role there, once per host and checkout: the relay with its profile's
+`relay_build`, and the peers with `just moq-bench-build` through `nix develop`.
+`build` overrides the command, and an empty `build` uses the existing binary.
+A remote relay builds from `--checkout` for that relay when given, then its
+host's `checkout`, then the profile's path. `binary` overrides where a role's
+binary is.
+
+Only the relay's host is traced. The LTTng session, the packet capture, qlog,
+and the clock offset the network figures need are all taken there and copied
+back, so the analysis and figures are the same as for a local run, and no
+clocks need synchronizing. A peer that shares the relay's host is traced too; a
+peer on another host is not. A peer on the relay's host dials
+`relay_local_host`, and a peer elsewhere dials the relay host's `address`, or
+`relay_url` when the relay runs on the controller. Each host keeps its run
+directory under `workdir` (`~/moq-trace-runs` by default) for inspection.
+
 `--no-trace` runs the same workload without an LTTng session. Its runs keep only
 the peers' logs, which report throughput, frame rates, and mismatches, and
 produce no analysis artifact. `compare` requires tracing, because a comparison

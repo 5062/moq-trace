@@ -51,15 +51,18 @@
           ];
           nativeBuildInputs = [ pkgs.makeWrapper ];
           postFixup = ''
+            # ssh is appended rather than prepended: the host's own ssh carries the
+            # user's configuration, such as jump hosts and Kerberos, that a
+            # separately built client may not support.
             wrapProgram $out/bin/moq-trace \
               --prefix PATH : ${
                 pkgs.lib.makeBinPath [
                   pkgs.lttng-tools
                   pkgs.openssl
-                  pkgs.openssh
                   pkgs.util-linux
                 ]
-              }
+              } \
+              --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
           '';
           meta = {
             description = "Capture and analyze MoQ relay latency experiments";
@@ -92,7 +95,6 @@
             lttng-tools
             lttng-ust
             ninja
-            openssh
             openssl
             pkg-config
             python
