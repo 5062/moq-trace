@@ -67,7 +67,7 @@ def _default(flag: str) -> str:
 def parser() -> argparse.ArgumentParser:
     """Build the complete command parser."""
 
-    root = argparse.ArgumentParser(description=__doc__)
+    root = argparse.ArgumentParser(prog="moq-trace", description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="Run one experiment from TOML configuration.")

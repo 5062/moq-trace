@@ -92,14 +92,20 @@
             lttng-tools
             lttng-ust
             ninja
-            moqTracePackage
             openssh
+            openssl
             pkg-config
             python
             ruff
             rustPlatform.bindgenHook
             util-linux
+            (writeShellScriptBin "moq-trace" ''
+              exec ${python}/bin/python -m moq_trace.cli "$@"
+            '')
           ];
+          shellHook = ''
+            export PYTHONPATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/python/src''${PYTHONPATH:+:$PYTHONPATH}"
+          '';
           hardeningDisable = [ "fortify" ];
         };
 
