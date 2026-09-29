@@ -210,6 +210,9 @@ class IngestTests(unittest.TestCase):
                     "SELECT role, min(smoothed_rtt_us), min(elapsed_ns) FROM network_recovery GROUP BY role"
                 ).fetchall()
                 loss = connection.execute("SELECT role, elapsed_ns, packet_number FROM network_losses").fetchall()
+                recovery_types = {
+                    name: kind for name, kind, *_ in connection.execute("DESCRIBE network_recovery").fetchall()
+                }
                 output = root / "network.png"
                 plot_network(output, PlotOptions(None, 1, 1_200, 10, "test"), connection, True, True)
                 self.assertGreater(output.stat().st_size, 0)
@@ -222,6 +225,8 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(roles, [("egress", "subscriber", 0), ("ingress", "publisher", 0)])
         self.assertEqual(rtt, [("subscriber 1", 1_000.0, 0)])
         self.assertEqual(loss, [("subscriber 1", 1_000_000_000, 7)])
+        self.assertEqual(recovery_types["min_rtt_us"], "DOUBLE")
+        self.assertEqual(recovery_types["bytes_in_flight"], "BIGINT")
 
     def test_a_value_settled_before_the_window_is_drawn_from_zero(self) -> None:
         connection = duckdb.connect(":memory:")
@@ -250,11 +255,16 @@ class IngestTests(unittest.TestCase):
                     connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
                     for table in ("network_datagrams", "network_recovery", "network_losses")
                 ]
+                empty_types = {
+                    name: kind for name, kind, *_ in connection.execute("DESCRIBE network_losses").fetchall()
+                }
             finally:
                 connection.close()
 
         self.assertEqual((capabilities.packets, capabilities.qlog_connections), (False, 0))
         self.assertEqual(counts, [0, 0, 0])
+        self.assertEqual(empty_types["packet_number"], "UBIGINT")
+        self.assertEqual(empty_types["bytes"], "INTEGER")
 
 
 if __name__ == "__main__":

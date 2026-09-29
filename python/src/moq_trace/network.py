@@ -17,16 +17,15 @@ the same field also holds `rtt_unit=s`.
 
 from __future__ import annotations
 
-import csv
 import ipaddress
 import json
 import pathlib
 import re
 import struct
-import tempfile
 from collections.abc import Iterator
 
 import duckdb
+import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import TraceError
@@ -211,53 +210,52 @@ def read_qlog(path: pathlib.Path) -> Iterator[tuple[int, str, str, dict]]:
 def _load(
     connection: duckdb.DuckDBPyConnection,
     table: str,
-    columns: tuple[tuple[str, str], ...],
+    columns: pa.Schema,
     rows: list[tuple],
-    staging: pathlib.Path,
 ) -> None:
-    """Materialize rows as a typed table, staged through CSV for speed.
+    """Materialize typed rows in DuckDB, including an empty table."""
 
-    A table with no rows is created from its column list, because a CSV reader
-    cannot type an empty file.
-    """
-
-    connection.execute(f"CREATE TABLE {table}({', '.join(f'{name} {kind}' for name, kind in columns)})")
-    if not rows:
-        return
-    path = staging / f"{table}.csv"
-    with path.open("w", newline="") as handle:
-        csv.writer(handle).writerows(rows)
-    types = ", ".join(f"'{name}': '{kind}'" for name, kind in columns)
-    connection.execute(
-        f"INSERT INTO {table} SELECT * FROM read_csv(?, header = false, columns = {{{types}}})",
-        [str(path)],
+    batch = pa.Table.from_arrays(
+        [pa.array([row[index] for row in rows], type=field.type) for index, field in enumerate(columns)],
+        schema=columns,
     )
+    connection.register("network_batch", batch)
+    try:
+        connection.execute(f"CREATE TABLE {table} AS SELECT * FROM network_batch")
+    finally:
+        connection.unregister("network_batch")
 
 
-_DATAGRAM_COLUMNS = (
-    ("elapsed_ns", "BIGINT"),
-    ("direction", "VARCHAR"),
-    ("peer", "VARCHAR"),
-    ("role", "VARCHAR"),
-    ("bytes", "INTEGER"),
+_DATAGRAM_COLUMNS = pa.schema(
+    [
+        ("elapsed_ns", pa.int64()),
+        ("direction", pa.string()),
+        ("peer", pa.string()),
+        ("role", pa.string()),
+        ("bytes", pa.int32()),
+    ]
 )
-_RECOVERY_COLUMNS = (
-    ("elapsed_ns", "BIGINT"),
-    ("connection", "VARCHAR"),
-    ("smoothed_rtt_us", "DOUBLE"),
-    ("min_rtt_us", "DOUBLE"),
-    ("latest_rtt_us", "DOUBLE"),
-    ("congestion_window", "BIGINT"),
-    ("bytes_in_flight", "BIGINT"),
-    ("role", "VARCHAR"),
+_RECOVERY_COLUMNS = pa.schema(
+    [
+        ("elapsed_ns", pa.int64()),
+        ("connection", pa.string()),
+        ("smoothed_rtt_us", pa.float64()),
+        ("min_rtt_us", pa.float64()),
+        ("latest_rtt_us", pa.float64()),
+        ("congestion_window", pa.int64()),
+        ("bytes_in_flight", pa.int64()),
+        ("role", pa.string()),
+    ]
 )
-_LOSS_COLUMNS = (
-    ("elapsed_ns", "BIGINT"),
-    ("connection", "VARCHAR"),
-    ("packet_number", "UBIGINT"),
-    ("bytes", "INTEGER"),
-    ("trigger", "VARCHAR"),
-    ("role", "VARCHAR"),
+_LOSS_COLUMNS = pa.schema(
+    [
+        ("elapsed_ns", pa.int64()),
+        ("connection", pa.string()),
+        ("packet_number", pa.uint64()),
+        ("bytes", pa.int32()),
+        ("trigger", pa.string()),
+        ("role", pa.string()),
+    ]
 )
 
 
@@ -291,10 +289,9 @@ def _ingest_packets(
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
-    staging: pathlib.Path,
 ) -> bool:
     if manifest.pcap is None:
-        _load(connection, "network_datagrams", _DATAGRAM_COLUMNS, [], staging)
+        _load(connection, "network_datagrams", _DATAGRAM_COLUMNS, [])
         return False
     datagrams = list(read_datagrams(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes))
     inbound: dict[str, int] = {}
@@ -309,7 +306,7 @@ def _ingest_packets(
         (realtime_ns - manifest.realtime_offset_ns - origin_ns, direction, peer, roles[peer], size)
         for realtime_ns, direction, peer, size in datagrams
     ]
-    _load(connection, "network_datagrams", _DATAGRAM_COLUMNS, [row for row in rows if row[0] >= 0], staging)
+    _load(connection, "network_datagrams", _DATAGRAM_COLUMNS, [row for row in rows if row[0] >= 0])
     return True
 
 
@@ -318,7 +315,6 @@ def _ingest_qlog(
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
-    staging: pathlib.Path,
 ) -> int:
     files = []
     if manifest.qlog_dir is not None and (root / manifest.qlog_dir).is_dir():
@@ -361,7 +357,7 @@ def _ingest_qlog(
         # it changes, and a value settled during the handshake, such as the
         # minimum RTT, still holds inside the window.
         kept = rows if table == "network_recovery" else [row for row in rows if row[0] >= 0]
-        _load(connection, table, columns, [(*row, roles[row[1]]) for row in kept], staging)
+        _load(connection, table, columns, [(*row, roles[row[1]]) for row in kept])
     return len(roles)
 
 
@@ -381,8 +377,6 @@ def ingest(
 
     manifest = read_manifest(manifest_path)
     root = manifest_path.parent
-    with tempfile.TemporaryDirectory(prefix=".moq-trace-network-") as directory:
-        staging = pathlib.Path(directory)
-        packets = _ingest_packets(connection, manifest, root, origin_ns, staging)
-        qlog_connections = _ingest_qlog(connection, manifest, root, origin_ns, staging)
+    packets = _ingest_packets(connection, manifest, root, origin_ns)
+    qlog_connections = _ingest_qlog(connection, manifest, root, origin_ns)
     return NetworkCapabilities(packets=packets, qlog_connections=qlog_connections)
