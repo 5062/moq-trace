@@ -174,20 +174,20 @@ def plot_latency_cdf(
     options: PlotOptions,
     connection: duckdb.DuckDBPyConnection,
 ) -> None:
-    """Render per-copy object latency as a body ECDF and a log tail CCDF."""
+    """Render per-copy object latency beside the distribution of each processing phase."""
 
-    fig, (ecdf, ccdf) = plt.subplots(1, 2, figsize=(13, 5.2))
+    fig, (ecdf, phases) = plt.subplots(1, 2, figsize=(15, 6))
     counts = []
     for index, (table, metric, label) in enumerate(_OBJECT_SPANS):
         values = _values_us(connection, table, metric)
         if not values:
             raise ValueError(f"cannot plot object latency without {metric} samples")
-        _draw_distribution(ecdf, ccdf, values, label, index)
+        _draw_distribution(ecdf, None, values, label, index)
         counts.append(len(values))
-    _decorate_distribution(ecdf, ccdf, min(counts))
-    ecdf.set_title("Distribution")
-    ccdf.set_title("Tail")
-    _save(fig, path, f"Object latency per copy | {describe(options)}")
+    _decorate_distribution(ecdf, None, min(counts))
+    ecdf.set_title("Object latency per copy")
+    _draw_phase_cdfs(phases, connection)
+    _save(fig, path, f"Latency CDF | {describe(options)}")
 
 
 def plot_latency_comparison(
@@ -233,14 +233,14 @@ class _Row:
 # phases below them rather than adding to them.
 _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     (
-        "End to end, per copy",
+        "End to end",
         (
             _Row("QUIC-inclusive span", "quic_object_samples", "", "quic_full_span", True),
             _Row("MoQ object span", "object_samples", "", "full_span", True),
         ),
     ),
     (
-        "RX QUIC, per packet",
+        "RX QUIC",
         (
             _Row("Packet span", "packet_samples", "", "rx_packet_span", True),
             _Row("Header parse", "packet", "rx", "header_parse"),
@@ -254,7 +254,7 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
         ),
     ),
     (
-        "MoQ RX, per object",
+        "RX MoQ",
         (
             _Row("Header parse", "object", "rx", "header_parse"),
             _Row("Create", "object", "rx", "create"),
@@ -263,7 +263,7 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
         ),
     ),
     (
-        "MoQ TX, per copy",
+        "TX MoQ",
         (
             _Row("Clone", "object", "tx", "clone"),
             _Row("Header encode", "object", "tx", "header_encode"),
@@ -271,7 +271,7 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
         ),
     ),
     (
-        "TX QUIC, per packet",
+        "TX QUIC",
         (
             _Row("Packet span", "packet_samples", "", "tx_packet_span", True),
             _Row("Frame encode", "packet", "tx", "frame_encode"),
@@ -328,6 +328,56 @@ def _row_summary(connection: duckdb.DuckDBPyConnection, row: _Row) -> tuple[floa
     if summary is None or summary[0] == 0:
         return None
     return tuple(max(float(value), _FLOOR_US) for value in summary[1])
+
+
+# Line style per section of phase rows, so phases stay distinct once the color
+# cycle repeats. Sections without phases of their own are absent.
+_SECTION_STYLES = {
+    "RX QUIC": "-",
+    "RX MoQ": "--",
+    "TX MoQ": "-.",
+    "TX QUIC": ":",
+}
+
+
+def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
+    """Draw one ECDF per processing phase on a log time axis.
+
+    Only phases are drawn, not the spans that contain them, and each phase sums
+    its occurrences within one unit, as in the breakdown. The legend names the
+    unit, because a packet phase and an object phase are counted differently.
+    """
+
+    drawn = 0
+    for section, rows in _SECTIONS:
+        style = _SECTION_STYLES.get(section)
+        if style is None:
+            continue
+        layer, unit = section.split(", per ")
+        color = 0
+        for row in rows:
+            if row.container:
+                continue
+            query, parameters = _row_query(row)
+            values = [
+                max(float(value), _FLOOR_US)
+                for (value,) in connection.execute(f"SELECT us FROM ({query}) ORDER BY us", parameters).fetchall()
+            ]
+            if not values:
+                continue
+            axis.ecdf(values, color=f"C{color}", linestyle=style, label=f"{layer} {row.label.lower()} (per {unit})")
+            color += 1
+            drawn += 1
+    if drawn == 0:
+        raise ValueError("cannot plot phase distributions without any phase samples")
+    axis.set_xscale("log")
+    _plain_log(axis.xaxis)
+    axis.set_xlabel("Duration per unit (µs, log)")
+    axis.set_ylabel("Fraction of units at or below")
+    axis.set_ylim(0, 1.005)
+    axis.set_title("Processing phases")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5))
 
 
 def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
