@@ -633,11 +633,12 @@ def plot_network(
 
     fig, (throughput, rtt, loss, window) = plt.subplots(4, 1, figsize=(13, 12), sharex=True)
     if packets:
-        payload_mbps = options.fps * options.object_size * 8 / 1e6
-        for index, (label, direction, role_filter, expected) in enumerate(
+        # A trace analyzed by hand records no frame rate, so it gets no reference line.
+        payload_mbps = None if options.fps is None else options.fps * options.object_size * 8 / 1e6
+        for index, (label, direction, role_filter, fan_out) in enumerate(
             (
-                ("publisher to relay", "ingress", "role = 'publisher'", payload_mbps),
-                ("relay to subscribers", "egress", "role <> 'publisher'", payload_mbps * options.subscribers),
+                ("publisher to relay", "ingress", "role = 'publisher'", 1),
+                ("relay to subscribers", "egress", "role <> 'publisher'", options.subscribers),
             )
         ):
             # The capture stops partway through its last second, which would read
@@ -656,10 +657,14 @@ def plot_network(
                 color=f"C{index}",
                 label=label,
             )
-            throughput.axhline(expected, color=f"C{index}", linestyle="--", linewidth=1)
+            if payload_mbps is not None:
+                throughput.axhline(payload_mbps * fan_out, color=f"C{index}", linestyle="--", linewidth=1)
         throughput.set_ylim(bottom=0)
         throughput.legend(loc="lower right", fontsize=8)
-        throughput.set_title("Throughput per second from the packet capture; dashed is the workload's payload rate")
+        title = "Throughput per second from the packet capture"
+        if payload_mbps is not None:
+            title += "; dashed is the workload's payload rate"
+        throughput.set_title(title)
     else:
         throughput.set_title("Throughput")
         _no_data(throughput, "No packet capture in this run (run with --capture-packets)")

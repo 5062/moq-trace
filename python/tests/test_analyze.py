@@ -27,6 +27,7 @@ from moq_trace.analyze import (  # noqa: E402
     _select_process,
     _select_window,
     _validate_raw,
+    _validate_truncation,
     run,
 )
 from moq_trace.artifact import open_artifact  # noqa: E402
@@ -141,6 +142,47 @@ class SqlAnalysisTests(unittest.TestCase):
         self.insert("udp_socket_start", trace_id=99)
         self.insert("udp_socket_start", trace_id=99)
         _validate_raw(self.connection)
+
+    def unfinished_object(self, trace_id: int, timestamp_ns: int) -> None:
+        self.insert(
+            "moq_object_start",
+            ctf_timestamp_ns=trace_id * 1_000,
+            timestamp_ns=timestamp_ns,
+            trace_id=trace_id,
+            logical_group=8,
+            logical_frame=0,
+            session_id=trace_id,
+            connection_id=trace_id,
+            direction="rx",
+            track_alias=1,
+            group_id=5,
+            object_id=0,
+            stream_id=trace_id * 10,
+            stream_offset_start=0,
+        )
+
+    def test_a_lifecycle_cut_off_after_the_window_is_accepted(self) -> None:
+        """A relay killed at the end of a run leaves its last object unfinished."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.unfinished_object(3, 900_000)
+        _validate_raw(self.connection)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        self.connection.execute("UPDATE analysis_window SET end_ns = 500_000")
+
+        _validate_truncation(self.connection)
+
+    def test_a_lifecycle_unfinished_inside_the_window_is_rejected(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.unfinished_object(3, 150_000)
+        _validate_raw(self.connection)
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        self.connection.execute("UPDATE analysis_window SET end_ns = 500_000")
+
+        with self.assertRaisesRegex(TraceError, "object starts without completions inside the analysis window"):
+            _validate_truncation(self.connection)
 
     def test_analysis_accepts_nonconsecutive_groups(self) -> None:
         for trace_id, direction in ((1, "rx"), (2, "tx"), (3, "rx"), (4, "tx")):

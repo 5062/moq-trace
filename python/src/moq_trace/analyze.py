@@ -191,11 +191,6 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
         )
         _require_zero(
             connection,
-            f"SELECT count(*) FROM {start} ANTI JOIN {finish} USING (trace_id)",
-            f"{kind} starts without completions",
-        )
-        _require_zero(
-            connection,
             f"SELECT count(*) FROM {lifecycles} WHERE end_ns < start_ns",
             f"{kind}s completing before they start",
         )
@@ -250,6 +245,29 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
            )""",
         "logical objects do not have exactly one ingress lifecycle",
     )
+
+
+def _validate_truncation(connection: duckdb.DuckDBPyConnection) -> None:
+    """Reject lifecycles that never complete, unless the recording cut them off.
+
+    A relay without a graceful stop is killed, and an object or packet it was
+    handling then never records its end. Those start after the window closes,
+    since the window ends a cooldown before the last event, and they reach no
+    metric because lifecycles pair each start with its end. One that starts
+    inside the window lost its end some other way, which is an instrumentation
+    fault.
+    """
+
+    for kind, start, finish in (
+        ("object", "moq_object_start", "moq_object_end"),
+        ("packet", "quic_packet_start", "quic_packet_end"),
+    ):
+        _require_zero(
+            connection,
+            f"""SELECT count(*) FROM {start} ANTI JOIN {finish} USING (trace_id)
+                WHERE timestamp_ns <= (SELECT end_ns FROM analysis_window)""",
+            f"{kind} starts without completions inside the analysis window",
+        )
 
 
 def _select_window(
@@ -717,6 +735,7 @@ def run(
                 warmup_seconds=window.warmup_seconds,
                 cooldown_seconds=window.cooldown_seconds,
             )
+            _validate_truncation(connection)
             coverage.resolve(connection)
             _derive_samples(connection, origin)
             _define_metrics(connection)

@@ -195,6 +195,8 @@ class IngestTests(unittest.TestCase):
                 output = root / "network.png"
                 plot_network(output, PlotOptions(None, 1, 1_200, 10, "test"), connection, True, True)
                 self.assertGreater(output.stat().st_size, 0)
+                # A trace analyzed by hand records no frame rate.
+                plot_network(output, PlotOptions(None, 1, 1_200, None, "test"), connection, True, True)
             finally:
                 connection.close()
 
