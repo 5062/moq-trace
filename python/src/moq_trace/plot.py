@@ -106,12 +106,12 @@ def _rx_packet_metric(available: set[str]) -> str:
     )
 
 
-# Per-copy object latency, the headline of every run. The QUIC-inclusive span
+# Per-copy object latency, the headline of every run. The QUIC+MoQ span
 # contains the MoQ span, so the two are drawn as nested measurements rather than
 # alternatives.
 _OBJECT_SPANS = (
-    ("object_samples", "full_span", "MoQ object span"),
-    ("quic_object_samples", "quic_full_span", "QUIC-inclusive span"),
+    ("object_samples", "full_span", "MoQ"),
+    ("quic_object_samples", "quic_full_span", "QUIC+MoQ"),
 )
 
 
@@ -237,14 +237,13 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     (
         "End to end",
         (
-            _Row("QUIC-inclusive span", "quic_object_samples", "", "quic_full_span", True),
-            _Row("MoQ object span", "object_samples", "", "full_span", True),
+            _Row("QUIC+MoQ", "quic_object_samples", "", "quic_full_span", True),
+            _Row("MoQ", "object_samples", "", "full_span", True),
         ),
     ),
     (
         "RX QUIC",
         (
-            _Row("Packet span", "packet_samples", "", "rx_packet_span", True),
             _Row("Header parse", "packet", "rx", "header_parse"),
             _Row("Routing", "packet", "rx", "routing"),
             _Row("Scheduling", "packet", "rx", "scheduling"),
@@ -275,7 +274,6 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
     (
         "TX QUIC",
         (
-            _Row("Packet span", "packet_samples", "", "tx_packet_span", True),
             _Row("Frame encode", "packet", "tx", "frame_encode"),
             _Row("Packet encrypt", "packet", "tx", "packet_encrypt"),
         ),
@@ -479,7 +477,7 @@ def plot_breakdown(
 ) -> None:
     """Render where a copy's time goes, one quantile box per phase."""
 
-    _breakdown_figure(path, "Where the time goes", describe(options), (ComparisonRun("", connection),))
+    _breakdown_figure(path, "Latency breakdown", describe(options), (ComparisonRun("", connection),))
 
 
 def plot_breakdown_comparison(
