@@ -220,29 +220,21 @@ def plot_latency_comparison(
 
 @dataclasses.dataclass(frozen=True)
 class _Row:
-    """One breakdown row: a span that contains other rows, or a single phase."""
+    """One breakdown row: a single processing phase of a packet, object, or copy."""
 
     label: str
     source: str
     direction: str
     name: str
-    container: bool = False
 
 
 # Rows in pipeline order. Phase rows sum every occurrence of the phase within one
 # unit (packet, object, or copy), because a phase that repeats per chunk only
-# means something as the unit's total. Spans are drawn hollow: they contain the
-# phases below them rather than adding to them. The RX `application` phase is
-# left out: only a stack that runs MoQ inside packet processing records it, and
-# that time already appears in the MoQ rows.
+# means something as the unit's total. Spans that contain other rows, such as
+# the end-to-end latencies, are left out; `latency_cdf` shows those. The RX
+# `application` phase is left out too: only a stack that runs MoQ inside packet
+# processing records it, and that time already appears in the MoQ rows.
 _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
-    (
-        "End to end",
-        (
-            _Row("QUIC+MoQ", "quic_object_samples", "", "quic_full_span", True),
-            _Row("MoQ", "object_samples", "", "full_span", True),
-        ),
-    ),
     (
         "RX QUIC",
         (
@@ -251,7 +243,6 @@ _SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
             # Quinn's `scheduling` phase is the wait in the connection's queue,
             # including waking its task, so it is labeled for what it measures.
             _Row("Queuing", "packet", "rx", "scheduling"),
-            _Row("Processing after queuing", "packet_samples", "", "rx_packet_processing_span", True),
             _Row("Header unprotect", "packet", "rx", "header_unprotect"),
             _Row("Payload decrypt", "packet", "rx", "payload_decrypt"),
             _Row("Frame process", "packet", "rx", "frame_process"),
@@ -293,8 +284,6 @@ _FLOOR_US = 0.01
 def _row_query(row: _Row) -> tuple[str, list[str]]:
     """SQL yielding one duration in microseconds per unit of `row`."""
 
-    if row.source.endswith("_samples"):
-        return f"SELECT latency_ns / 1000.0 AS us FROM {row.source} WHERE metric = ?", [row.name]
     if row.source == "packet":
         return (
             """SELECT sum(phase.end_ns::HUGEINT - phase.start_ns::HUGEINT) / 1000.0 AS us
@@ -357,8 +346,6 @@ def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
             continue
         color = 0
         for row in rows:
-            if row.container:
-                continue
             query, parameters = _row_query(row)
             values = [
                 max(float(value), _FLOOR_US)
@@ -412,7 +399,7 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
                     q3 - q1,
                     left=q1,
                     height=band * 0.8,
-                    color="white" if row.container else color,
+                    color=color,
                     edgecolor=color,
                     linewidth=1.2,
                 )
