@@ -121,12 +121,15 @@ def bench(
 
     Every profile and binary is checked before the first run starts, so a typo
     fails immediately instead of after the other relays have run. A failing run
-    does not stop the ones after it; its error is returned in its result.
+    does not stop the ones after it; its error is returned in its result. When
+    rendering is on and at least two traced runs succeed, their comparison
+    figures are written under `output / "plots"`.
     """
 
     # Deferred like the CLI's own imports: the runner pulls in the analysis stack,
     # which listing profiles for `--help` does not need.
     from .experiment import ExperimentError, run
+    from .render import render_relays
 
     checkouts = checkouts or {}
     unknown = sorted(set(checkouts) - set(relays))
@@ -147,4 +150,9 @@ def bench(
             results.append(BenchResult(relay=name, path=run(config)))
         except (OSError, RuntimeError, ValueError) as error:
             results.append(BenchResult(relay=name, error=str(error)))
+    databases = {
+        result.relay: result.path for result in results if result.path is not None and result.path.suffix == ".duckdb"
+    }
+    if settings.get("render", True) and len(databases) >= 2:
+        render_relays(output, databases)
     return results

@@ -1,24 +1,29 @@
-"""Build the figures the renderer writes from a DuckDB trace artifact."""
+"""Build the figures the renderer writes from a DuckDB trace artifact.
+
+Each figure answers one question. `latency_cdf` shows how long an object copy
+takes, with its tail on a log scale. `breakdown` shows where that time goes,
+phase by phase. `stability` shows whether latency drifts or stalls over the run,
+and lines packet stalls up under object stalls. `object_timeline` drills into
+single objects. The comparison figures repeat the first two across runs.
+"""
 
 from __future__ import annotations
 
 import dataclasses
 import pathlib
+from collections.abc import Sequence
 
 import duckdb
 import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib import ticker  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
+from matplotlib.axis import Axis  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-
-
-def _color(index: int, count: int) -> tuple[float, float, float, float]:
-    """Select a stable color from a palette sized for the rendered series."""
-
-    palette = matplotlib.colormaps["tab20"].resampled(max(count, 1))
-    return palette(index % max(count, 1))
+from matplotlib.patches import Patch  # noqa: E402
 
 
 @dataclasses.dataclass(frozen=True)
@@ -32,7 +37,17 @@ class PlotOptions:
     protocol: str | None
 
 
-def _context(options: PlotOptions) -> str:
+@dataclasses.dataclass(frozen=True)
+class ComparisonRun:
+    """One labeled artifact in a figure that compares several runs."""
+
+    label: str
+    connection: duckdb.DuckDBPyConnection
+
+
+def describe(options: PlotOptions) -> str:
+    """Summarize a run's workload for a figure subtitle."""
+
     affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
     values = [affinity, f"{options.subscribers} subscriber(s)", f"{options.object_size} bytes"]
     if options.fps is not None:
@@ -42,128 +57,116 @@ def _context(options: PlotOptions) -> str:
     return " | ".join(values)
 
 
-@dataclasses.dataclass(frozen=True)
-class CdfSeries:
-    """One metric and its empirical CDF presentation."""
-
-    metric: str
-    label: str
-    connection: duckdb.DuckDBPyConnection
-    table: str
-    color_index: int
-    line_style: str
-    annotation_lane: int
+def _format_us(value: float) -> str:
+    return f"{value:.3g}"
 
 
-@dataclasses.dataclass(frozen=True)
-class PerCopyCdfRun:
-    """Per-copy object latency samples for one comparison workload."""
+def _plain_log(axis: Axis) -> None:
+    """Label a log time axis with plain numbers instead of powers of ten."""
 
-    label: str
-    connection: duckdb.DuckDBPyConnection
-
-
-_METRIC_PLOTS = {
-    "object": ("object_samples", "MoQ relay latency"),
-    "quic_object": ("quic_object_samples", "QUIC-inclusive relay latency"),
-    "packet": ("packet_samples", "QUIC packet diagnostics"),
-}
+    axis.set_major_formatter(ticker.FuncFormatter(lambda value, _position: f"{value:g}"))
+    axis.set_minor_formatter(ticker.NullFormatter())
 
 
-def _labels(connection: duckdb.DuckDBPyConnection, domain: str) -> dict[str, str]:
-    return dict(
-        connection.execute(
-            "SELECT metric, label FROM metric_definitions WHERE domain = ? ORDER BY display_order",
-            [domain],
+def _save(fig: Figure, path: pathlib.Path, title: str) -> None:
+    fig.suptitle(title)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def _metrics(connection: duckdb.DuckDBPyConnection, table: str) -> set[str]:
+    return {metric for (metric,) in connection.execute(f"SELECT DISTINCT metric FROM {table}").fetchall()}
+
+
+def _values_us(connection: duckdb.DuckDBPyConnection, table: str, metric: str) -> list[float]:
+    return [
+        value
+        for (value,) in connection.execute(
+            f"SELECT latency_ns / 1000.0 FROM {table} WHERE metric = ? ORDER BY latency_ns",
+            [metric],
         ).fetchall()
-    )
-
-
-def _statistics(connection: duckdb.DuckDBPyConnection, domain: str) -> dict[str, dict[str, float | int]]:
-    rows = connection.execute(
-        """SELECT metric, count, mean, p50, p95, p99, max
-           FROM metric_statistics WHERE domain = ? ORDER BY metric""",
-        [domain],
-    ).fetchall()
-    return {
-        metric: {
-            "count": int(count),
-            "mean": float(mean),
-            "p50": float(p50),
-            "p95": float(p95),
-            "p99": float(p99),
-            "max": float(maximum),
-        }
-        for metric, count, mean, p50, p95, p99, maximum in rows
-    }
-
-
-def _statistic(connection: duckdb.DuckDBPyConnection, metric: str) -> dict[str, float | int]:
-    row = connection.execute(
-        "SELECT count, mean, p50, p95, p99, max FROM metric_statistics WHERE metric = ?",
-        [metric],
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"cannot summarize missing metric {metric}")
-    count, mean, p50, p95, p99, maximum = row
-    return {
-        "count": int(count),
-        "mean": float(mean),
-        "p50": float(p50),
-        "p95": float(p95),
-        "p99": float(p99),
-        "max": float(maximum),
-    }
-
-
-def _samples(
-    connection: duckdb.DuckDBPyConnection,
-    table: str,
-    metric: str,
-) -> list[tuple[float, float]]:
-    return connection.execute(
-        f"SELECT elapsed_ns / 1000000000.0, latency_ns / 1000000.0 FROM {table} WHERE metric = ? ORDER BY elapsed_ns",
-        [metric],
-    ).fetchall()
-
-
-def _plot_cdf_series(axis: Axes, series: CdfSeries) -> int:
-    """Render one empirical CDF and return its sample count."""
-
-    color = _color(series.color_index, 20)
-    percentiles = (("p50", 0.50, "o"), ("p99", 0.99, "s"))
-    values_us = [
-        latency_ms * 1_000 for _elapsed_s, latency_ms in _samples(series.connection, series.table, series.metric)
     ]
-    if len(values_us) == 0:
-        raise ValueError(f"cannot plot CDF without {series.metric} samples")
-    axis.ecdf(
-        values_us,
-        label=f"{series.label} (n={len(values_us)})",
-        color=color,
-        linestyle=series.line_style,
-        linewidth=2,
+
+
+def _rx_packet_metric(available: set[str]) -> str:
+    """The RX packet metric that compares across stacks.
+
+    Prefer the transport's own share of the packet, so a stack that runs the
+    application inside packet processing plots comparably with one that does not.
+    """
+
+    return next(
+        metric
+        for metric in ("rx_packet_processing_span", "rx_packet_transport_span", "rx_packet_span")
+        if metric in available or metric == "rx_packet_span"
     )
-    summary = _statistic(series.connection, series.metric)
-    for name, cumulative, marker in percentiles:
-        latency_us = float(summary[name])
-        axis.scatter(
-            [latency_us],
-            [cumulative],
+
+
+# Per-copy object latency, the headline of every run. The QUIC-inclusive span
+# contains the MoQ span, so the two are drawn as nested measurements rather than
+# alternatives.
+_OBJECT_SPANS = (
+    ("object_samples", "full_span", "MoQ object span"),
+    ("quic_object_samples", "quic_full_span", "QUIC-inclusive span"),
+)
+
+
+def _draw_distribution(
+    ecdf: Axes,
+    ccdf: Axes | None,
+    values_us: Sequence[float],
+    label: str,
+    index: int,
+) -> None:
+    """Draw one sorted sample set as an ECDF and, optionally, its tail CCDF."""
+
+    count = len(values_us)
+    p50 = values_us[int(0.50 * (count - 1))]
+    p99 = values_us[int(0.99 * (count - 1))]
+    color = f"C{index}"
+    ecdf.ecdf(
+        values_us,
+        color=color,
+        label=f"{label}: p50 {_format_us(p50)}, p99 {_format_us(p99)}, max {_format_us(values_us[-1])} µs (n={count})",
+    )
+    ecdf.plot([p50], [0.5], marker="o", color=color)
+    if ccdf is not None:
+        # The survival function steps from 1 down to 1/n, so the slowest sample
+        # stays visible on the log axis instead of dropping to zero.
+        ccdf.step(
+            values_us,
+            [1 - rank / count for rank in range(count)],
+            where="post",
             color=color,
-            marker=marker,
-            s=52,
-            zorder=3,
         )
-        vertical_offset = 8 + series.annotation_lane * 13 if name == "p50" else -16 - series.annotation_lane * 13
-        axis.annotate(
-            f"{name} {latency_us:.1f} µs",
-            (latency_us, cumulative),
-            xytext=(7, vertical_offset),
-            textcoords="offset points",
-            color=color,
-        )
-    return len(values_us)
+
+
+def _decorate_distribution(ecdf: Axes, ccdf: Axes | None, minimum_count: int) -> None:
+    ecdf.set_ylabel("Fraction of copies at or below")
+    ecdf.set_xlabel("Latency (µs)")
+    ecdf.set_ylim(0, 1.005)
+    ecdf.legend(loc="lower right", fontsize=8)
+    ecdf.grid(alpha=0.25)
+    if ccdf is None:
+        return
+    ccdf.set_yscale("log")
+    ccdf.set_ylim(0.5 / max(minimum_count, 1), 1.2)
+    ccdf.set_ylabel("Fraction of copies slower (log)")
+    ccdf.grid(alpha=0.25)
+    ccdf.set_xlabel("Latency (µs)")
+    for fraction, name in ((0.5, "p50"), (0.01, "p99"), (0.001, "p99.9")):
+        if fraction * minimum_count >= 1:
+            ccdf.axhline(fraction, color="gray", linewidth=0.8, linestyle="--")
+            ccdf.annotate(
+                name,
+                (0, fraction),
+                xycoords=("axes fraction", "data"),
+                xytext=(3, 2),
+                textcoords="offset points",
+                fontsize=8,
+            )
 
 
 def plot_latency_cdf(
@@ -171,185 +174,360 @@ def plot_latency_cdf(
     options: PlotOptions,
     connection: duckdb.DuckDBPyConnection,
 ) -> None:
-    """Render the empirical distributions of MoQ and QUIC-inclusive object latency."""
+    """Render per-copy object latency as a body ECDF and a log tail CCDF."""
 
-    series = (
-        CdfSeries("full_span", "MoQ", connection, "object_samples", 0, "-", 0),
-        CdfSeries(
-            "quic_full_span",
-            "QUIC",
-            connection,
-            "quic_object_samples",
-            1,
-            "--",
-            1,
-        ),
-    )
-    fig, axis = plt.subplots(figsize=(9.5, 5.5))
-    for item in series:
-        _plot_cdf_series(axis, item)
-
-    fig.suptitle(f"Object latency CDF | {_context(options)}")
-    axis.set_xlabel("Latency (µs)")
-    axis.set_ylabel("CDF")
-    axis.grid(alpha=0.25)
-    axis.legend(fontsize=8)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+    fig, (ecdf, ccdf) = plt.subplots(1, 2, figsize=(13, 5.2))
+    counts = []
+    for index, (table, metric, label) in enumerate(_OBJECT_SPANS):
+        values = _values_us(connection, table, metric)
+        if not values:
+            raise ValueError(f"cannot plot object latency without {metric} samples")
+        _draw_distribution(ecdf, ccdf, values, label, index)
+        counts.append(len(values))
+    _decorate_distribution(ecdf, ccdf, min(counts))
+    ecdf.set_title("Distribution")
+    ccdf.set_title("Tail")
+    _save(fig, path, f"Object latency per copy | {describe(options)}")
 
 
-def plot_per_copy_latency_cdf(
+def plot_latency_comparison(
     path: pathlib.Path,
-    options: PlotOptions,
-    runs: tuple[PerCopyCdfRun, ...],
-    comparison: str,
+    title: str,
+    subtitle: str,
+    runs: Sequence[ComparisonRun],
 ) -> None:
-    """Compare per-copy object latency distributions across workloads."""
+    """Overlay per-copy object latency across runs, body above and tail below."""
 
     if len(runs) < 2:
-        raise ValueError("per-copy latency comparison requires at least two workloads")
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), sharey=True)
-    panels = (
-        (axes[0], "full_span", "MoQ", "object_samples"),
-        (axes[1], "quic_full_span", "QUIC+MoQ", "quic_object_samples"),
-    )
-    line_styles = ("-", "--", ":", "-.")
-    for axis, metric, title, table in panels:
+        raise ValueError("a latency comparison requires at least two runs")
+    fig, axes = plt.subplots(2, len(_OBJECT_SPANS), figsize=(14, 9), sharex="col")
+    for column, (table, metric, label) in enumerate(_OBJECT_SPANS):
+        ecdf, ccdf = axes[0][column], axes[1][column]
+        counts = []
         for index, run in enumerate(runs):
-            _plot_cdf_series(
-                axis,
-                CdfSeries(
-                    metric,
-                    run.label,
-                    run.connection,
-                    table,
-                    index,
-                    line_styles[index % len(line_styles)],
-                    index,
-                ),
-            )
-        axis.set_title(title)
-        axis.set_xlabel("Latency (µs)")
-        axis.grid(alpha=0.25)
-        axis.legend(fontsize=8)
-    axes[0].set_ylabel("CDF")
-
-    fig.suptitle(f"Per-copy object latency CDF | {_context(options)} | {comparison} | n = copies")
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+            values = _values_us(run.connection, table, metric)
+            if not values:
+                raise ValueError(f"cannot compare {run.label} without {metric} samples")
+            _draw_distribution(ecdf, ccdf, values, run.label, index)
+            counts.append(len(values))
+        _decorate_distribution(ecdf, ccdf, min(counts))
+        ecdf.set_xlabel("")
+        ecdf.set_title(label)
+    _save(fig, path, f"{title} | {subtitle}")
 
 
-def plot_packet_latency_cdf(
+@dataclasses.dataclass(frozen=True)
+class _Row:
+    """One breakdown row: a span that contains other rows, or a single phase."""
+
+    label: str
+    source: str
+    direction: str
+    name: str
+    container: bool = False
+
+
+# Rows in pipeline order. Phase rows sum every occurrence of the phase within one
+# unit (packet, object, or copy), because a phase that repeats per chunk only
+# means something as the unit's total. Spans are drawn hollow: they contain the
+# phases below them rather than adding to them.
+_SECTIONS: tuple[tuple[str, tuple[_Row, ...]], ...] = (
+    (
+        "End to end, per copy",
+        (
+            _Row("QUIC-inclusive span", "quic_object_samples", "", "quic_full_span", True),
+            _Row("MoQ object span", "object_samples", "", "full_span", True),
+        ),
+    ),
+    (
+        "RX QUIC, per packet",
+        (
+            _Row("Packet span", "packet_samples", "", "rx_packet_span", True),
+            _Row("Header parse", "packet", "rx", "header_parse"),
+            _Row("Routing", "packet", "rx", "routing"),
+            _Row("Scheduling", "packet", "rx", "scheduling"),
+            _Row("Processing after scheduling", "packet_samples", "", "rx_packet_processing_span", True),
+            _Row("Header unprotect", "packet", "rx", "header_unprotect"),
+            _Row("Payload decrypt", "packet", "rx", "payload_decrypt"),
+            _Row("Frame process", "packet", "rx", "frame_process"),
+            _Row("Application", "packet", "rx", "application"),
+        ),
+    ),
+    (
+        "MoQ RX, per object",
+        (
+            _Row("Header parse", "object", "rx", "header_parse"),
+            _Row("Create", "object", "rx", "create"),
+            _Row("Payload read", "object", "rx", "payload_read"),
+            _Row("Frame commit", "object", "rx", "frame_commit"),
+        ),
+    ),
+    (
+        "MoQ TX, per copy",
+        (
+            _Row("Clone", "object", "tx", "clone"),
+            _Row("Header encode", "object", "tx", "header_encode"),
+            _Row("Payload write", "object", "tx", "payload_write"),
+        ),
+    ),
+    (
+        "TX QUIC, per packet",
+        (
+            _Row("Packet span", "packet_samples", "", "tx_packet_span", True),
+            _Row("Frame encode", "packet", "tx", "frame_encode"),
+            _Row("Packet encrypt", "packet", "tx", "packet_encrypt"),
+        ),
+    ),
+)
+
+# Quantiles each breakdown row is summarized by: whisker, box, median, box, whisker.
+_BREAKDOWN_QUANTILES = (0.01, 0.25, 0.50, 0.75, 0.99)
+
+# Log axes cannot show a zero duration, so shorter phases are drawn at this floor.
+_FLOOR_US = 0.01
+
+
+def _row_query(row: _Row) -> tuple[str, list[str]]:
+    """SQL yielding one duration in microseconds per unit of `row`."""
+
+    if row.source.endswith("_samples"):
+        return f"SELECT latency_ns / 1000.0 AS us FROM {row.source} WHERE metric = ?", [row.name]
+    if row.source == "packet":
+        return (
+            """SELECT sum(phase.end_ns::HUGEINT - phase.start_ns::HUGEINT) / 1000.0 AS us
+               FROM packet_phase_intervals AS phase
+               JOIN selected_packets AS packet USING (trace_id)
+               WHERE packet.direction = ? AND phase.phase = ?
+                 AND phase.outcome = 'success' AND packet.outcome = 'success'
+               GROUP BY trace_id""",
+            [row.direction, row.name],
+        )
+    units = (
+        "SELECT trace_id FROM selected_rx"
+        if row.direction == "rx"
+        else """SELECT tx.trace_id FROM object_copies AS tx
+                SEMI JOIN selected_rx AS rx ON tx.rx_trace_id = rx.trace_id"""
+    )
+    return (
+        f"""SELECT sum(end_ns::HUGEINT - start_ns::HUGEINT) / 1000.0 AS us
+            FROM object_phase_intervals
+            WHERE phase = ? AND outcome = 'success' AND trace_id IN ({units})
+            GROUP BY trace_id""",
+        [row.name],
+    )
+
+
+def _row_summary(connection: duckdb.DuckDBPyConnection, row: _Row) -> tuple[float, ...] | None:
+    """Quantiles of one row, or None when the provider did not emit it."""
+
+    query, parameters = _row_query(row)
+    summary = connection.execute(
+        f"SELECT count(*), quantile_cont(us, {list(_BREAKDOWN_QUANTILES)}) FROM ({query})",
+        parameters,
+    ).fetchone()
+    if summary is None or summary[0] == 0:
+        return None
+    return tuple(max(float(value), _FLOOR_US) for value in summary[1])
+
+
+def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
+    """Draw every present row as a quantile box per run on a log time axis."""
+
+    band = 0.8 / len(runs)
+    ticks: list[float] = []
+    labels: list[str] = []
+    y = 0.0
+    single = len(runs) == 1
+    for section, rows in _SECTIONS:
+        summaries = [(row, [_row_summary(run.connection, row) for run in runs]) for row in rows]
+        summaries = [(row, values) for row, values in summaries if any(value is not None for value in values)]
+        if not summaries:
+            continue
+        if ticks:
+            axis.axhline(y - 0.25, color="gray", linewidth=0.8)
+        ticks.append(y + 0.15)
+        labels.append(section)
+        y += 1
+        for row, values in summaries:
+            for index, quantiles in enumerate(values):
+                if quantiles is None:
+                    continue
+                low, q1, median, q3, high = quantiles
+                center = y + (index - (len(runs) - 1) / 2) * band
+                color = f"C{index}"
+                axis.hlines(center, low, high, color=color, linewidth=1.2)
+                axis.barh(
+                    center,
+                    q3 - q1,
+                    left=q1,
+                    height=band * 0.8,
+                    color="white" if row.container else color,
+                    edgecolor=color,
+                    linewidth=1.2,
+                )
+                axis.vlines(median, center - band * 0.4, center + band * 0.4, color="black", linewidth=2)
+                if single:
+                    axis.annotate(
+                        f"{_format_us(median)} / {_format_us(high)}",
+                        (1.01, center),
+                        xycoords=("axes fraction", "data"),
+                        va="center",
+                        fontsize=8,
+                    )
+            ticks.append(y)
+            labels.append(f"    {row.label}")
+            y += 1
+    if not ticks:
+        raise ValueError("cannot plot a breakdown without any phase samples")
+    axis.set_yticks(ticks, labels)
+    for tick in axis.get_yticklabels():
+        if not tick.get_text().startswith(" "):
+            tick.set_fontweight("bold")
+    axis.tick_params(axis="y", length=0)
+    axis.set_ylim(y - 0.4, -0.6)
+    axis.set_xscale("log")
+    _plain_log(axis.xaxis)
+    axis.set_xlabel(
+        "Duration per unit (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. "
+        f"Repeated phases are summed per unit; durations under {_FLOOR_US} µs are drawn at {_FLOOR_US} µs."
+    )
+    axis.grid(axis="x", alpha=0.25)
+    if single:
+        axis.annotate(
+            "p50 / p99 µs",
+            (1.01, -0.6),
+            xycoords=("axes fraction", "data"),
+            va="bottom",
+            fontsize=8,
+            fontweight="bold",
+        )
+
+
+def _breakdown_figure(
+    path: pathlib.Path,
+    title: str,
+    subtitle: str,
+    runs: Sequence[ComparisonRun],
+) -> None:
+    rows = sum(len(rows) + 1 for _section, rows in _SECTIONS)
+    fig, axis = plt.subplots(figsize=(12, 1.8 + rows * 0.24 * max(1, len(runs) ** 0.5)))
+    _draw_breakdown(axis, runs)
+    handles = [
+        Patch(facecolor="C0", edgecolor="C0", label="Phase"),
+        Patch(facecolor="white", edgecolor="C0", label="Span containing the phases below it"),
+    ]
+    if len(runs) > 1:
+        handles = [Patch(color=f"C{index}", label=run.label) for index, run in enumerate(runs)]
+    axis.legend(handles=handles, loc="lower right", fontsize=8)
+    _save(fig, path, f"{title} | {subtitle}")
+
+
+def plot_breakdown(
     path: pathlib.Path,
     options: PlotOptions,
     connection: duckdb.DuckDBPyConnection,
 ) -> None:
-    """Compare RX and TX packet processing at the QUIC connection layer."""
+    """Render where a copy's time goes, one quantile box per phase."""
 
-    available = {metric for (metric,) in connection.execute("SELECT DISTINCT metric FROM packet_samples").fetchall()}
-    # Prefer the transport's own share of the packet, so a stack that runs the
-    # application inside packet processing plots comparably with one that does not.
-    rx_metric = next(
-        metric
-        for metric in ("rx_packet_processing_span", "rx_packet_transport_span", "rx_packet_span")
-        if metric in available or metric == "rx_packet_span"
-    )
-    candidates = ((rx_metric, "RX"), ("tx_packet_span", "TX"))
-    series = tuple(
-        CdfSeries(metric, label, connection, "packet_samples", index, "-", 0)
-        for index, (metric, label) in enumerate(candidates)
-        if metric in available
-    )
-    if not series:
-        raise ValueError("cannot plot packet latency without packet samples")
-    fig, axes = plt.subplots(1, len(series), figsize=(6 * len(series), 5.5), sharey=True, squeeze=False)
-    for axis, item in zip(axes[0], series, strict=True):
-        count = _plot_cdf_series(axis, item)
-        axis.set_title(f"{item.label} (n={count})")
-        axis.set_xlabel("Latency (µs)")
-        axis.grid(alpha=0.25)
-    axes[0][0].set_ylabel("CDF")
-
-    fig.suptitle(f"QUIC packet processing latency CDF | {_context(options)}")
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+    _breakdown_figure(path, "Where the time goes", describe(options), (ComparisonRun("", connection),))
 
 
-def plot_metrics(
+def plot_breakdown_comparison(
+    path: pathlib.Path,
+    title: str,
+    subtitle: str,
+    runs: Sequence[ComparisonRun],
+) -> None:
+    """Render the phase breakdown of several runs side by side."""
+
+    if len(runs) < 2:
+        raise ValueError("a breakdown comparison requires at least two runs")
+    _breakdown_figure(path, title, subtitle, runs)
+
+
+def _windows(
+    connection: duckdb.DuckDBPyConnection,
+    table: str,
+    metric: str,
+) -> list[tuple[float, float, float]]:
+    """Per-second p50 and p99 of one metric, keyed by the window's midpoint."""
+
+    return connection.execute(
+        f"""SELECT floor(elapsed_ns / 1e9) + 0.5 AS second,
+                   quantile_cont(latency_ns, 0.50) / 1000.0,
+                   quantile_cont(latency_ns, 0.99) / 1000.0
+            FROM {table} WHERE metric = ? GROUP BY second ORDER BY second""",
+        [metric],
+    ).fetchall()
+
+
+def _draw_windows(axis: Axes, windows: Sequence[tuple[float, float, float]], label: str, index: int) -> None:
+    """Draw per-second p50 as a solid line and p99 as a dashed one of the same color."""
+
+    color = f"C{index}"
+    seconds = [second for second, _p50, _p99 in windows]
+    axis.step(seconds, [p50 for _s, p50, _p in windows], where="mid", color=color, label=label)
+    axis.step(seconds, [p99 for _s, _p, p99 in windows], where="mid", color=color, linestyle="--")
+
+
+def plot_stability(
     path: pathlib.Path,
     options: PlotOptions,
     connection: duckdb.DuckDBPyConnection,
-    domain: str,
 ) -> None:
-    """Render distribution, percentile, and time-series panels for one metric layer."""
+    """Render per-second object and packet latency on one shared time axis.
 
-    table, title = _METRIC_PLOTS[domain]
-    labels = _labels(connection, domain)
-    statistics = _statistics(connection, domain)
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
-    present = [metric for metric in labels if metric in statistics]
-    if not present:
-        raise ValueError("cannot plot a metric layer without samples")
-    for index, metric in enumerate(present):
-        metric_samples = _samples(connection, table, metric)
-        values_ms = [latency_ms for _elapsed_s, latency_ms in metric_samples]
-        axes[0].ecdf(
-            values_ms,
-            label=labels[metric],
-            color=_color(index, len(present)),
-            linewidth=2,
+    Objects slower than the run's p99 are marked individually, so a stall in the
+    object panel can be read straight down to the packet phase that caused it.
+    """
+
+    fig, (objects, packets) = plt.subplots(2, 1, figsize=(13, 7.5), sharex=True, height_ratios=(3, 2))
+    for index, (table, metric, label) in enumerate(_OBJECT_SPANS):
+        windows = _windows(connection, table, metric)
+        if not windows:
+            raise ValueError(f"cannot plot stability without {metric} samples")
+        _draw_windows(objects, windows, label, index)
+        outliers = connection.execute(
+            f"""SELECT elapsed_ns / 1e9, latency_ns / 1000.0 FROM {table}
+                WHERE metric = $metric AND latency_ns > (
+                  SELECT quantile_cont(latency_ns, 0.99) FROM {table} WHERE metric = $metric
+                )""",
+            {"metric": metric},
+        ).fetchall()
+        objects.scatter(
+            [second for second, _us in outliers],
+            [us for _second, us in outliers],
+            s=12,
+            color=f"C{index}",
+            zorder=3,
         )
-    axes[0].set_title("Latency distribution")
-    axes[0].set_xlabel("Latency (ms)")
-    axes[0].set_ylabel("ECDF")
-    axes[0].grid(alpha=0.25)
-    axes[0].legend(fontsize=8)
+    objects.set_ylabel("Object copy latency (µs)")
+    objects.set_title("Object copies per second: solid p50, dashed p99, dots are copies above the run p99")
+    objects.legend(loc="upper right", fontsize=8)
+    objects.grid(alpha=0.25)
 
-    percentiles = ("p50", "p95", "p99")
-    width = 0.8 / len(present)
-    x_positions = list(range(len(percentiles)))
-    for index, metric in enumerate(present):
-        summary = statistics[metric]
-        offset = (index - (len(present) - 1) / 2) * width
-        axes[1].bar(
-            [position + offset for position in x_positions],
-            [float(summary[name]) / 1_000 for name in percentiles],
-            width=width,
-            label=labels[metric],
-            color=_color(index, len(present)),
-        )
-    axes[1].set_xticks(x_positions, percentiles)
-    axes[1].set_title("Tail percentiles")
-    axes[1].set_ylabel("Latency (ms)")
-    axes[1].grid(axis="y", alpha=0.25)
-
-    for index, metric in enumerate(present):
-        metric_samples = _samples(connection, table, metric)
-        axes[2].scatter(
-            [elapsed_s for elapsed_s, _latency_ms in metric_samples],
-            [latency_ms for _elapsed_s, latency_ms in metric_samples],
-            label=labels[metric],
-            color=_color(index, len(present)),
-            s=8,
-            alpha=0.55,
-        )
-    axes[2].set_title("Latency over time")
-    axes[2].set_xlabel("Elapsed time (s)")
-    axes[2].set_ylabel("Latency (ms)")
-    axes[2].grid(alpha=0.25)
-
-    fig.suptitle(f"{title} | {_context(options)}")
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+    available = _metrics(connection, "packet_samples")
+    candidates = [
+        ("rx_scheduling", "RX scheduling"),
+        (_rx_packet_metric(available), "RX processing"),
+        ("tx_packet_span", "TX packet span"),
+    ]
+    drawn = 0
+    for metric, label in candidates:
+        if metric not in available:
+            continue
+        _draw_windows(packets, _windows(connection, "packet_samples", metric), label, len(_OBJECT_SPANS) + drawn)
+        drawn += 1
+    if drawn == 0:
+        raise ValueError("cannot plot stability without packet samples")
+    packets.set_yscale("log")
+    _plain_log(packets.yaxis)
+    packets.set_ylabel("Packet latency (µs, log)")
+    packets.set_xlabel("Elapsed time (s)")
+    packets.set_title("QUIC packets per second: solid p50, dashed p99")
+    packets.legend(loc="upper right", fontsize=8, ncols=drawn)
+    packets.grid(alpha=0.25)
+    _save(fig, path, f"Latency over the run | {describe(options)}")
 
 
 def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
@@ -559,7 +737,7 @@ def plot_object_timelines(
         )
 
     axes[-1].set_xlabel("Elapsed from first RX QUIC packet start (µs)")
-    fig.suptitle(f"QUIC packet and MoQ object timelines | {_context(options)}", fontsize=14)
+    fig.suptitle(f"QUIC packet and MoQ object timelines | {describe(options)}", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.965))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
