@@ -58,7 +58,9 @@ def describe(options: PlotOptions) -> str:
 
 
 def _format_us(value: float) -> str:
-    return f"{value:.3g}"
+    """Three significant digits, without switching to exponent form above 999."""
+
+    return f"{value:.0f}" if value >= 1_000 else f"{value:.3g}"
 
 
 def _plain_log(axis: Axis) -> None:
@@ -144,7 +146,7 @@ def _draw_distribution(
 
 
 def _decorate_distribution(ecdf: Axes, ccdf: Axes | None, minimum_count: int) -> None:
-    ecdf.set_ylabel("Fraction of copies at or below")
+    ecdf.set_ylabel("CDF")
     ecdf.set_xlabel("Latency (µs)")
     ecdf.set_ylim(0, 1.005)
     ecdf.legend(loc="lower right", fontsize=8)
@@ -153,7 +155,7 @@ def _decorate_distribution(ecdf: Axes, ccdf: Axes | None, minimum_count: int) ->
         return
     ccdf.set_yscale("log")
     ccdf.set_ylim(0.5 / max(minimum_count, 1), 1.2)
-    ccdf.set_ylabel("Fraction of copies slower (log)")
+    ccdf.set_ylabel("CCDF (log)")
     ccdf.grid(alpha=0.25)
     ccdf.set_xlabel("Latency (µs)")
     for fraction, name in ((0.5, "p50"), (0.01, "p99"), (0.001, "p99.9")):
@@ -185,7 +187,7 @@ def plot_latency_cdf(
         _draw_distribution(ecdf, None, values, label, index)
         counts.append(len(values))
     _decorate_distribution(ecdf, None, min(counts))
-    ecdf.set_title("Object latency per copy")
+    ecdf.set_title("Object latency")
     _draw_phase_cdfs(phases, connection)
     _save(fig, path, f"Latency CDF | {describe(options)}")
 
@@ -344,8 +346,7 @@ def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
     """Draw one ECDF per processing phase on a log time axis.
 
     Only phases are drawn, not the spans that contain them, and each phase sums
-    its occurrences within one unit, as in the breakdown. The legend names the
-    unit, because a packet phase and an object phase are counted differently.
+    its occurrences within one packet, object, or copy, as in the breakdown.
     """
 
     drawn = 0
@@ -353,7 +354,6 @@ def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
         style = _SECTION_STYLES.get(section)
         if style is None:
             continue
-        layer, unit = section.split(", per ")
         color = 0
         for row in rows:
             if row.container:
@@ -365,15 +365,15 @@ def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
             ]
             if not values:
                 continue
-            axis.ecdf(values, color=f"C{color}", linestyle=style, label=f"{layer} {row.label.lower()} (per {unit})")
+            axis.ecdf(values, color=f"C{color}", linestyle=style, label=f"{section} {row.label.lower()}")
             color += 1
             drawn += 1
     if drawn == 0:
         raise ValueError("cannot plot phase distributions without any phase samples")
     axis.set_xscale("log")
     _plain_log(axis.xaxis)
-    axis.set_xlabel("Duration per unit (µs, log)")
-    axis.set_ylabel("Fraction of units at or below")
+    axis.set_xlabel("Duration (µs, log)")
+    axis.set_ylabel("CDF")
     axis.set_ylim(0, 1.005)
     axis.set_title("Processing phases")
     axis.grid(alpha=0.25)
@@ -438,8 +438,8 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
     axis.set_xscale("log")
     _plain_log(axis.xaxis)
     axis.set_xlabel(
-        "Duration per unit (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. "
-        f"Repeated phases are summed per unit; durations under {_FLOOR_US} µs are drawn at {_FLOOR_US} µs."
+        "Duration (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. "
+        f"Durations under {_FLOOR_US} µs are drawn at {_FLOOR_US} µs."
     )
     axis.grid(axis="x", alpha=0.25)
     if single:
