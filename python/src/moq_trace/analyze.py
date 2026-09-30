@@ -156,7 +156,7 @@ def _materialize_model(connection: duckdb.DuckDBPyConnection) -> None:
     """Store validated pairs and copy identities once, retaining raw events.
 
     Temporary relations are construction helpers on the builder connection.
-    They are never published as compatibility views in the artifact.
+    They disappear when the builder connection closes.
     """
 
     connection.execute(sql.read("model-schema"))

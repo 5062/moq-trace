@@ -105,8 +105,8 @@ The package needs the Babeltrace 2 Python bindings (`bt2`) to read CTF. Linux
 distributions normally provide them as `python3-bt2`; the Nix development shell
 includes them. The command can run a relay experiment, capture
 both `moq_trace:*` and `quic_trace:*`, analyze an existing CTF directory, and
-render figures from the resulting DuckDB artifact. The CTF reader also accepts
-legacy transport events emitted under `moq_trace:*`.
+render figures from the resulting DuckDB artifact. The CTF reader accepts only
+the current provider event schemas.
 
 An experiment may replace the default relay arguments with a `relay_args` TOML
 array. Its entries can use `{port}`, `{output}`, `{certificate}`, and `{key}`;

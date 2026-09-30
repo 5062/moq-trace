@@ -173,7 +173,7 @@ class ArtifactTests(unittest.TestCase):
                     self.assertEqual(timeline["first_copy"]["session_id"], 2)
                     self.assertEqual(timeline["last_copy"]["full_span_us"], 200.0)
 
-    def test_published_artifact_has_no_legacy_relations_and_keeps_raw_processes(self):
+    def test_published_artifact_materializes_public_tables_and_keeps_raw_processes(self):
         with fixture() as trace, tempfile.TemporaryDirectory() as directory:
             trace.object_start(1, "rx", 99, pid=9)
             output = pathlib.Path(directory) / "analysis.duckdb"

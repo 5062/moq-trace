@@ -13,9 +13,8 @@ Revise the DuckDB artifact that `moq-trace analyze` publishes so that:
 - a comparison artifact holds the data its figures read.
 
 The provider event contract (`moq_trace:*` and `quic_trace:*`) does not change.
-Only the analysis output changes, and it changes incompatibly, so it is
-versioned. The provider compatibility requirements in AGENTS.md continue to
-apply to provider events. The artifact has no backward compatibility requirement.
+The artifact records the current schema version. Providers, facades, and the
+analyzer follow the current shared contract in AGENTS.md.
 
 ## Non-Goals
 
@@ -29,37 +28,11 @@ apply to provider events. The artifact has no backward compatibility requirement
   correlation rule and a clock model with uncertainty and drift. That belongs in
   a separate design.
 - Changing which objects, packets, or windows are selected, or how any metric is
-  defined. Every v2 sample value must equal its v1 counterpart.
-
-## Current Artifact (v1)
-
-`analyze.run` builds, in order:
-
-| Relation | Kind | Notes |
-| --- | --- | --- |
-| `raw.<event>` | table | one per provider event, all processes |
-| `analyzed_process` | table | the one PID the artifact describes |
-| `<event>` | view | `raw.<event>` filtered to that PID |
-| `object_lifecycles`, `packet_lifecycles` | view | start joined to end on `trace_id` |
-| `object_copies` | view | self-join on `(logical_group, logical_frame)` |
-| `object_phase_intervals`, `packet_phase_intervals` | view | edges paired, `row_number()` occurrence |
-| `selected_rx`, `analysis_window` | table | steady-state selection |
-| `object_packet_coverage` | table | first and completing packet, `packet_ids` list |
-| `selected_packets` | view | packets in any coverage list |
-| `object_samples`, `quic_object_samples`, `packet_samples` | table | three shapes |
-| `latency_samples`, `metric_statistics` | view | identity dropped, quantiles in microseconds |
-| `metric_definitions` | table | metric catalog |
-| `timeline_selections`, `timeline_copies`, `timeline_intervals` | table | relative microseconds |
-| `network_datagrams`, `network_recovery`, `network_losses` | table | optional |
-| `metadata` | table | `(kind, value JSON)` |
-
-Coverage, samples, and timelines are already materialized. The views that
-readers re-expand are the lifecycles, copies, and phase intervals, which
-`plot/breakdown.py` and several derivation steps query directly.
+  defined. The fixture scenarios pin the sample values and selected populations.
 
 ## Artifact Identity and Versioning
 
-`metadata` gains a version column:
+`metadata` identifies the artifact kind and schema version:
 
 ```sql
 CREATE TABLE metadata(
@@ -69,17 +42,15 @@ CREATE TABLE metadata(
 );
 ```
 
-Writers emit version 2 immediately. `artifact.SCHEMA_VERSIONS` maps each kind
-to version 2 only. `open_artifact` rejects every other version before returning,
-naming the version it found and the version it supports. An absent
-`schema_version` identifies an unversioned v1 artifact only to report a clear
-rebuild error; no v1 reader or migration is shipped.
+`artifact.SCHEMA_VERSION` is 2. Writers and readers use that version only.
+`open_artifact` requires `kind`, `schema_version`, and `value`, and rejects an
+unsupported version before returning a connection. Missing columns fail the
+same schema check as any malformed artifact.
 
-This tool reads version 2 only. A v1 run artifact can be rebuilt by running
-`moq-trace analyze` on its retained CTF trace into a new output path, because
-analysis refuses to overwrite an existing artifact. If that trace is no longer
-available, rebuilding requires a new capture. A v1 comparison must be rebuilt
-from its rebuilt v2 run artifacts. Rebuild errors distinguish the two kinds.
+A run from another schema version must be re-analyzed from its retained CTF
+trace into a new output path. If that trace is unavailable, capture a new run.
+A comparison must be rebuilt from current run artifacts. Rebuild errors
+distinguish the two artifact kinds.
 
 ## SQL Organization
 
@@ -138,8 +109,7 @@ Relations are grouped into DuckDB schemas by what they promise:
 | `main` | yes | `metadata`, `processes` |
 
 The builder may use temporary scoped relations and sample staging tables;
-these disappear when its connection closes and are never compatibility views
-in the published artifact.
+these disappear when its connection closes and are not published.
 
 Only public relations are part of the artifact contract. Plots, experiments,
 and bench read only public relations.
@@ -162,10 +132,9 @@ because the generic transport profile accepts whatever phases a provider emits.
 
 ## Raw Events
 
-`raw.<event>` keeps its v1 columns and gains `process_id`. The decoder still
-emits `pid`, and ingest resolves it to `process_id` through `processes`, using
-the source capture and hostname as well. Raw timestamp columns retain their
-unsigned types and original values.
+`raw.<event>` mirrors the provider event fields and includes `process_id`. The
+decoder emits `pid`, and ingest resolves it to `process_id` through `processes`, using
+the source capture and hostname as well. Raw timestamp columns use checked signed nanoseconds.
 
 Validation of duplicate trace IDs, completions without starts, duplicate phase
 boundaries, and unmatched boundaries continues to run against `raw`, scoped to
@@ -175,10 +144,9 @@ for, so they cannot move to the materialized tables.
 ## Timestamps and Units
 
 Public derived instants and durations, including the process time bounds, are
-`BIGINT` nanoseconds with an `_ns` suffix. Raw timestamps remain `UBIGINT` to
-preserve the ingested events. Before narrowing a timestamp for public storage,
-the analyzer rejects values at or above `2^63` with the event and field named,
-so a narrowed value never wraps. Derived durations and sums also receive checked
+`BIGINT` nanoseconds with an `_ns` suffix. Raw timestamps are also `BIGINT`: the
+decoder rejects timestamps that do not fit signed 64-bit nanoseconds with the
+event and field named. Derived durations and sums also receive checked
 conversion to `BIGINT`.
 
 Aggregates that are not whole nanoseconds, such as means, interpolated
@@ -229,11 +197,10 @@ Transport metadata remains nullable on unselected or failed lifecycles, as
 provider presence flags allow. Coverage rejects missing transport metadata on
 selected objects.
 
-`rx_trace_id` replaces the `object_copies` self-join. It is set on every tx row
+`rx_trace_id` is set on every tx row
 whose logical object has an ingress. `copy_ordinal` numbers the successful tx
-copies of one ingress by `(session_id, trace_id)` from zero, which is the order
-`object_samples` and `quic_object_samples` use today, and is NULL on failed
-copies. `object_copies` becomes:
+copies of one ingress by `(session_id, trace_id)` from zero, and is NULL on
+failed copies. The builder selects successful copies with:
 
 ```sql
 SELECT * FROM model.objects WHERE direction = 'tx' AND copy_ordinal IS NOT NULL
@@ -241,8 +208,9 @@ SELECT * FROM model.objects WHERE direction = 'tx' AND copy_ordinal IS NOT NULL
 
 ### `model.packets`
 
-One row per completed packet lifecycle, with the v1 `packet_lifecycles` columns
-under the same unit rules and `PRIMARY KEY (process_id, trace_id)`.
+One row per completed packet lifecycle, with its connection, direction, packet
+number, packet space, byte length, start and end timestamps, and outcome.
+`PRIMARY KEY (process_id, trace_id)` identifies each packet.
 
 ### `model.intervals`
 
@@ -264,8 +232,7 @@ CREATE TABLE model.intervals(
 ```
 
 `span_id` identifies an interval. `occurrence` only orders the intervals of one
-`(trace_id, phase)` by `(ctf_timestamp_ns, start_ns, span_id)`, as v1 does, and
-no join uses it.
+`(trace_id, phase)` by `(ctf_timestamp_ns, start_ns, span_id)`; no join uses it.
 
 ### `model.window` and `model.selected_objects`
 
@@ -284,7 +251,7 @@ CREATE TABLE model.selected_objects(
 );
 ```
 
-The window and selection rules do not change. `selected_objects` holds keys only.
+`selected_objects` stores the selected object keys.
 Readers join `model.objects` for the columns that `selected_rx` copied.
 
 ### Coverage
@@ -297,7 +264,7 @@ object, so a single range per object and packet would hide gaps.
 CREATE TABLE model.coverage_frames(
     process_id UINTEGER NOT NULL,
     object_trace_id UBIGINT NOT NULL,
-    seq UINTEGER NOT NULL,          -- 1-based, v1 ordering
+    seq UINTEGER NOT NULL,          -- 1-based frame ordering
     packet_trace_id UBIGINT NOT NULL,
     offset_start UBIGINT NOT NULL,
     offset_end UBIGINT NOT NULL,
@@ -320,7 +287,7 @@ CREATE TABLE model.coverage(
 ```
 
 `seq` orders frames by `(timestamp_ns, packet end_ns, packet trace_id,
-offset_start, offset_end)`, as v1 does. `coverage_frames` stores every frame up
+offset_start, offset_end)`. `coverage_frames` stores every frame up
 to and including `complete_seq`. Frames after completion reach no current
 metric; the recorded overlap alone does not establish that they are
 retransmissions.
@@ -328,10 +295,9 @@ retransmissions.
 `model.coverage` materializes the completion summary. `complete_seq` is still
 the first frame at which subtracting frames in `seq` order leaves no gap
 (`coverage._stage_completion`). The summary keeps the timestamps, because
-`quic_object_samples` and timelines read them for every selected object.
+transport latency derivation and timelines read them for every selected object.
 
-`model.coverage_packets` replaces the `packet_ids` list and the
-`selected_packets` view:
+`model.coverage_packets` stores each object's distinct packets and their order:
 
 ```sql
 CREATE TABLE model.coverage_packets AS
@@ -376,7 +342,7 @@ packet phases, and every sample satisfies the metric foreign key.
 
 `rx_packet_transport_span` and `rx_packet_processing_span` are packet grain, and
 each subtracts the summed application time of its packet. Phase metrics are one
-sample per interval, not per packet, which is what v1 `packet_samples` holds.
+sample per interval, not per packet.
 
 ### `metrics.samples`
 
@@ -393,8 +359,7 @@ CREATE TABLE metrics.samples(
 );
 ```
 
-This one table replaces `object_samples`, `quic_object_samples`,
-`packet_samples`, and `latency_samples`. A copy sample names both lifecycles,
+A copy sample names both lifecycles,
 because a forwarding latency belongs to the pair. Its `copy_ordinal`, group, and
 object come from `model.objects`. After deriving the table, the analyzer
 checks that each row sets exactly the identity columns its metric's `grain`
@@ -403,8 +368,7 @@ names, and that `(process_id, metric, <identity>)` is unique.
 ### `metrics.phase_totals`
 
 The breakdown figures summarize per-subject totals, not individual intervals:
-the time one object or packet spent in a phase. v1 recomputes these from the
-interval views on every render. v2 stores them:
+the time one object or packet spent in a phase. The artifact stores these totals:
 
 ```sql
 CREATE TABLE metrics.phase_totals(
@@ -426,8 +390,7 @@ they plot per-subject phase totals, rather than individual occurrences.
 
 ### `metrics.statistics`
 
-A table rather than a view, since readers query it repeatedly. The existing
-statistics view already works without connection-local macros:
+Stored statistics can be read without connection-local macros:
 
 ```sql
 CREATE TABLE metrics.statistics(
@@ -443,21 +406,19 @@ CREATE TABLE metrics.statistics(
 );
 ```
 
-`_verify_transport_metrics` reads it for the Quinn profile as before.
+`_verify_transport_metrics` reads it to enforce the Quinn phase requirements.
 
 ## Timelines
 
-`timeline_selections` moves to `metrics.timeline_selections` with
+`metrics.timeline_selections` records
 `process_id`, `selection_order`, `statistic`, `target_ns`, `rx_trace_id`, and
-`actual_ns`. `timeline_copies` and `timeline_intervals` are removed.
-`plot/timeline.py` builds the same rows from `model.objects`,
+`actual_ns`. `plot/timeline.py` builds the drawing rows from `model.objects`,
 `model.intervals`, `model.coverage_packets`, and `model.packets`, and converts
 to microseconds relative to the selected object's start.
 
 ## Network
 
-`network_datagrams`, `network_recovery`, and `network_losses` move to
-`network.datagrams`, `network.recovery`, and `network.losses` and gain
+`network.datagrams`, `network.recovery`, and `network.losses` include
 `process_id`. RTT columns become `smoothed_rtt_ns`, `min_rtt_ns`, and
 `latest_rtt_ns` as `DOUBLE`. The `connection` column stays a qlog group
 string. Joining it to `connection_id` is out of scope.
@@ -504,45 +465,24 @@ directory refreshes its snapshot when run artifacts are present and uses the
 saved snapshot when none remain. Rendering `comparison.duckdb` directly always
 uses its saved data. A failed rebuild leaves the previous snapshot intact.
 
-## Reader Migration
+## Readers
 
-| Reader | v1 source | v2 source |
-| --- | --- | --- |
-| `experiment._validate_workload` | `selected_rx` | `model.selected_objects` join `model.objects` |
-| `plot/common._values_us` | `object_samples`, `quic_object_samples` | `metrics.samples` |
-| `plot/latency` phase CDFs | interval views summed per subject | `metrics.phase_totals` |
-| `plot/stability` | `packet_samples` | `metrics.samples` |
-| `plot/breakdown` | interval views, `selected_packets`, `object_copies` | `metrics.phase_totals` |
-| `plot/timeline` | `timeline_*` | `metrics.timeline_selections` plus `model` |
-| `plot/network` | `network_*` | `network.*` |
-| comparison renderers | run artifacts | `runs` plus copied `metrics.*` |
-
-## Rollout
-
-Implement the v2 writer, readers, and tests together as one coordinated change.
-There are no additive v1 stages, compatibility views, or duplicate old tables.
-The work consists of:
-
-1. Add version 2 metadata, rejection and rebuild errors, and process records.
-2. Validate raw events, then materialize `model.*` and check derived invariants.
-3. Store frame coverage and its completion summary.
-4. Write `metrics.*`, update plot readers, and build timelines from model queries.
-5. Move network tables and convert RTT units.
-6. Build comparison artifacts with run records, process records, and copied
-   metrics, and use one comparison rendering path.
-
-These are implementation tasks, not independently published compatible schemas.
-Before publishing the completed change, run `nix develop --command just fix`
-and `nix develop --command just check`.
+| Reader | Public source |
+| --- | --- |
+| `experiment._validate_workload` | `model.selected_objects` join `model.objects` |
+| `plot/common._values_us` | `metrics.samples` |
+| `plot/latency` phase CDFs | `metrics.phase_totals` |
+| `plot/stability` | `metrics.samples` |
+| `plot/breakdown` | `metrics.phase_totals` |
+| `plot/timeline` | `metrics.timeline_selections` plus `model` |
+| `plot/network` | `network.*` |
+| comparison renderers | `runs` plus copied `metrics.*` |
 
 ## Testing
 
-- Capture frozen expected results or fixtures from the current v1 implementation
-  before replacing it. Use them as a test oracle without shipping a v1 reader.
-  Across the existing edge cases, compare sample identities, multiplicities,
+- Across the fixture scenarios, compare sample identities, multiplicities,
   elapsed times, and values metric by metric, plus phase totals, coverage
-  summaries, and timeline selections after unit conversion. Identity checks
-  use lifecycle and interval fixtures where v1 sample tables omit those IDs.
+  summaries, and timeline selections against the frozen expected results.
 - Coverage: a packet carrying two disjoint ranges of one object with a gap
   another packet fills yields three frame rows, and completion at the filling
   frame.
@@ -554,8 +494,8 @@ and `nix develop --command just check`.
   intervals produce the same per-subject totals used by phase CDFs and breakdowns.
 - Validation: duplicate trace IDs and unmatched phase edges are still rejected
   when every other row pairs cleanly.
-- Versioning: a v1 artifact and an artifact from a newer version are both
-  rejected with the supported versions named.
+- Versioning: unsupported schema versions are rejected with the current
+  version named.
 - Comparison: a comparison artifact renders after its run directories are
   deleted, two runs at one dimension value coexist, and copied sample identities
   resolve to the correct run's process record.

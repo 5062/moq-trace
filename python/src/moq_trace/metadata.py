@@ -1,6 +1,6 @@
 """Validated schemas for the metadata one analysis artifact carries.
 
-An artifact outlives the tool that wrote it, so its metadata is a compatibility
+An artifact outlives the tool that wrote it, so its metadata is a versioned
 contract rather than an internal detail. Modeling it here gives every reader the
 same validated view of a run, and gives every writer one place that says what a
 complete artifact holds.
