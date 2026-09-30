@@ -83,38 +83,23 @@ _BREAKDOWN_QUANTILES = (0.01, 0.25, 0.50, 0.75, 0.99)
 _FLOOR_US = 0.01
 
 
-def _row_query(row: _Row) -> tuple[str, list[str]]:
-    """SQL yielding one duration in microseconds per unit of `row`."""
+def _row_query(row: _Row, run_id: int | None = None) -> tuple[str, list]:
+    """SQL yielding one phase total in microseconds per selected subject."""
 
-    if row.source == "packet":
-        return (
-            """SELECT sum(phase.end_ns::HUGEINT - phase.start_ns::HUGEINT) / 1000.0 AS us
-               FROM packet_phase_intervals AS phase
-               JOIN selected_packets AS packet USING (trace_id)
-               WHERE packet.direction = ? AND phase.phase = ?
-                 AND phase.outcome = 'success' AND packet.outcome = 'success'
-               GROUP BY trace_id""",
-            [row.direction, row.name],
-        )
-    units = (
-        "SELECT trace_id FROM selected_rx"
-        if row.direction == "rx"
-        else """SELECT tx.trace_id FROM object_copies AS tx
-                SEMI JOIN selected_rx AS rx ON tx.rx_trace_id = rx.trace_id"""
-    )
+    scope = " AND run_id = ?" if run_id is not None else ""
     return (
-        f"""SELECT sum(end_ns::HUGEINT - start_ns::HUGEINT) / 1000.0 AS us
-            FROM object_phase_intervals
-            WHERE phase = ? AND outcome = 'success' AND trace_id IN ({units})
-            GROUP BY trace_id""",
-        [row.name],
+        "SELECT total_ns / 1000.0 AS us FROM metrics.phase_totals "
+        f"WHERE subject = ? AND direction = ? AND phase = ?{scope}",
+        [row.source, row.direction, row.name] + ([run_id] if run_id is not None else []),
     )
 
 
-def _row_summary(connection: duckdb.DuckDBPyConnection, row: _Row) -> tuple[float, ...] | None:
+def _row_summary(
+    connection: duckdb.DuckDBPyConnection, row: _Row, run_id: int | None = None
+) -> tuple[float, ...] | None:
     """Quantiles of one row, or None when the provider did not emit it."""
 
-    query, parameters = _row_query(row)
+    query, parameters = _row_query(row, run_id)
     summary = connection.execute(
         f"SELECT count(*), quantile_cont(us, {list(_BREAKDOWN_QUANTILES)}) FROM ({query})",
         parameters,
@@ -166,7 +151,7 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
     y = 0.0
     single = len(runs) == 1
     for section, _style, rows in _SECTIONS:
-        summaries = [(row, [_row_summary(run.connection, row) for run in runs]) for row in rows]
+        summaries = [(row, [_row_summary(run.connection, row, run.run_id) for run in runs]) for row in rows]
         summaries = [(row, values) for row, values in summaries if any(value is not None for value in values)]
         if not summaries:
             continue

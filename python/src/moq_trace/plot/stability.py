@@ -35,8 +35,8 @@ def _windows(
 
     return connection.execute(
         f"""SELECT floor(elapsed_ns / 1e9) + 0.5 AS second,
-                   quantile_cont(latency_ns, 0.50) / 1000.0,
-                   quantile_cont(latency_ns, 0.99) / 1000.0
+                   quantile_cont(value_ns, 0.50) / 1000.0,
+                   quantile_cont(value_ns, 0.99) / 1000.0
             FROM {table} WHERE metric = ? GROUP BY second ORDER BY second""",
         [metric],
     ).fetchall()
@@ -73,7 +73,7 @@ def plot_stability(
     objects.legend(loc="upper right", fontsize=8)
     objects.grid(alpha=0.25)
 
-    available = _metrics(connection, "packet_samples")
+    available = _metrics(connection, "metrics.samples")
     candidates = [
         ("rx_scheduling", "RX queuing"),
         (_rx_packet_metric(available), "RX processing"),
@@ -83,7 +83,7 @@ def plot_stability(
     for metric, label in candidates:
         if metric not in available:
             continue
-        _draw_windows(packets, _windows(connection, "packet_samples", metric), label, len(_OBJECT_SPANS) + drawn)
+        _draw_windows(packets, _windows(connection, "metrics.samples", metric), label, len(_OBJECT_SPANS) + drawn)
         drawn += 1
     if drawn == 0:
         raise ValueError("cannot plot stability without packet samples")

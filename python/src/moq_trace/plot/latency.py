@@ -105,7 +105,7 @@ def plot_latency_comparison(
         ecdf, ccdf = axes[0][column], axes[1][column]
         counts = []
         for index, run in enumerate(runs):
-            values = _values_us(run.connection, table, metric)
+            values = _values_us(run.connection, table, metric, run.run_id)
             if not values:
                 raise ValueError(f"cannot compare {run.label} without {metric} samples")
             _draw_distribution(ecdf, ccdf, values, run.label, index)

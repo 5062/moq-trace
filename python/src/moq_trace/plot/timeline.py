@@ -12,48 +12,60 @@ from .common import PlotOptions, describe
 
 
 def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
+    """Query selected lifecycles and intervals, converting nanoseconds for drawing."""
+
     timelines = []
-    for selection_order, statistic, target_us, group_id, object_id in connection.execute(
-        """SELECT selection_order, statistic, target_us, group_id, object_id
-           FROM timeline_selections ORDER BY selection_order"""
-    ).fetchall():
+    selections = connection.execute("""SELECT s.process_id, s.rx_trace_id, s.statistic,
+        s.target_ns / 1000.0, object.group_id, object.object_id, object.start_ns
+        FROM metrics.timeline_selections s JOIN model.objects object
+          ON s.process_id = object.process_id AND s.rx_trace_id = object.trace_id
+        ORDER BY s.process_id, s.selection_order""").fetchall()
+    for process_id, rx_trace_id, statistic, target_us, group_id, object_id, origin in selections:
         copies = [
-            {
-                "session_id": int(session_id),
-                "subscriber_ordinal": int(subscriber_ordinal),
-                "full_span_us": float(full_span_us),
-            }
-            for session_id, subscriber_ordinal, full_span_us in connection.execute(
-                """SELECT session_id, subscriber_ordinal, full_span_us
-                   FROM timeline_copies
-                   WHERE selection_order = ?
-                     AND (subscriber_ordinal = 1 OR subscriber_ordinal = copy_count)
-                   ORDER BY subscriber_ordinal""",
-                [selection_order],
+            dict(session_id=int(session), subscriber_ordinal=int(ordinal) + 1, full_span_us=float(span))
+            for session, ordinal, span in connection.execute(
+                """SELECT session_id, copy_ordinal,
+                      (end_ns - $origin) / 1000.0 FROM model.objects
+                      WHERE process_id = $process AND rx_trace_id = $rx AND copy_ordinal IS NOT NULL
+                      ORDER BY copy_ordinal""",
+                {"process": process_id, "rx": rx_trace_id, "origin": origin},
             ).fetchall()
         ]
-        intervals = [
-            {
-                "direction": direction,
-                "session_id": int(session_id),
-                "phase": phase,
-                "occurrence": int(occurrence),
-                "start_us": float(start_us),
-                "end_us": float(end_us),
-            }
-            for direction, session_id, phase, occurrence, start_us, end_us in connection.execute(
-                """SELECT direction, session_id, phase, occurrence, start_us, end_us
-                   FROM timeline_intervals AS interval
-                   WHERE selection_order = ?
-                     AND (direction = 'rx' OR session_id IN (
-                       SELECT session_id FROM timeline_copies
-                       WHERE selection_order = ?
-                         AND (subscriber_ordinal = 1 OR subscriber_ordinal = copy_count)
-                     ))
-                   ORDER BY direction, session_id, phase, occurrence, start_us""",
-                [selection_order, selection_order],
-            ).fetchall()
-        ]
+        intervals = connection.execute(
+            """WITH objects AS (
+            SELECT * FROM model.objects WHERE process_id = $process
+              AND (trace_id = $rx OR (rx_trace_id = $rx AND copy_ordinal IS NOT NULL))
+        ), packets AS (
+            SELECT coverage.* FROM model.coverage_packets coverage
+            JOIN objects object ON object.process_id = coverage.process_id AND object.trace_id =
+            coverage.object_trace_id
+        ), intervals AS (
+            SELECT process_id, trace_id, 'object' AS phase, 0 AS occurrence, start_ns, end_ns FROM objects
+            UNION ALL
+            SELECT phase.process_id, phase.trace_id, phase.phase, phase.occurrence, phase.start_ns, phase.end_ns
+            FROM model.intervals phase JOIN objects object USING(process_id, trace_id)
+            WHERE phase.subject = 'object' AND phase.outcome = 'success'
+            UNION ALL
+            SELECT packet.process_id, packet.object_trace_id, 'quic_packet', packet.ordinal, lifecycle.start_ns,
+            lifecycle.end_ns
+            FROM packets packet JOIN model.packets lifecycle
+              ON lifecycle.process_id = packet.process_id AND lifecycle.trace_id = packet.packet_trace_id
+            UNION ALL
+            SELECT packet.process_id, packet.object_trace_id, 'quic_' || phase.phase, phase.occurrence,
+            phase.start_ns, phase.end_ns
+            FROM packets packet JOIN model.intervals phase
+              ON phase.process_id = packet.process_id AND phase.trace_id = packet.packet_trace_id
+            WHERE phase.subject = 'packet' AND phase.outcome = 'success'
+        )
+        SELECT object.direction, object.session_id, interval.phase, interval.occurrence,
+               (interval.start_ns - $origin) / 1000.0, (interval.end_ns - $origin) / 1000.0
+        FROM intervals interval JOIN objects object USING(process_id, trace_id)
+        WHERE object.direction = 'rx' OR object.session_id IN (
+            SELECT session_id FROM objects WHERE copy_ordinal = 0 OR copy_ordinal = (SELECT max(copy_ordinal) FROM
+            objects)
+        ) ORDER BY object.direction, object.session_id, interval.phase, interval.occurrence, interval.start_ns""",
+            {"process": process_id, "rx": rx_trace_id, "origin": origin},
+        ).fetchall()
         timelines.append(
             {
                 "selection": {
@@ -62,7 +74,17 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
                     "group_id": int(group_id),
                     "object_id": int(object_id),
                 },
-                "intervals": intervals,
+                "intervals": [
+                    dict(
+                        direction=direction,
+                        session_id=int(session),
+                        phase=phase,
+                        occurrence=int(occurrence),
+                        start_us=float(start),
+                        end_us=float(end),
+                    )
+                    for direction, session, phase, occurrence, start, end in intervals
+                ],
                 "first_copy": copies[0],
                 "last_copy": copies[-1],
             }

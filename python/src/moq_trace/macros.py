@@ -11,7 +11,7 @@ _MACROS = (
     # Signed nanoseconds from `start` to `finish`. Timestamps are unsigned, so
     # both are widened before subtracting and a reversed pair stays negative
     # instead of wrapping around.
-    "CREATE OR REPLACE TEMP MACRO span_ns(start, finish) AS finish::HUGEINT - start::HUGEINT",
+    "CREATE OR REPLACE TEMP MACRO span_ns(start, finish) AS (finish::HUGEINT - start::HUGEINT)::BIGINT",
     # Nanoseconds from the trace origin, clamped to zero for events before it.
     "CREATE OR REPLACE TEMP MACRO elapsed_ns(instant, origin) AS greatest(span_ns(origin, instant), 0)",
     # Microseconds from `start` to `finish`, signed.

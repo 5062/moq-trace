@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import pathlib
 
 import duckdb
 
 from .artifact import open_artifact
+from .comparison import write_comparison
 from .errors import TraceError
 from .metadata import ComparisonMetadata, RunMetadata
 from .plot import (
@@ -54,86 +54,61 @@ def _render_run(
     plot_object_timelines(plots / "object_timeline.png", options, connection)
 
 
-def _format_byte_size(value: int) -> str:
-    for divisor, suffix in ((1024 * 1024, "MiB"), (1024, "KiB")):
-        if value % divisor == 0:
-            return f"{value // divisor} {suffix}"
-    return f"{value} bytes"
+def _render_comparison(
+    database: pathlib.Path, connection: duckdb.DuckDBPyConnection, metadata: ComparisonMetadata
+) -> None:
+    """Render the snapshot without opening its source run artifacts."""
 
-
-def _render_comparison(database: pathlib.Path, metadata: ComparisonMetadata) -> None:
     dimension = metadata.dimension
-    with contextlib.ExitStack() as stack:
-        runs = []
-        run_metadata = []
-        for entry in metadata.runs:
-            run_database = database.parent / entry.database
-            connection, _run_kind, summary = stack.enter_context(open_artifact(run_database, "run"))
-            value = entry.value
-            label = (
-                f"{value} {'subscriber' if value == 1 else 'subscribers'}"
-                if dimension == "subscribers"
-                else _format_byte_size(value)
-            )
-            runs.append(ComparisonRun(label=label, connection=connection))
-            run_metadata.append(summary)
-
-        options = _options(run_metadata[0])
-        if dimension == "subscribers":
-            comparison = f"{options.object_size} bytes"
-        else:
-            subscribers = options.subscribers
-            comparison = f"{subscribers} {'subscriber' if subscribers == 1 else 'subscribers'}"
-        subtitle = f"{describe(options)} | {comparison}"
-        plots = database.parent / "plots"
-        plot_latency_comparison(plots / "comparison_cdf.png", f"Object latency by {dimension}", subtitle, runs)
-        plot_breakdown_comparison(
-            plots / "comparison_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs
+    rows = connection.execute("SELECT run_id, label, metadata::VARCHAR FROM runs ORDER BY run_id").fetchall()
+    if [row[0] for row in rows] != [entry.run_id for entry in metadata.runs]:
+        raise TraceError("comparison run records do not match metadata")
+    runs = [ComparisonRun(label=label, connection=connection, run_id=run_id) for run_id, label, _ in rows]
+    summaries = [RunMetadata.model_validate_json(encoded) for _, _, encoded in rows]
+    options = _options(summaries[0])
+    if dimension == "relay":
+        if len({summary.protocol for summary in summaries}) > 1:
+            options = dataclasses.replace(options, protocol=None)
+        subtitle = describe(options)
+        prefix, title = "relays", "Object latency by relay"
+    else:
+        comparison = (
+            f"{options.object_size} bytes"
+            if dimension == "subscribers"
+            else f"{options.subscribers} {'subscriber' if options.subscribers == 1 else 'subscribers'}"
         )
+        subtitle = f"{describe(options)} | {comparison}"
+        prefix, title = "comparison", f"Object latency by {dimension}"
+    plots = database.parent / "plots"
+    plot_latency_comparison(plots / f"{prefix}_cdf.png", title, subtitle, runs)
+    plot_breakdown_comparison(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
 
 
 def render_relays(output: pathlib.Path, databases: dict[str, pathlib.Path]) -> pathlib.Path:
-    """Compare run artifacts of one workload across relays, keyed by relay name.
+    """Refresh the snapshot atomically and render relay runs sharing one workload."""
 
-    Every run must record the same workload, because overlaying relays that ran
-    different workloads would present a workload difference as a relay difference.
-    Returns the directory the figures were written to.
-    """
-
-    if len(databases) < 2:
-        raise TraceError("a relay comparison requires at least two run artifacts")
-    with contextlib.ExitStack() as stack:
-        runs = []
-        workloads = {}
-        options = []
-        for relay, database in databases.items():
-            connection, _kind, metadata = stack.enter_context(open_artifact(database, "run"))
-            runs.append(ComparisonRun(label=relay, connection=connection))
-            workloads[relay] = metadata.workload
-            options.append(_options(metadata))
-        if len(set(workloads.values())) > 1:
-            listed = "; ".join(f"{relay}: {workload}" for relay, workload in workloads.items())
-            raise TraceError(f"relay runs used different workloads: {listed}")
-        # Relays may speak different protocol drafts, which the legend already
-        # distinguishes by relay name, so the shared subtitle leaves it out.
-        protocols = {option.protocol for option in options}
-        subtitle = describe(options[0] if len(protocols) == 1 else dataclasses.replace(options[0], protocol=None))
-        plots = output / "plots"
-        plot_latency_comparison(plots / "relays_cdf.png", "Object latency by relay", subtitle, runs)
-        plot_breakdown_comparison(plots / "relays_breakdown.png", "Where the time goes by relay", subtitle, runs)
-    return plots
+    database = output / "comparison.duckdb"
+    write_comparison(database, "relay", [(label, path, None) for label, path in databases.items()], replace=True)
+    render(database)
+    return output / "plots"
 
 
 def render(database: pathlib.Path) -> None:
     """Render a run or comparison DuckDB artifact, or a bench output directory.
 
     A directory is read as `moq-trace bench` output: one subdirectory per relay,
-    each holding that relay's run artifact.
+    each holding that relay's run artifact. Available runs refresh the snapshot;
+    without source runs, the saved snapshot supplies the figures. Opening the
+    comparison database directly always renders its saved data.
     """
 
     database = database.resolve()
     if database.is_dir():
+        snapshot = database / "comparison.duckdb"
         databases = {path.parent.name: path for path in sorted(database.glob("*/analysis.duckdb"))}
+        if not databases and snapshot.exists():
+            render(snapshot)
+            return
         try:
             render_relays(database, databases)
         except (KeyError, TypeError, ValueError) as error:
@@ -144,7 +119,7 @@ def render(database: pathlib.Path) -> None:
             if kind == "run":
                 _render_run(database, connection, metadata)
             elif kind == "comparison":
-                _render_comparison(database, metadata)
+                _render_comparison(database, connection, metadata)
             else:
                 raise TraceError(f"unsupported artifact kind: {kind}")
     except TraceError:

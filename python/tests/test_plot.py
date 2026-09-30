@@ -32,55 +32,33 @@ def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
     """
 
     connection = duckdb.connect(":memory:")
-    for table in ("object_samples", "quic_object_samples", "packet_samples"):
-        connection.execute(f"CREATE TABLE {table}(metric VARCHAR, elapsed_ns BIGINT, latency_ns BIGINT)")
+    connection.execute("CREATE SCHEMA metrics")
+    connection.execute("CREATE TABLE metrics.samples(metric VARCHAR, elapsed_ns BIGINT, value_ns BIGINT)")
     connection.executemany(
-        "INSERT INTO object_samples VALUES ('full_span', ?, ?)",
+        "INSERT INTO metrics.samples VALUES ('full_span', ?, ?)",
         [(second * 1_000_000_000, 90_000 + second * 1_000) for second in range(4)],
     )
     connection.executemany(
-        "INSERT INTO quic_object_samples VALUES ('quic_full_span', ?, ?)",
+        "INSERT INTO metrics.samples VALUES ('quic_full_span', ?, ?)",
         [(second * 1_000_000_000, 300_000 + second * 1_000) for second in range(4)],
     )
     packet_metrics = ["rx_packet_span", "tx_packet_span"]
     if packet_phases:
         packet_metrics += ["rx_scheduling", "rx_packet_processing_span"]
     connection.executemany(
-        "INSERT INTO packet_samples VALUES (?, ?, 5000)",
+        "INSERT INTO metrics.samples VALUES (?, ?, 5000)",
         [(metric, second * 1_000_000_000) for metric in packet_metrics for second in range(4)],
     )
-
-    connection.execute("CREATE TABLE selected_rx(trace_id UBIGINT)")
-    connection.execute("INSERT INTO selected_rx VALUES (1), (2)")
-    connection.execute("CREATE TABLE object_copies(rx_trace_id UBIGINT, trace_id UBIGINT)")
-    connection.execute("INSERT INTO object_copies VALUES (1, 11), (2, 12)")
     connection.execute(
-        """CREATE TABLE object_phase_intervals(
-               trace_id UBIGINT, phase VARCHAR, start_ns UBIGINT, end_ns UBIGINT, outcome VARCHAR
-           )"""
+        """CREATE TABLE metrics.phase_totals(subject VARCHAR, direction VARCHAR, trace_id UBIGINT, phase VARCHAR,
+        total_ns BIGINT)"""
     )
-    # Object 1 commits two frames of 1 and 3 µs, so its per-object total is 4 µs.
-    connection.execute(
-        """INSERT INTO object_phase_intervals VALUES
-           (1, 'frame_commit', 0, 1000, 'success'),
-           (1, 'frame_commit', 2000, 5000, 'success'),
-           (2, 'frame_commit', 0, 4000, 'success'),
-           (11, 'clone', 0, 500, 'success'),
-           (12, 'clone', 0, 500, 'success')"""
-    )
-    connection.execute("CREATE TABLE selected_packets(trace_id UBIGINT, direction VARCHAR, outcome VARCHAR)")
-    connection.execute("INSERT INTO selected_packets VALUES (100, 'rx', 'success'), (200, 'tx', 'success')")
-    connection.execute(
-        """CREATE TABLE packet_phase_intervals(
-               trace_id UBIGINT, phase VARCHAR, start_ns UBIGINT, end_ns UBIGINT, outcome VARCHAR
-           )"""
-    )
+    connection.execute("""INSERT INTO metrics.phase_totals VALUES
+        ('object', 'rx', 1, 'frame_commit', 4000), ('object', 'rx', 2, 'frame_commit', 4000),
+        ('object', 'tx', 11, 'clone', 500), ('object', 'tx', 12, 'clone', 500)""")
     if packet_phases:
-        connection.execute(
-            """INSERT INTO packet_phase_intervals VALUES
-               (100, 'scheduling', 0, 4000, 'success'),
-               (200, 'packet_encrypt', 0, 1000, 'success')"""
-        )
+        connection.execute("""INSERT INTO metrics.phase_totals VALUES
+            ('packet', 'rx', 100, 'scheduling', 4000), ('packet', 'tx', 200, 'packet_encrypt', 1000)""")
     return connection
 
 

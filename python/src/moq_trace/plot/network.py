@@ -24,8 +24,8 @@ def _network_connections(connection: duckdb.DuckDBPyConnection) -> list[str]:
     """
 
     rows = connection.execute(
-        """SELECT role, quantile_cont(smoothed_rtt_us, 0.99) AS p99
-           FROM network_recovery GROUP BY role ORDER BY role"""
+        """SELECT role, quantile_cont(smoothed_rtt_ns, 0.99) AS p99
+           FROM network.recovery GROUP BY role ORDER BY role"""
     ).fetchall()
     publishers = [role for role, _p99 in rows if role == "publisher"]
     subscribers = sorted(
@@ -55,7 +55,7 @@ def _recovery_series(
 
     filled = f"""SELECT elapsed_ns,
                         last_value({column} IGNORE NULLS) OVER (ORDER BY elapsed_ns) AS value
-                 FROM network_recovery WHERE role = $role"""
+                 FROM network.recovery WHERE role = $role"""
     if peak_every_ns is not None:
         return connection.execute(
             f"""SELECT floor(elapsed_ns / $every) * $every / 1e9 AS second, max(value)
@@ -70,7 +70,7 @@ def _recovery_series(
     before = [value for elapsed_ns, value in rows if elapsed_ns < 0]
     series = [(0.0, before[-1])] if before else []
     series += [(elapsed_ns / 1e9, value) for elapsed_ns, value in rows if elapsed_ns >= 0]
-    (end_ns,) = connection.execute("SELECT max(elapsed_ns) FROM network_recovery").fetchone()
+    (end_ns,) = connection.execute("SELECT max(elapsed_ns) FROM network.recovery").fetchone()
     if series and end_ns is not None and end_ns / 1e9 > series[-1][0]:
         series.append((end_ns / 1e9, series[-1][1]))
     return series
@@ -105,8 +105,8 @@ def plot_network(
             # as a drop in throughput, so only whole seconds are drawn.
             rows = connection.execute(
                 f"""SELECT floor(elapsed_ns / 1e9) + 0.5 AS second, sum(bytes) * 8 / 1e6
-                    FROM network_datagrams WHERE direction = ? AND {role_filter}
-                      AND elapsed_ns < (SELECT floor(max(elapsed_ns) / 1e9) * 1e9 FROM network_datagrams)
+                    FROM network.datagrams WHERE direction = ? AND {role_filter}
+                      AND elapsed_ns < (SELECT floor(max(elapsed_ns) / 1e9) * 1e9 FROM network.datagrams)
                     GROUP BY second ORDER BY second""",
                 [direction],
             ).fetchall()
@@ -136,8 +136,8 @@ def plot_network(
     for index, role in enumerate(roles):
         color = colors[role]
         for axis, column, scale, style, peak_every_ns in (
-            (rtt, "smoothed_rtt_us", 1 / 1000, "-", None),
-            (rtt, "min_rtt_us", 1 / 1000, "--", None),
+            (rtt, "smoothed_rtt_ns", 1 / 1_000_000, "-", None),
+            (rtt, "min_rtt_ns", 1 / 1_000_000, "--", None),
             (window, "congestion_window", 1 / 1024, "-", None),
             (window, "bytes_in_flight", 1 / 1024, "--", 100_000_000),
         ):
@@ -152,7 +152,7 @@ def plot_network(
             )
         lost = connection.execute(
             """SELECT floor(elapsed_ns / 1e9) + 0.5 AS second, count(*)
-               FROM network_losses WHERE role = ? GROUP BY second ORDER BY second""",
+               FROM network.losses WHERE role = ? GROUP BY second ORDER BY second""",
             [role],
         ).fetchall()
         if lost:
@@ -177,7 +177,7 @@ def plot_network(
     else:
         rtt.legend(loc="upper right", fontsize=8)
         window.legend(loc="upper right", fontsize=8)
-        total = connection.execute("SELECT count(*) FROM network_losses").fetchone()[0]
+        total = connection.execute("SELECT count(*) FROM network.losses").fetchone()[0]
         if total == 0:
             _no_data(loss, "No packets declared lost")
         else:

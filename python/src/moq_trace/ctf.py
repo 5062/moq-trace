@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 from collections.abc import Collection, Iterable, Iterator
 
@@ -240,10 +241,19 @@ def _decoder(event_class) -> _Decoder | None:
     return _Decoder(event_class, name)
 
 
-def _batch(name: str, rows: list[list]) -> pa.RecordBatch:
-    schema = SCHEMAS[name]
+def _batch(name: str, rows: list[list], metadata: dict | None = None) -> pa.RecordBatch:
+    schema = SCHEMAS[name].with_metadata(metadata) if metadata else SCHEMAS[name]
     columns = [pa.array(column, type=field.type) for column, field in zip(zip(*rows), schema, strict=True)]
     return pa.RecordBatch.from_arrays(columns, schema=schema)
+
+
+def _capture_identity(trace) -> tuple[str, str]:
+    """Read the CTF UUID, exposed as a UID by Babeltrace MIP version 1."""
+
+    capture = trace.uid if getattr(trace, "graph_mip_version", 0) >= 1 else trace.uuid
+    if capture is None or "hostname" not in trace.environment:
+        raise CtfError("CTF trace requires a UUID and hostname to identify its processes")
+    return str(capture), str(trace.environment["hostname"])
 
 
 def batches(
@@ -277,7 +287,9 @@ def _batches(
     # Keyed by the event class address, which is stable for the whole iteration,
     # so one lookup replaces resolving the event layout on every event.
     decoders: dict[int, _Decoder | None] = {}
-    rows: dict[str, list[list]] = {name: [] for name in SCHEMAS}
+    rows: dict[tuple[str, str, str], list[list]] = {}
+    sources: dict[int, tuple[str, str]] = {}
+    metadata: dict[tuple[str, str, str], dict] = {}
     discarded_events = 0
     discarded_packets = 0
     event_count = 0
@@ -309,17 +321,32 @@ def _batches(
             pid = UNKNOWN_PID
         elif allowed is not None and pid not in allowed:
             raise CtfError(f"event {decoder.event_name} came from VPID {pid}, which is not in {sorted(allowed)}")
-        values = rows[decoder.name]
+        trace = event.stream.trace
+        if trace.addr not in sources:
+            sources[trace.addr] = _capture_identity(trace)
+        capture, hostname = sources[trace.addr]
+        key = (capture, hostname, decoder.name)
+        if key not in metadata:
+            outcomes = sorted(
+                {
+                    label
+                    for field, _, labels in decoder.fields
+                    if field == "outcome" and labels is not None
+                    for label, _ in labels._mappings
+                }
+            )
+            metadata[key] = {"capture": capture, "hostname": hostname, "outcomes": json.dumps(outcomes)}
+        values = rows.setdefault(key, [])
         values.append(decoder.row(message, event, pid))
         event_count += 1
         if len(values) == batch_size:
-            yield decoder.name, _batch(decoder.name, values)
+            yield decoder.name, _batch(decoder.name, values, metadata[key])
             values.clear()
 
     if discarded_events or discarded_packets:
         raise CtfError(f"LTTng discarded {discarded_events} events and {discarded_packets} packets")
     if event_count == 0:
         raise CtfError("CTF trace contains no MoQ or QUIC trace events")
-    for name, values in rows.items():
+    for key, values in rows.items():
         if values:
-            yield name, _batch(name, values)
+            yield key[2], _batch(key[2], values, metadata[key])

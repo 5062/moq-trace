@@ -14,11 +14,9 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 
-import duckdb
-
 from . import network
 from .analyze import run as analyze
-from .artifact import open_artifact, write_metadata
+from .artifact import open_artifact
 from .capture import (
     LttngSession,
     ManagedProcess,
@@ -27,17 +25,17 @@ from .capture import (
     wait_for_log,
     wait_for_startup,
 )
+from .comparison import write_comparison
 from .config import ComparisonConfig, ExperimentConfig, Host
 from .metadata import (
     Affinity,
     Binaries,
     CommandSet,
-    ComparisonMetadata,
-    ComparisonRun,
     Window,
     Workload,
 )
 from .network import NetworkManifest
+from .plot.common import format_byte_size
 from .remote import RemoteHost, RemoteProcess, ssh_command
 from .render import render
 
@@ -600,7 +598,8 @@ def _binaries(config: ExperimentConfig, roles: _Roles) -> Binaries:
 def _validate_workload(database: pathlib.Path) -> None:
     with open_artifact(database, "run") as (connection, _, _metadata):
         count, first, last = connection.execute(
-            "SELECT count(DISTINCT group_id), min(group_id), max(group_id) FROM selected_rx"
+            "SELECT count(DISTINCT group_id), min(group_id), max(group_id) "
+            "FROM model.selected_objects JOIN model.objects USING(process_id, trace_id)"
         ).fetchone()
         if count != last - first + 1:
             raise ExperimentError("steady-state groups are not contiguous")
@@ -682,10 +681,14 @@ def compare(config: ComparisonConfig) -> pathlib.Path:
             }
         )
         database = run(run_config)
-        runs.append(ComparisonRun(value=value, database=str(database.relative_to(output))))
+        label = (
+            f"{value} {'subscriber' if value == 1 else 'subscribers'}"
+            if field == "subscribers"
+            else format_byte_size(value)
+        )
+        runs.append((label, database, value))
     database = output / "comparison.duckdb"
-    with duckdb.connect(str(database)) as connection:
-        write_metadata(connection, ComparisonMetadata(dimension=config.dimension, runs=tuple(runs)))
+    write_comparison(database, config.dimension, runs)
     if config.experiment.render:
         render(database)
     return database

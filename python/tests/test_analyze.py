@@ -19,6 +19,7 @@ from trace_source import Enum, Event  # noqa: E402
 
 from moq_trace import coverage, ctf, macros  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
+    _create_processes,
     _define_lifecycle_views,
     _define_metrics,
     _define_timelines,
@@ -44,10 +45,25 @@ class SqlAnalysisTests(unittest.TestCase):
         self.connection.execute("CREATE SCHEMA raw")
         for name, schema in ctf.SCHEMAS.items():
             self.connection.register("rows", pa.Table.from_batches([], schema=schema))
-            self.connection.execute(f"CREATE TABLE raw.{name} AS SELECT * FROM rows")
+            self.connection.execute(f"CREATE TABLE raw.{name} AS SELECT *, 0::UINTEGER AS process_id FROM rows")
             self.connection.unregister("rows")
+        _create_processes(self.connection)
+        self.connection.execute("INSERT INTO processes VALUES (0, 'fixture', 'test-host', 0, 0, 0, true)")
         _select_process(self.connection, 0, (0,))
         _define_lifecycle_views(self.connection)
+
+    def prepare_model(self) -> None:
+        """Validate fixture events through the same model-building path as analysis."""
+
+        union = " UNION ".join(
+            f"SELECT outcome FROM {name} WHERE outcome IS NOT NULL"
+            for name, schema in ctf.SCHEMAS.items()
+            if "outcome" in schema.names
+        )
+        labels = {row[0] for row in self.connection.execute(union).fetchall()} | {"success"}
+        encoded = ", ".join("'" + label.replace("'", "''") + "'" for label in sorted(labels))
+        self.connection.execute(f"CREATE TYPE outcome AS ENUM ({encoded})")
+        _validate_raw(self.connection)
 
     def tearDown(self) -> None:
         self.connection.close()
@@ -55,7 +71,7 @@ class SqlAnalysisTests(unittest.TestCase):
     def insert(self, table: str, **row) -> None:
         row.setdefault("pid", 0)
         self.connection.register("rows", pa.Table.from_pylist([row], schema=ctf.SCHEMAS[table]))
-        self.connection.execute(f"INSERT INTO raw.{table} SELECT * FROM rows")
+        self.connection.execute(f"INSERT INTO raw.{table} SELECT *, pid::UINTEGER AS process_id FROM rows")
         self.connection.unregister("rows")
 
     def object_start(self, trace_id: int, direction: str, connection_id: int, pid: int = 0) -> None:
@@ -141,7 +157,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.object_start(1, "rx", 1)
         self.insert("udp_socket_start", trace_id=99)
         self.insert("udp_socket_start", trace_id=99)
-        _validate_raw(self.connection)
+        self.prepare_model()
 
     def unfinished_object(self, trace_id: int, timestamp_ns: int) -> None:
         self.insert(
@@ -167,9 +183,9 @@ class SqlAnalysisTests(unittest.TestCase):
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
         self.unfinished_object(3, 900_000)
-        _validate_raw(self.connection)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
-        self.connection.execute("UPDATE analysis_window SET end_ns = 500_000")
+        self.connection.execute("UPDATE model.window SET end_ns = 500_000")
 
         _validate_truncation(self.connection)
 
@@ -177,9 +193,9 @@ class SqlAnalysisTests(unittest.TestCase):
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
         self.unfinished_object(3, 150_000)
-        _validate_raw(self.connection)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
-        self.connection.execute("UPDATE analysis_window SET end_ns = 500_000")
+        self.connection.execute("UPDATE model.window SET end_ns = 500_000")
 
         with self.assertRaisesRegex(TraceError, "object starts without completions inside the analysis window"):
             _validate_truncation(self.connection)
@@ -207,7 +223,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 edge="start",
             )
 
-        _validate_raw(self.connection)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         _validate_truncation(self.connection)
 
@@ -225,7 +241,7 @@ class SqlAnalysisTests(unittest.TestCase):
             edge="start",
         )
 
-        _validate_raw(self.connection)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         with self.assertRaisesRegex(TraceError, "quic_packet_phase contains unmatched phase boundaries"):
             _validate_truncation(self.connection)
@@ -234,7 +250,7 @@ class SqlAnalysisTests(unittest.TestCase):
         for trace_id, direction in ((1, "rx"), (2, "tx"), (3, "rx"), (4, "tx")):
             self.object_start(trace_id, direction, trace_id)
         self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 9, group_id = 6 WHERE trace_id >= 3")
-        _validate_raw(self.connection)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 2)
 
@@ -248,6 +264,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 9 WHERE trace_id >= 3")
         self.connection.execute("UPDATE raw.moq_object_start SET timestamp_ns = 150_000 WHERE trace_id = 3")
 
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
 
         self.assertEqual(
@@ -258,9 +275,8 @@ class SqlAnalysisTests(unittest.TestCase):
     def test_window_requires_an_object_for_every_subscriber(self) -> None:
         # No inbound object reaches the subscriber, so there is no steady state to measure.
         self.object_start(1, "rx", 1)
-        self.object_start(2, "tx", 2)
-        self.connection.execute("UPDATE raw.moq_object_start SET logical_group = 9 WHERE trace_id = 1")
 
+        self.prepare_model()
         with self.assertRaisesRegex(TraceError, "copied to all 1 subscribers"):
             _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
 
@@ -276,7 +292,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.assertEqual(self.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone()[0], 4)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM moq_object_start").fetchone()[0], 2)
 
-        _validate_raw(self.connection)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
 
         # The peer contributes no inbound objects, so only the relay is measured.
@@ -302,6 +318,7 @@ class SqlAnalysisTests(unittest.TestCase):
     def test_coverage_requires_packets_for_selected_objects(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
+        self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         with self.assertRaisesRegex(TraceError, "does not have complete packet coverage"):
             coverage.resolve(self.connection)
@@ -318,7 +335,7 @@ class SqlAnalysisTests(unittest.TestCase):
                WHERE trace_id = 5"""
         )
         self.connection.execute("UPDATE raw.quic_packet_start SET timestamp_ns = 40000 WHERE trace_id = 5")
-        _validate_raw(self.connection)
+        self.prepare_model()
         origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
 
         coverage.resolve(self.connection)
@@ -326,7 +343,10 @@ class SqlAnalysisTests(unittest.TestCase):
 
         self.assertEqual(
             self.connection.execute(
-                "SELECT first_start_ns, packet_ids FROM object_packet_coverage WHERE trace_id = 1"
+                """SELECT first_start_ns, packet_ids FROM (SELECT c.object_trace_id AS trace_id, c.first_start_ns,
+                c.first_end_ns, c.complete_end_ns, list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids
+                FROM model.coverage c JOIN model.coverage_packets p USING(process_id, object_trace_id) GROUP
+                BY ALL) WHERE trace_id = 1"""
             ).fetchone(),
             (90000, [3]),
         )
@@ -348,7 +368,7 @@ class SqlAnalysisTests(unittest.TestCase):
                SET packet_number = 99, packet_space = 'initial', byte_len = 100
                WHERE trace_id = 4"""
         )
-        _validate_raw(self.connection)
+        self.prepare_model()
 
         self.assertEqual(
             self.connection.execute(
@@ -365,7 +385,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.phase(3, "routing", 110_000, 120_000)
         self.phase(3, "scheduling", 120_000, 130_000)
 
-        _validate_raw(self.connection)
+        self.prepare_model()
         origin = _select_window(
             self.connection,
             object_size=16,
@@ -386,13 +406,15 @@ class SqlAnalysisTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            self.connection.execute("SELECT p50 FROM metric_statistics WHERE metric = 'quic_full_span'").fetchone()[0],
-            220.0,
+            self.connection.execute("SELECT p50_ns FROM metrics.statistics WHERE metric = 'quic_full_span'").fetchone()[
+                0
+            ],
+            220_000.0,
         )
-        self.assertEqual(self.connection.execute("SELECT count(*) FROM timeline_selections").fetchone()[0], 3)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM metrics.timeline_selections").fetchone()[0], 3)
 
     def _derive_all(self) -> None:
-        _validate_raw(self.connection)
+        self.prepare_model()
         origin = _select_window(
             self.connection,
             object_size=16,
@@ -444,7 +466,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.phase(4, "application", 230_000, 240_000)
 
         with self.assertRaisesRegex(TraceError, "application packet phases outside inbound packets"):
-            _validate_raw(self.connection)
+            self.prepare_model()
 
     def test_rejects_application_phases_overlapping_other_phases(self) -> None:
         self.packet(3, "rx", 1)
@@ -452,7 +474,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.phase(3, "application", 150_000, 180_000)
 
         with self.assertRaisesRegex(TraceError, "application packet phases overlap other packet phases"):
-            _validate_raw(self.connection)
+            self.prepare_model()
 
     def test_cut_through_forwarding_has_no_post_ingress_tail(self) -> None:
         self.object_start(1, "rx", 1)
@@ -460,6 +482,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.packet(3, "rx", 1)
         self.packet(4, "tx", 2)
         self.connection.execute("UPDATE raw.quic_packet_end SET timestamp_ns = 350000 WHERE trace_id = 3")
+        self.prepare_model()
         origin = _select_window(
             self.connection,
             object_size=16,
@@ -480,7 +503,13 @@ class SqlAnalysisTests(unittest.TestCase):
         """Yield the fixture tables where ingest would read batches from CTF."""
 
         for name in ctf.SCHEMAS:
-            yield name, self.connection.execute(f"SELECT * FROM raw.{name}").arrow()
+            batch = self.connection.execute(f"SELECT * EXCLUDE(process_id) FROM raw.{name}").to_arrow_table()
+            yield (
+                name,
+                batch.replace_schema_metadata(
+                    {"capture": "fixture", "hostname": "test-host", "outcomes": '["success", "malformed", "dropped"]'}
+                ),
+            )
 
     def test_run_publishes_a_queryable_database(self) -> None:
         """The public entry point ingests and analyzes one trace into a run artifact."""
@@ -511,7 +540,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(metadata.processes.analyzed_pid, 0)
                 self.assertEqual(metadata.processes.captured_pids, (0,))
                 self.assertEqual(
-                    connection.execute("SELECT count(*) FROM metric_statistics").fetchone()[0],
+                    connection.execute("SELECT count(*) FROM metrics.statistics").fetchone()[0],
                     10,
                 )
 
@@ -539,7 +568,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(metadata.transport_capabilities.packet_phases, ())
                 self.assertEqual(
                     connection.execute(
-                        "SELECT count(*) FROM metric_statistics WHERE metric = 'rx_packet_span'"
+                        "SELECT count(*) FROM metrics.statistics WHERE metric = 'rx_packet_span'"
                     ).fetchone()[0],
                     1,
                 )
@@ -571,11 +600,16 @@ class SqlAnalysisTests(unittest.TestCase):
         self.packet(4, "tx", 2)
         self.packet(5, "rx", 99)
         self.phase(5, "routing", 110_000, 120_000)
+        self.prepare_model()
         origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         coverage.resolve(self.connection)
         _derive_samples(self.connection, origin)
+        _define_metrics(self.connection)
         self.assertEqual(
-            self.connection.execute("SELECT DISTINCT trace_id FROM packet_samples ORDER BY trace_id").fetchall(),
+            self.connection.execute(
+                """SELECT DISTINCT packet_trace_id FROM metrics.samples WHERE packet_trace_id IS NOT NULL ORDER BY
+                packet_trace_id"""
+            ).fetchall(),
             [(3,), (4,)],
         )
 
@@ -610,12 +644,16 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(metadata.counts.correlated_objects, 1)
                 self.assertEqual(metadata.window.warmup_seconds, 0.5)
                 self.assertEqual(
-                    connection.execute("SELECT DISTINCT trace_id FROM packet_samples ORDER BY trace_id").fetchall(),
+                    connection.execute(
+                        """SELECT DISTINCT packet_trace_id FROM metrics.samples WHERE packet_trace_id IS
+                            NOT NULL ORDER BY
+                        packet_trace_id"""
+                    ).fetchall(),
                     [(13,), (14,)],
                 )
                 self.assertEqual(metadata.population.packet, "selected_object_packets")
                 self.assertEqual(
-                    connection.execute("SELECT * FROM analysis_window").fetchall(),
+                    connection.execute("SELECT origin_ns, start_ns, end_ns FROM model.window").fetchall(),
                     [(100_000, 500_100_000, 1_000_100_000)],
                 )
 
@@ -660,7 +698,7 @@ class SqlAnalysisTests(unittest.TestCase):
         for row in rows:
             row.setdefault("pid", 0)
         self.connection.register("rows", pa.Table.from_pylist(rows, schema=ctf.SCHEMAS[table]))
-        self.connection.execute(f"INSERT INTO raw.{table} SELECT * FROM rows")
+        self.connection.execute(f"INSERT INTO raw.{table} SELECT *, pid::UINTEGER AS process_id FROM rows")
         self.connection.unregister("rows")
 
     def _random_coverage_trace(self, seed: int, *, complete: bool) -> None:
@@ -743,11 +781,13 @@ class SqlAnalysisTests(unittest.TestCase):
         self.insert_rows("quic_packet_start", packet_starts)
         self.insert_rows("quic_packet_end", packet_ends)
         self.insert_rows("quic_stream_frame", frames)
+        self.connection.execute("CREATE SCHEMA model")
         self.connection.execute(
             """CREATE TEMP TABLE coverage_targets(trace_id UBIGINT, connection_id UBIGINT, direction VARCHAR,
-                   stream_id UBIGINT, stream_offset_start UBIGINT, stream_offset_end UBIGINT)"""
+                   stream_id UBIGINT, stream_offset_start UBIGINT, stream_offset_end UBIGINT, process_id UINTEGER
+                   DEFAULT 0)"""
         )
-        self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?)", targets)
+        self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?, DEFAULT)", targets)
 
     def _plain_overlaps(self) -> list[tuple]:
         """Pair targets with frames by a plain overlap join, in send order."""
@@ -807,16 +847,23 @@ class SqlAnalysisTests(unittest.TestCase):
                 coverage._resolve_targets(self.connection)
 
                 self.assertEqual(
-                    self.connection.execute("SELECT * FROM object_packet_coverage ORDER BY trace_id").fetchall(),
+                    self.connection.execute(
+                        """SELECT * FROM (SELECT c.object_trace_id AS trace_id, c.first_start_ns,
+                            c.first_end_ns, c.complete_end_ns,
+                        list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids FROM model.coverage c JOIN
+                        model.coverage_packets p USING(process_id, object_trace_id) GROUP BY ALL) ORDER BY
+                        trace_id"""
+                    ).fetchall(),
                     expected,
                 )
 
     def test_coverage_rejects_a_range_with_a_gap(self) -> None:
         self.packet(3, "rx", 1)
         self.connection.execute("UPDATE raw.quic_stream_frame SET offset_end = 8 WHERE trace_id = 3")
+        self.connection.execute("CREATE SCHEMA model")
         self.connection.execute(
             """CREATE TEMP TABLE coverage_targets AS
-               SELECT 1::UBIGINT AS trace_id, 1::UBIGINT AS connection_id, 'rx' AS direction,
+               SELECT 0::UINTEGER AS process_id, 1::UBIGINT AS trace_id, 1::UBIGINT AS connection_id, 'rx' AS direction,
                       10::UBIGINT AS stream_id, 0::UBIGINT AS stream_offset_start,
                       16::UBIGINT AS stream_offset_end"""
         )

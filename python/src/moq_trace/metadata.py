@@ -27,13 +27,9 @@ ComparisonDimension = Literal["subscribers", "object_size"]
 class ArtifactModel(BaseModel):
     """Base for the metadata an artifact records about itself.
 
-    Unlike experiment configuration, an artifact is read by a tool that may be
-    older than the one that wrote it. Unknown keys are therefore kept instead of
-    rejected, which is where the additive compatibility rule in `AGENTS.md` is
-    enforced: a newer producer stays readable, and the extra keys remain
-    available to a caller that knows about them. Missing or ill-typed keys are
-    still rejected, because a reader forced to guess at a measurement is worse
-    than one that refuses to report it.
+    Metadata is validated after checking the artifact schema version. Extra
+    descriptive keys are retained for callers, while required fields and types
+    remain strict. Provider compatibility is a separate contract.
 
     Types are checked strictly because artifact JSON is machine-written: a
     mismatch is a producer bug, and silently reading `"16384"` as a byte count
@@ -108,6 +104,7 @@ class Processes(ArtifactModel):
     slice of a recording that may hold several.
     """
 
+    process_id: int = Field(ge=0)
     analyzed_pid: int = Field(ge=0)
     captured_pids: tuple[int, ...]
 
@@ -158,16 +155,14 @@ class RunMetadata(ArtifactModel):
     affinity: Affinity = Field(default_factory=Affinity)
     binaries: Binaries | None = None
     commands: CommandSet | None = None
-    # Absent from artifacts written before network capture existed, and from runs
-    # that captured nothing beside the trace.
+    # Unset when no network capture was supplied beside the trace.
     network: NetworkCapabilities | None = None
 
 
 class ComparisonRun(ArtifactModel):
     """One workload in a comparison and the artifact it produced."""
 
-    value: int = Field(gt=0)
-    database: str
+    run_id: int = Field(ge=0)
 
 
 class ComparisonMetadata(ArtifactModel):
@@ -176,5 +171,5 @@ class ComparisonMetadata(ArtifactModel):
     # The on-disk artifact kind this model describes.
     KIND: ClassVar[str] = "comparison"
 
-    dimension: ComparisonDimension
+    dimension: Literal["subscribers", "object_size", "relay"]
     runs: tuple[ComparisonRun, ...] = Field(min_length=1)

@@ -10,6 +10,7 @@ payload holds unsigned integers and unsigned enumerations, and the optional
 from __future__ import annotations
 
 import dataclasses
+import uuid
 
 try:
     import bt2
@@ -148,6 +149,8 @@ if bt2 is not None:
                 event_classes[(item.name, has_vpid)] = stream_classes[has_vpid].create_event_class(
                     name=item.name, payload_field_class=payload
                 )
-            trace = trace_class()
+            trace = trace_class(
+                uuid=uuid.UUID("00000000-0000-0000-0000-000000000001"), environment={"hostname": "test-host"}
+            )
             streams = {has_vpid: trace.create_stream(stream_class) for has_vpid, stream_class in stream_classes.items()}
             self._add_output_port("out", (streams, event_classes, labels, items))

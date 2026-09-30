@@ -41,7 +41,7 @@ def run_metadata(**overrides) -> RunMetadata:
             timeline="slowest_copy_per_selected_object",
         ),
         "counts": Counts(groups=1, packets=1, selected_packets=1, correlated_objects=1, correlated_object_copies=1),
-        "processes": Processes(analyzed_pid=0, captured_pids=(0,)),
+        "processes": Processes(process_id=0, analyzed_pid=0, captured_pids=(0,)),
     }
     fields.update(overrides)
     return RunMetadata(**fields)
@@ -50,5 +50,7 @@ def run_metadata(**overrides) -> RunMetadata:
 def write_raw_metadata(connection: duckdb.DuckDBPyConnection, kind: str, encoded: str) -> None:
     """Write metadata JSON directly, as a different version of the tool would."""
 
-    connection.execute("CREATE TABLE metadata(kind VARCHAR PRIMARY KEY, value JSON NOT NULL)")
-    connection.execute("INSERT INTO metadata VALUES (?, ?)", [kind, encoded])
+    connection.execute(
+        """CREATE TABLE metadata(kind VARCHAR PRIMARY KEY, schema_version INTEGER NOT NULL, value JSON NOT NULL)"""
+    )
+    connection.execute("INSERT INTO metadata VALUES (?, 2, ?)", [kind, encoded])

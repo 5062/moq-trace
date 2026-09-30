@@ -29,6 +29,7 @@ class ComparisonRun:
 
     label: str
     connection: duckdb.DuckDBPyConnection
+    run_id: int | None = None
 
 
 def describe(options: PlotOptions) -> str:
@@ -68,12 +69,15 @@ def _metrics(connection: duckdb.DuckDBPyConnection, table: str) -> set[str]:
     return {metric for (metric,) in connection.execute(f"SELECT DISTINCT metric FROM {table}").fetchall()}
 
 
-def _values_us(connection: duckdb.DuckDBPyConnection, table: str, metric: str) -> list[float]:
+def _values_us(
+    connection: duckdb.DuckDBPyConnection, table: str, metric: str, run_id: int | None = None
+) -> list[float]:
+    scope = " AND run_id = ?" if run_id is not None else ""
     return [
         value
         for (value,) in connection.execute(
-            f"SELECT latency_ns / 1000.0 FROM {table} WHERE metric = ? ORDER BY latency_ns",
-            [metric],
+            f"SELECT value_ns / 1000.0 FROM {table} WHERE metric = ?{scope} ORDER BY value_ns",
+            [metric, run_id] if run_id is not None else [metric],
         ).fetchall()
     ]
 
@@ -82,6 +86,15 @@ def _values_us(connection: duckdb.DuckDBPyConnection, table: str, metric: str) -
 # contains the MoQ span, so the two are drawn as nested measurements rather than
 # alternatives.
 _OBJECT_SPANS = (
-    ("object_samples", "full_span", "MoQ"),
-    ("quic_object_samples", "quic_full_span", "QUIC+MoQ"),
+    ("metrics.samples", "full_span", "MoQ"),
+    ("metrics.samples", "quic_full_span", "QUIC+MoQ"),
 )
+
+
+def format_byte_size(value: int) -> str:
+    """Label a byte count using an exact binary unit when possible."""
+
+    for divisor, suffix in ((1024 * 1024, "MiB"), (1024, "KiB")):
+        if value % divisor == 0:
+            return f"{value // divisor} {suffix}"
+    return f"{value} bytes"

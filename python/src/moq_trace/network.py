@@ -222,7 +222,12 @@ def _load(
     )
     connection.register("network_batch", batch)
     try:
-        connection.execute(f"CREATE TABLE {table} AS SELECT * FROM network_batch")
+        connection.execute(
+            f"CREATE TABLE {table} AS SELECT "
+            "(SELECT process_id FROM processes WHERE analyzed)::UINTEGER AS process_id, * FROM network_batch"
+        )
+        for column in ("process_id", "elapsed_ns"):
+            connection.execute(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL")
     finally:
         connection.unregister("network_batch")
 
@@ -240,9 +245,9 @@ _RECOVERY_COLUMNS = pa.schema(
     [
         ("elapsed_ns", pa.int64()),
         ("connection", pa.string()),
-        ("smoothed_rtt_us", pa.float64()),
-        ("min_rtt_us", pa.float64()),
-        ("latest_rtt_us", pa.float64()),
+        ("smoothed_rtt_ns", pa.float64()),
+        ("min_rtt_ns", pa.float64()),
+        ("latest_rtt_ns", pa.float64()),
         ("congestion_window", pa.int64()),
         ("bytes_in_flight", pa.int64()),
         ("role", pa.string()),
@@ -292,7 +297,7 @@ def _ingest_packets(
     origin_ns: int,
 ) -> bool:
     if manifest.pcap is None:
-        _load(connection, "network_datagrams", _DATAGRAM_COLUMNS, [])
+        _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, [])
         return False
     datagrams = list(read_datagrams(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes))
     inbound: dict[str, int] = {}
@@ -307,7 +312,7 @@ def _ingest_packets(
         (realtime_ns - manifest.realtime_offset_ns - origin_ns, direction, peer, roles[peer], size)
         for realtime_ns, direction, peer, size in datagrams
     ]
-    _load(connection, "network_datagrams", _DATAGRAM_COLUMNS, [row for row in rows if row[0] >= 0])
+    _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, [row for row in rows if row[0] >= 0])
     return True
 
 
@@ -339,7 +344,7 @@ def _ingest_qlog(
                         elapsed_ns,
                         key,
                         *(
-                            None if data.get(field) is None else float(data[field]) * 1_000
+                            None if data.get(field) is None else float(data[field]) * 1_000_000
                             for field in ("smoothed_rtt", "min_rtt", "latest_rtt")
                         ),
                         data.get("congestion_window"),
@@ -351,13 +356,13 @@ def _ingest_qlog(
                 losses.append((elapsed_ns, key, header.get("packet_number"), header.get("length"), data.get("trigger")))
     roles = _roles(received, sent, first_seen, numbered=True)
     for table, columns, rows in (
-        ("network_recovery", _RECOVERY_COLUMNS, recovery),
-        ("network_losses", _LOSS_COLUMNS, losses),
+        ("network.recovery", _RECOVERY_COLUMNS, recovery),
+        ("network.losses", _LOSS_COLUMNS, losses),
     ):
         # Recovery rows before the origin are kept: qlog reports a field only when
         # it changes, and a value settled during the handshake, such as the
         # minimum RTT, still holds inside the window.
-        kept = rows if table == "network_recovery" else [row for row in rows if row[0] >= 0]
+        kept = rows if table == "network.recovery" else [row for row in rows if row[0] >= 0]
         _load(connection, table, columns, [(*row, roles[row[1]]) for row in kept])
     return len(roles)
 
@@ -376,6 +381,7 @@ def ingest(
     next update.
     """
 
+    connection.execute("CREATE SCHEMA IF NOT EXISTS network")
     manifest = read_manifest(manifest_path)
     root = manifest_path.parent
     packets = _ingest_packets(connection, manifest, root, origin_ns)

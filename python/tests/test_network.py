@@ -215,17 +215,18 @@ class IngestTests(unittest.TestCase):
             )
 
             connection = duckdb.connect(":memory:")
+            connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
             try:
                 capabilities = network.ingest(connection, manifest, origin_ns)
                 roles = connection.execute(
-                    "SELECT direction, role, min(elapsed_ns) FROM network_datagrams GROUP BY ALL ORDER BY ALL"
+                    "SELECT direction, role, min(elapsed_ns) FROM network.datagrams GROUP BY ALL ORDER BY ALL"
                 ).fetchall()
                 rtt = connection.execute(
-                    "SELECT role, min(smoothed_rtt_us), min(elapsed_ns) FROM network_recovery GROUP BY role"
+                    "SELECT role, min(smoothed_rtt_ns), min(elapsed_ns) FROM network.recovery GROUP BY role"
                 ).fetchall()
-                loss = connection.execute("SELECT role, elapsed_ns, packet_number FROM network_losses").fetchall()
+                loss = connection.execute("SELECT role, elapsed_ns, packet_number FROM network.losses").fetchall()
                 recovery_types = {
-                    name: kind for name, kind, *_ in connection.execute("DESCRIBE network_recovery").fetchall()
+                    name: kind for name, kind, *_ in connection.execute("DESCRIBE network.recovery").fetchall()
                 }
                 output = root / "network.png"
                 plot_network(output, PlotOptions(None, 1, 1_200, 10, "test"), connection, True, True)
@@ -237,22 +238,23 @@ class IngestTests(unittest.TestCase):
 
         self.assertEqual((capabilities.packets, capabilities.qlog_connections), (True, 2))
         self.assertEqual(roles, [("egress", "subscriber", 0), ("ingress", "publisher", 0)])
-        self.assertEqual(rtt, [("subscriber 1", 1_000.0, 0)])
+        self.assertEqual(rtt, [("subscriber 1", 1_000_000.0, 0)])
         self.assertEqual(loss, [("subscriber 1", 1_000_000_000, 7)])
-        self.assertEqual(recovery_types["min_rtt_us"], "DOUBLE")
+        self.assertEqual(recovery_types["min_rtt_ns"], "DOUBLE")
         self.assertEqual(recovery_types["bytes_in_flight"], "BIGINT")
 
     def test_a_value_settled_before_the_window_is_drawn_from_zero(self) -> None:
         connection = duckdb.connect(":memory:")
+        connection.execute("CREATE SCHEMA network")
         try:
             connection.execute(
-                """CREATE TABLE network_recovery AS SELECT * FROM (VALUES
+                """CREATE TABLE network.recovery AS SELECT * FROM (VALUES
                      (-5, 'sub', 30.0, 'subscriber 1'),
                      (2000000000, 'sub', NULL, 'subscriber 1'),
                      (3000000000, 'other', NULL, 'subscriber 2')
-                   ) AS rows(elapsed_ns, connection, min_rtt_us, role)"""
+                   ) AS rows(elapsed_ns, connection, min_rtt_ns, role)"""
             )
-            series = _recovery_series(connection, "subscriber 1", "min_rtt_us")
+            series = _recovery_series(connection, "subscriber 1", "min_rtt_ns")
         finally:
             connection.close()
 
@@ -263,14 +265,15 @@ class IngestTests(unittest.TestCase):
             manifest = pathlib.Path(directory) / network.MANIFEST
             manifest.write_text(network.NetworkManifest(relay_port=RELAY_PORT, realtime_offset_ns=0).model_dump_json())
             connection = duckdb.connect(":memory:")
+            connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
             try:
                 capabilities = network.ingest(connection, manifest, 0)
                 counts = [
                     connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                    for table in ("network_datagrams", "network_recovery", "network_losses")
+                    for table in ("network.datagrams", "network.recovery", "network.losses")
                 ]
                 empty_types = {
-                    name: kind for name, kind, *_ in connection.execute("DESCRIBE network_losses").fetchall()
+                    name: kind for name, kind, *_ in connection.execute("DESCRIBE network.losses").fetchall()
                 }
             finally:
                 connection.close()
