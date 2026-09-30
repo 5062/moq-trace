@@ -1,12 +1,15 @@
 [relay]
 ssh = "jmp7jv@stark01.cs.virginia.edu"
+workdir = "/var/tmp/moq-trace-runs"
 address = "10.0.0.1"
 lttng = "nix develop ~/moq-trace --command lttng"   # only if lttng isn't on the ssh PATH
 
 [publisher]
 ssh = "jmp7jv@stark01.cs.virginia.edu"
+workdir = "/var/tmp/moq-trace-runs"
 checkout = "~/moq-trace"
 
 [subscriber]
 ssh = "jmp7jv@stark02.cs.virginia.edu"
+workdir = "/var/tmp/moq-trace-runs"
 checkout = "~/moq-trace"
