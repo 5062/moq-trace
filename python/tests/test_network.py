@@ -15,7 +15,8 @@ sys.path.insert(0, str(SOURCE))
 
 from moq_trace import network  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
-from moq_trace.plot import PlotOptions, _recovery_series, plot_network  # noqa: E402
+from moq_trace.plot import PlotOptions, plot_network  # noqa: E402
+from moq_trace.plot.network import _recovery_series  # noqa: E402
 
 RELAY_PORT = 4443
 LOOPBACK = 1

@@ -13,14 +13,13 @@ sys.path.insert(0, str(SOURCE))
 from moq_trace.plot import (  # noqa: E402
     ComparisonRun,
     PlotOptions,
-    _Row,
-    _row_summary,
     plot_breakdown,
     plot_breakdown_comparison,
     plot_latency_cdf,
     plot_latency_comparison,
     plot_stability,
 )
+from moq_trace.plot.breakdown import _Row, _row_summary  # noqa: E402
 
 OPTIONS = PlotOptions(None, 1, 1_024, 30, "test")
 
