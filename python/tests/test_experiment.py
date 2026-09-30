@@ -175,7 +175,7 @@ class ExperimentTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ExperimentConfig(output=pathlib.Path("run"), warmup_seconds=-1)
 
-    def test_commands_use_the_workload_and_window(self) -> None:
+    def test_peer_commands_leave_duration_to_the_controller(self) -> None:
         config = ExperimentConfig(
             output=pathlib.Path("run"),
             subscribers=3,
@@ -186,10 +186,66 @@ class ExperimentTests(unittest.TestCase):
             cooldown_seconds=3,
         )
 
-        subscriber = commands(config).subscriber
+        command = commands(config)
+        subscriber = command.subscriber
 
         self.assertEqual(subscriber[subscriber.index("--connections") + 1], "3")
-        self.assertEqual(subscriber[subscriber.index("--duration") + 1], "15s")
+        self.assertNotIn("--duration", subscriber)
+        self.assertNotIn("--duration", command.publisher)
+
+    def test_capture_runs_full_interval_after_readiness(self) -> None:
+        for remote_subscriber in (False, True):
+            with self.subTest(remote_subscriber=remote_subscriber), tempfile.TemporaryDirectory() as directory:
+                config = ExperimentConfig(
+                    output=pathlib.Path(directory),
+                    trace=False,
+                    warmup_seconds=0.25,
+                    duration_seconds=1,
+                    cooldown_seconds=0.25,
+                    relay_url="https://relay.example:4443",
+                    hosts=Hosts(subscriber=Host(ssh="me@peer", workdir="/tmp/runs")) if remote_subscriber else Hosts(),
+                )
+                clock = [0.0]
+                stopped = {}
+
+                def advance(seconds):
+                    clock[0] += seconds
+
+                def ready(*_args):
+                    advance(2)
+
+                def launch(name, *_args, **_kwargs):
+                    process = mock.Mock(name=name)
+                    process.name = name
+                    process.pid = {"relay": 100, "subscriber": 101, "publisher": 102}[name]
+                    process.process.poll.return_value = None
+                    process.stop.side_effect = lambda _graceful: stopped.update({name: clock[0]})
+                    return process
+
+                with (
+                    mock.patch.object(experiment, "ManagedProcess", side_effect=launch),
+                    mock.patch.object(experiment, "RemoteProcess", side_effect=launch),
+                    mock.patch.object(experiment, "wait_for_log", side_effect=ready) as readiness,
+                    mock.patch.object(experiment.time, "monotonic", side_effect=lambda: clock[0]),
+                    mock.patch.object(experiment.time, "sleep", side_effect=advance),
+                ):
+                    experiment._capture(config, commands(config), config.output)
+
+                self.assertEqual(readiness.call_count, 4)
+                for name in ("relay", "subscriber", "publisher"):
+                    self.assertAlmostEqual(stopped[name], 8 + 0.25 + 1 + 0.25)
+
+    def test_workload_rejects_even_successful_early_process_exits(self) -> None:
+        for name in ("relay", "subscriber", "publisher"):
+            for status in (0, 7):
+                with self.subTest(name=name, status=status):
+                    process = mock.Mock()
+                    process.name = name
+                    process.process.poll.return_value = status
+                    with self.assertRaisesRegex(
+                        ExperimentError, f"{name} exited with status {status} during the workload"
+                    ):
+                        experiment._wait_for_workload((process,), 1)
 
     def test_custom_relay_arguments_expand_run_paths(self) -> None:
         config = ExperimentConfig(
@@ -333,6 +389,7 @@ class ExperimentTests(unittest.TestCase):
             with (
                 mock.patch.object(experiment, "wait_for_log"),
                 mock.patch.object(experiment, "LttngSession"),
+                mock.patch.object(experiment, "_wait_for_workload"),
             ):
                 return experiment._capture(config, command, pathlib.Path(directory))
 
@@ -346,6 +403,7 @@ class ExperimentTests(unittest.TestCase):
                 mock.patch.object(experiment, "wait_for_log"),
                 mock.patch.object(experiment, "wait_for_startup") as wait_for_startup,
                 mock.patch.object(experiment, "LttngSession") as session_class,
+                mock.patch.object(experiment, "_wait_for_workload"),
             ):
                 capture_result = experiment._capture(config, command, pathlib.Path(directory))
         self.session_class = session_class
@@ -401,6 +459,7 @@ class ExperimentTests(unittest.TestCase):
                 with (
                     mock.patch.object(experiment, "wait_for_log"),
                     mock.patch.object(experiment, "LttngSession"),
+                    mock.patch.object(experiment, "_wait_for_workload"),
                 ):
                     config = ExperimentConfig(output=output, qlog=True)
                     result = experiment._capture(config, command, output)
@@ -441,6 +500,7 @@ class ExperimentTests(unittest.TestCase):
                 with (
                     mock.patch.object(experiment, "ManagedProcess", side_effect=self._processes()),
                     mock.patch.object(experiment, "wait_for_log"),
+                    mock.patch.object(experiment, "_wait_for_workload"),
                 ):
                     result = experiment._capture(config, command, pathlib.Path(directory))
 

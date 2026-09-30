@@ -247,8 +247,6 @@ def commands(
             "0",
             "--subscribe",
             "1",
-            "--duration",
-            f"{_run_seconds(config):g}s",
         ]
     )
     return CommandSet(relay=tuple(relay), publisher=tuple(publisher), subscriber=tuple(subscriber))
@@ -366,6 +364,25 @@ def _prepare_relay_host(output: pathlib.Path, relay: RemoteHost, directory: str,
     for name in ("relay.crt", "relay.key"):
         if (output / name).exists():
             relay.put(output / name, f"{directory}/{name}")
+
+
+def _wait_for_workload(processes: Sequence[ManagedProcess], seconds: float) -> None:
+    """Keep the workload running for the full interval after readiness.
+
+    Even a successful early exit shortens the measurement, so every workload
+    process must stay alive until the controller's monotonic deadline.
+    """
+
+    deadline = time.monotonic() + seconds
+    while True:
+        for process in processes:
+            status = process.process.poll()
+            if status is not None:
+                raise ExperimentError(f"{process.name} exited with status {status} during the workload")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
 
 
 def _capture(
@@ -487,10 +504,10 @@ def _capture(
             config.duration_seconds,
             config.cooldown_seconds,
         )
-        subscriber.wait(_run_seconds(config) + 15)
-        _log.info("workload finished; stopping the publisher and relay")
+        _wait_for_workload((relay, subscriber, publisher), _run_seconds(config))
+        _log.info("workload finished; stopping the subscriber, publisher and relay")
+        subscriber.stop(True)
         processes.remove(subscriber)
-        subscriber.log_handle.close()
         publisher.stop(True)
         processes.remove(publisher)
         relay.stop(config.relay_graceful_stop)

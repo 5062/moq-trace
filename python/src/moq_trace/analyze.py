@@ -57,7 +57,8 @@ def _define_lifecycle_views(connection: duckdb.DuckDBPyConnection) -> None:
            JOIN moq_object_end AS finish USING (trace_id);
 
            CREATE VIEW packet_lifecycles AS
-           SELECT start.* EXCLUDE (ctf_timestamp_ns, timestamp_ns),
+           SELECT start.* EXCLUDE (ctf_timestamp_ns, timestamp_ns, packet_number, packet_space, byte_len),
+                  finish.packet_number, finish.packet_space, finish.byte_len,
                   start.ctf_timestamp_ns AS start_ctf_timestamp_ns,
                   start.timestamp_ns AS start_ns,
                   finish.ctf_timestamp_ns AS end_ctf_timestamp_ns,

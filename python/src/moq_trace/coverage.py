@@ -83,6 +83,7 @@ def _stage_frames(connection: duckdb.DuckDBPyConnection) -> None:
              FROM quic_stream_frame AS frame
              JOIN packet_lifecycles AS packet USING (trace_id)
              WHERE packet.outcome = 'success' AND frame.outcome = 'success'
+               AND frame.offset_start < frame.offset_end
            )
            SELECT object.trace_id, frame.offset_start, frame.offset_end,
                   greatest(frame.offset_start, object.stream_offset_start) AS covered_start,

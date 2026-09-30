@@ -306,6 +306,57 @@ class SqlAnalysisTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "does not have complete packet coverage"):
             coverage.resolve(self.connection)
 
+    def test_empty_stream_frames_do_not_open_object_coverage(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.packet(5, "rx", 1)
+        self.connection.execute(
+            """UPDATE raw.quic_stream_frame
+               SET offset_start = 8, offset_end = 8, timestamp_ns = 50000
+               WHERE trace_id = 5"""
+        )
+        self.connection.execute("UPDATE raw.quic_packet_start SET timestamp_ns = 40000 WHERE trace_id = 5")
+        _validate_raw(self.connection)
+        origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+
+        coverage.resolve(self.connection)
+        _derive_samples(self.connection, origin)
+
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT first_start_ns, packet_ids FROM object_packet_coverage WHERE trace_id = 1"
+            ).fetchone(),
+            (90000, [3]),
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT count(*) FROM selected_packets WHERE trace_id = 5").fetchone()[0],
+            0,
+        )
+
+    def test_packet_lifecycles_keep_finalized_metadata(self) -> None:
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute(
+            """UPDATE raw.quic_packet_start
+               SET packet_number = NULL, packet_space = NULL, byte_len = 0
+               WHERE trace_id = 3"""
+        )
+        self.connection.execute(
+            """UPDATE raw.quic_packet_start
+               SET packet_number = 99, packet_space = 'initial', byte_len = 100
+               WHERE trace_id = 4"""
+        )
+        _validate_raw(self.connection)
+
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT trace_id, packet_number, packet_space, byte_len FROM packet_lifecycles ORDER BY trace_id"
+            ).fetchall(),
+            [(3, 1, "data", 1200), (4, 1, "data", 1200)],
+        )
+
     def test_derives_correlated_metrics(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
@@ -616,8 +667,8 @@ class SqlAnalysisTests(unittest.TestCase):
         """Insert random targets and frames around bucket boundaries.
 
         When `complete` is set, every target is also tiled by frames sent in a
-        random order, so each one resolves while retransmissions, zero-length
-        frames, and failed packets still overlap it.
+        random order, so each one resolves despite retransmissions, zero-length
+        frames, and failed packets mixed into the recording.
         """
 
         bucket = coverage._BUCKET_BYTES
@@ -713,8 +764,8 @@ class SqlAnalysisTests(unittest.TestCase):
                  ON frame.trace_id = packet.trace_id
                 AND frame.outcome = 'success'
                 AND frame.stream_id = object.stream_id
-                AND frame.offset_start < object.stream_offset_end
-                AND object.stream_offset_start < frame.offset_end
+                AND greatest(frame.offset_start, object.stream_offset_start)
+                      < least(frame.offset_end, object.stream_offset_end)
                ORDER BY object.trace_id, frame.timestamp_ns, packet.end_ns, packet.trace_id,
                         frame.offset_start, frame.offset_end"""
         ).fetchall()
