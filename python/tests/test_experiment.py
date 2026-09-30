@@ -8,6 +8,8 @@ import unittest
 from unittest import mock
 
 import duckdb
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from pydantic import ValidationError
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
@@ -21,6 +23,24 @@ from moq_trace.capture import _provider_listed  # noqa: E402
 from moq_trace.config import ComparisonConfig, ExperimentConfig, Host, Hosts  # noqa: E402
 from moq_trace.experiment import ExperimentError, _validate_workload, commands  # noqa: E402
 from moq_trace.metadata import CommandSet  # noqa: E402
+
+
+class _FakeConnection:
+    """Stand in for an asyncssh connection whose commands all finish with `status`."""
+
+    def __init__(self, status: int | None = 0, output: bytes = b"", stdout: str = "", stderr: str = "") -> None:
+        chunks = [output, b""] if output else [b""]
+        process = mock.Mock()
+        process.stdout.read = mock.AsyncMock(side_effect=chunks)
+        process.wait = mock.AsyncMock(return_value=mock.Mock(returncode=status))
+        self.create_process = mock.AsyncMock(return_value=process)
+        self.run = mock.AsyncMock(return_value=mock.Mock(returncode=status, stdout=stdout, stderr=stderr))
+
+
+def _connected(connection: _FakeConnection):
+    """Hand `connection` to every host, instead of opening a real one."""
+
+    return mock.patch.object(remote, "_connection", mock.AsyncMock(return_value=connection))
 
 
 class ExperimentTests(unittest.TestCase):
@@ -48,23 +68,78 @@ class ExperimentTests(unittest.TestCase):
 
     def test_remote_process_records_its_pid_and_quotes_its_command(self) -> None:
         host = remote.RemoteHost(Host(ssh="me@peer.example"))
-        with tempfile.TemporaryDirectory() as directory:
+        connection = _FakeConnection(output=b"ready\n")
+        with tempfile.TemporaryDirectory() as directory, _connected(connection) as connected:
             log = pathlib.Path(directory) / "subscriber.log"
-            with mock.patch.object(capture.subprocess, "Popen") as popen:
-                remote.RemoteProcess(
-                    "subscriber", host, ["/opt/a dir/moq-bench", "--x"], "/tmp/a run", log, env={"K": "a b"}
-                )
-                popen.return_value.poll.return_value = 0
-        command = popen.call_args.args[0]
+            process = remote.RemoteProcess(
+                "subscriber", host, ["/opt/a dir/moq-bench", "--x"], "/tmp/a run", log, env={"K": "a b"}
+            )
+            self.assertEqual(process.process.wait(5), 0)
+            self.assertEqual(log.read_bytes(), b"ready\n")
+            process.close()
 
-        self.assertEqual(command[:6], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
-        self.assertIn("ControlMaster=no", command)
-        self.assertEqual(command[-2], "me@peer.example")
+        connected.assert_awaited_with("me@peer.example")
+        script, options = connection.create_process.call_args.args[0], connection.create_process.call_args.kwargs
         self.assertEqual(
-            command[-1],
+            script,
             "mkdir -p '/tmp/a run' && cd '/tmp/a run' && echo $$ > '/tmp/a run/.subscriber.pid' && "
             "exec env K='a b' '/opt/a dir/moq-bench' --x",
         )
+        self.assertIs(options["stdin"], remote.asyncssh.DEVNULL)
+
+    def test_a_remote_process_receives_its_stdin_and_reports_its_status(self) -> None:
+        host = remote.RemoteHost(Host(ssh="me@peer.example"))
+        connection = _FakeConnection(status=7)
+        with tempfile.TemporaryDirectory() as directory, _connected(connection):
+            process = remote.RemoteProcess(
+                "tcpdump", host, ["tcpdump"], "/tmp/run", pathlib.Path(directory) / "t.log", stdin=b"pw\n"
+            )
+            with self.assertRaisesRegex(capture.CaptureError, "tcpdump exited with status 7"):
+                process.wait(5)
+            process.close()
+
+        self.assertEqual(connection.create_process.call_args.kwargs["input"], b"pw\n")
+
+    def test_a_remote_process_that_loses_its_connection_reports_what_ssh_would(self) -> None:
+        host = remote.RemoteHost(Host(ssh="me@peer.example"))
+        with tempfile.TemporaryDirectory() as directory, _connected(_FakeConnection(status=None)):
+            process = remote.RemoteProcess("relay", host, ["relay"], "/tmp/run", pathlib.Path(directory) / "r.log")
+            self.assertEqual(process.process.wait(5), 255)
+            process.close()
+
+    def test_lttng_runs_through_the_hosts_configured_command(self) -> None:
+        host = remote.RemoteHost(Host(ssh="me@relay.example", lttng="nix develop ~/moq-trace --command lttng"))
+        connection = _FakeConnection(status=1, stdout="<command/>", stderr="no session daemon")
+        with _connected(connection):
+            result = host.lttng(("--mi", "xml", "list", "--userspace"))
+
+        self.assertEqual(
+            connection.run.call_args.args[0], "nix develop ~/moq-trace --command lttng --mi xml list --userspace"
+        )
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "<command/>", "no session daemon"))
+
+    def test_an_unreachable_host_is_a_capture_error(self) -> None:
+        host = remote.RemoteHost(Host(ssh="me@peer.example"))
+        with mock.patch.object(remote.asyncssh, "connect", side_effect=OSError("connection refused")) as connect:
+            with self.assertRaisesRegex(capture.CaptureError, "ssh me@peer.example failed: connection refused"):
+                host.connect()
+
+        self.assertEqual(connect.call_args.args, ("peer.example",))
+        self.assertEqual(connect.call_args.kwargs["username"], "me")
+
+    def test_the_relay_certificate_is_a_self_signed_localhost_pair(self) -> None:
+        config = ExperimentConfig(output=pathlib.Path("run"), relay_args=("--cert", "{certificate}"))
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            experiment._generate_certificate(config, output)
+            certificate = x509.load_pem_x509_certificate((output / "relay.crt").read_bytes())
+            key = serialization.load_pem_private_key((output / "relay.key").read_bytes(), password=None)
+
+        self.assertEqual(certificate.subject, certificate.issuer)
+        self.assertEqual(certificate.public_key().public_numbers(), key.public_key().public_numbers())
+        names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        self.assertEqual(names.get_values_for_type(x509.DNSName), ["localhost"])
+        self.assertEqual([str(address) for address in names.get_values_for_type(x509.IPAddress)], ["127.0.0.1"])
 
     def test_peers_dial_loopback_on_the_relay_host_and_its_address_elsewhere(self) -> None:
         relay = Host(ssh="me@relay.example", address="10.0.0.1", binary="/opt/relay/moq-relay", workdir="/tmp/runs")
@@ -277,37 +352,56 @@ class ExperimentTests(unittest.TestCase):
                 values=(1, 1),
             )
 
-    def test_provider_listing_uses_the_modern_lttng_format(self) -> None:
-        # Mirrors `lttng list --userspace` output from LTTng 2.15, trimmed to the
-        # entries the capture looks for.
-        bullet = chr(0x1F782)
-        listing = (
-            f"{bullet} User space tracepoints:\n"
-            f"  {bullet} Process 4242: `/opt/relay/moq-relay`\n"
-            f"    {bullet} `lttng_ust_lib:build_id` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
-            f"    {bullet} `moq_trace:moq_object_end` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
-            f"    {bullet} `quic_trace:udp_socket_end` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
-            f"  {bullet} Process 424: `/opt/relay/moq-relay-old`\n"
-            f"    {bullet} `moq_trace:moq_object_end_extra` \u2014 Log level: TRACE_DEBUG_LINE (13)\n"
-        )
+    def test_provider_listing_reads_the_lttng_machine_interface(self) -> None:
+        # Mirrors `lttng --mi xml list --userspace` from LTTng 2.15, trimmed to the
+        # elements the capture reads.
+        listing = """<?xml version="1.0" encoding="UTF-8"?>
+<command xmlns="https://lttng.org/xml/ns/lttng-mi" schemaVersion="4.2">
+  <name>list</name>
+  <output><domains><domain>
+    <type>UST</type>
+    <pids>
+      <pid>
+        <id>4242</id>
+        <name>/opt/relay/moq-relay</name>
+        <events>
+          <event><name>lttng_ust_lib:build_id</name><type>TRACEPOINT</type></event>
+          <event><name>moq_trace:moq_object_end</name><type>TRACEPOINT</type></event>
+          <event><name>quic_trace:udp_socket_end</name><type>TRACEPOINT</type></event>
+        </events>
+      </pid>
+      <pid>
+        <id>424</id>
+        <name>/opt/relay/moq-relay-old</name>
+        <events><event><name>moq_trace:moq_object_end_extra</name></event></events>
+      </pid>
+    </pids>
+  </domain></domains></output>
+  <success>true</success>
+</command>
+"""
         self.assertTrue(_provider_listed(listing, 4242, "moq_trace:moq_object_end"))
         self.assertTrue(_provider_listed(listing, 4242, "quic_trace:udp_socket_end"))
         self.assertFalse(_provider_listed(listing, 4242, "quic_trace:quic_packet_start"))
         self.assertFalse(_provider_listed(listing, 424, "moq_trace:moq_object_end"))
+        self.assertFalse(_provider_listed(listing, 42, "moq_trace:moq_object_end"))
 
-    def test_provider_listing_uses_the_legacy_lttng_format(self) -> None:
-        listing = (
-            "UST events:\n"
-            "-------------\n"
-            "\n"
-            "PID: 1234 - Name: /opt/relay/moq-relay\n"
-            "      moq_trace:moq_object_end (loglevel: TRACE_DEBUG_LINE (13)) (type: tracepoint)\n"
-            "PID: 123 - Name: /opt/relay/other\n"
-            "      moq_trace:moq_object_end_extra (loglevel: TRACE_DEBUG_LINE (13)) (type: tracepoint)\n"
-        )
-        self.assertTrue(_provider_listed(listing, 1234, "moq_trace:moq_object_end"))
-        self.assertFalse(_provider_listed(listing, 123, "moq_trace:moq_object_end"))
-        self.assertFalse(_provider_listed(listing, 1234, "quic_trace:udp_socket_end"))
+    def test_provider_listing_rejects_human_readable_output(self) -> None:
+        with self.assertRaisesRegex(capture.CaptureError, "machine interface XML"):
+            _provider_listed("PID: 1234 - Name: /opt/relay/moq-relay\n", 1234, "moq_trace:moq_object_end")
+
+    def test_the_provider_check_asks_lttng_for_xml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(capture, "_run_lttng") as run_lttng,
+                mock.patch.object(capture.time, "monotonic", side_effect=[0.0, 0.0, 1.0]),
+                mock.patch.object(capture.time, "sleep"),
+            ):
+                session = capture.LttngSession(pathlib.Path(directory) / "trace")
+                run_lttng.return_value.stdout = "<command/>"
+                with self.assertRaisesRegex(capture.CaptureError, "timed out"):
+                    session.wait_for_provider(123, timeout=0.5)
+        self.assertEqual(run_lttng.call_args.args, ("--mi", "xml", "list", "--userspace"))
 
     def test_capture_enables_moq_and_quic_providers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -450,9 +544,9 @@ class ExperimentTests(unittest.TestCase):
         ):
             result = self._capture(config)
 
-        output, wrap = self.session_class.call_args.args[0], self.session_class.call_args.kwargs["wrap"]
+        output, runner = self.session_class.call_args.args[0], self.session_class.call_args.kwargs["runner"]
         self.assertRegex(output, r"^/tmp/runs/[^/]+-[0-9a-f]{8}/trace$")
-        self.assertEqual(wrap(["lttng", "list"])[-2:], ["me@relay.example", "lttng list"])
+        self.assertEqual((runner.__func__, runner.__self__.name), (remote.RemoteHost.lttng, "me@relay.example"))
         self.assertIn("mkdir -p", run.call_args_list[0].args[0])
         self.assertEqual(fetch.call_args.args[1], ["trace", "qlog"])
         # Neither peer shares the relay's host, so only the relay is recorded.

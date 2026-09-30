@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Capture and analyze MoQ relay latency experiments."
 requires-python = ">=3.11"
 dependencies = [
+    "asyncssh>=2.14",
+    "cryptography>=42",
     "dpkt>=1.9.8",
     "duckdb>=1.4",
     "matplotlib>=3.10",

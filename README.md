@@ -137,8 +137,11 @@ the capture.
 ### Distributed runs
 
 `--hosts hosts.toml` places the relay, the publisher, and the subscriber on
-other hosts, reached with non-interactive ssh (key authentication, host keys
-already accepted). A role without a table runs on the controller. The same
+other hosts, reached over ssh with asyncssh, which reads `~/.ssh/config` (aliases,
+`User`, `IdentityFile`, `ProxyJump`) and `~/.ssh/known_hosts`. It never prompts,
+so each host needs key authentication, an already accepted host key, and SFTP,
+which copies files to and from the relay host. One connection per host serves
+every run of an invocation. A role without a table runs on the controller. The same
 tables go under `[hosts.relay]` and so on in a `run` configuration.
 
 ```toml

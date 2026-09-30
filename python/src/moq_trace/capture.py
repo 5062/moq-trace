@@ -12,6 +12,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from xml.etree import ElementTree
 
 
 class CaptureError(RuntimeError):
@@ -19,32 +20,25 @@ class CaptureError(RuntimeError):
 
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_MODERN_PROCESS = re.compile(r"\bProcess\s+(\d+)\b")
-_LEGACY_PROCESS = re.compile(r"^PID:\s*(\d+)\b")
-_EVENT = re.compile(r"(?<![\w:])([A-Za-z0-9_]+:[A-Za-z0-9_]+)(?![\w:])")
 
 
-# Turns one command into the command that runs it on the traced host. The
-# identity runs it on the controller; a remote relay wraps it in ssh.
-Wrap = Callable[[Sequence[str]], Sequence[str]]
+# Runs `lttng` with the given arguments on the traced host and returns its
+# decoded output. The default runs it on the controller; a remote relay runs it
+# over that host's ssh connection.
+LttngRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
-def _local(command: Sequence[str]) -> Sequence[str]:
-    return command
-
-
-def _run_lttng(*args: str, capture_output: bool = False, wrap: Wrap = _local) -> subprocess.CompletedProcess[str]:
+def _local(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            wrap(("lttng", *args)),
-            check=False,
-            text=True,
-            capture_output=capture_output,
-        )
+        return subprocess.run(("lttng", *args), check=False, text=True, capture_output=True)
     except OSError as error:
         raise CaptureError("failed to execute lttng; install LTTng tools 2.13 or newer") from error
-    if not result.returncode == 0:
-        detail = result.stderr.strip() if capture_output else ""
+
+
+def _run_lttng(*args: str, runner: LttngRunner = _local) -> subprocess.CompletedProcess[str]:
+    result = runner(args)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()
         suffix = f": {detail}" if detail else ""
         raise CaptureError(f"lttng {' '.join(args)} failed with status {result.returncode}{suffix}")
     return result
@@ -53,14 +47,14 @@ def _run_lttng(*args: str, capture_output: bool = False, wrap: Wrap = _local) ->
 class LttngSession:
     """One discard-mode LTTng session scoped to the processes it traces.
 
-    `wrap` runs every lttng command on the traced host, so a session can record
-    a relay on another host; `output` is then a path on that host.
+    `runner` runs every lttng command on the traced host, so a session can
+    record a relay on another host; `output` is then a path on that host.
     """
 
-    def __init__(self, output: pathlib.Path | str, wrap: Wrap = _local) -> None:
+    def __init__(self, output: pathlib.Path | str, runner: LttngRunner = _local) -> None:
         self.name = f"moq-trace-{os.getpid()}-{uuid.uuid4().hex}"
         self.active = False
-        self.wrap = wrap
+        self.runner = runner
         self._lttng("create", self.name, "--output", str(output))
         self.active = True
         try:
@@ -80,15 +74,15 @@ class LttngSession:
             self.close()
             raise
 
-    def _lttng(self, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
-        return _run_lttng(*args, capture_output=capture_output, wrap=self.wrap)
+    def _lttng(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return _run_lttng(*args, runner=self.runner)
 
     def wait_for_provider(self, pid: int, timeout: float = 10.0) -> None:
         """Wait until one process has registered both trace providers."""
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            listing = self._lttng("list", "--userspace", capture_output=True).stdout
+            listing = self._lttng("--mi", "xml", "list", "--userspace").stdout
             if _provider_listed(listing, pid, "moq_trace:moq_object_end") and _provider_listed(
                 listing, pid, "quic_trace:udp_socket_end"
             ):
@@ -155,7 +149,8 @@ class LttngSession:
         """Destroy an unfinished session during cleanup."""
 
         if self.active:
-            subprocess.run(self.wrap(("lttng", "destroy", self.name)), check=False)
+            with contextlib.suppress(CaptureError):
+                self.runner(("destroy", self.name))
             self.active = False
 
 
@@ -271,41 +266,24 @@ def wait_for_startup(process: ManagedProcess, delay: float) -> None:
         raise CaptureError(f"{process.name} exited with status {status} during startup")
 
 
-def _process_pid(line: str) -> int | None:
-    """Return the process ID a provider block header names, if it is one."""
-
-    for pattern in (_LEGACY_PROCESS, _MODERN_PROCESS):
-        match = pattern.search(line)
-        if match:
-            return int(match.group(1))
-    return None
-
-
-def _event_name(line: str) -> str | None:
-    """Return the provider event a tracepoint entry names, if it is one."""
-
-    match = _EVENT.search(line)
-    return match.group(1) if match else None
-
-
 def _provider_listed(listing: str, pid: int, event: str) -> bool:
     """Report whether `listing` shows `event` registered by `pid`.
 
-    LTTng 2.15 and later print one `Process <pid>:` block per provider, while
-    earlier releases print `PID: <pid> - Name: ...`. Both scope the tracepoint
-    entries that follow to the process they name.
+    `listing` is the machine interface output of `lttng --mi xml list
+    --userspace`, whose schema, unlike the human-readable listing, is versioned
+    and stable across LTTng releases. Each `pid` element scopes the events that
+    process registered.
     """
 
-    target = False
-    for raw_line in listing.splitlines():
-        line = ANSI.sub("", raw_line).strip()
-        process = _process_pid(line)
-        if process is not None:
-            target = process == pid
-            continue
-        if target and _event_name(line) == event:
-            return True
-    return False
+    try:
+        root = ElementTree.fromstring(listing)
+    except ElementTree.ParseError as error:
+        raise CaptureError(f"lttng list did not print machine interface XML: {error}") from error
+    return any(
+        (process.findtext("{*}id") or "").strip() == str(pid)
+        and any((name.text or "").strip() == event for name in process.iterfind("{*}events/{*}event/{*}name"))
+        for process in root.iterfind(".//{*}domain/{*}pids/{*}pid")
+    )
 
 
 # Environment variable holding the sudo password for the packet capture, for

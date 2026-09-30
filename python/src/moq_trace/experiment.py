@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import hashlib
+import ipaddress
 import logging
 import os
 import pathlib
 import shlex
 import socket
-import subprocess
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from . import network
 from .analyze import run as analyze
@@ -36,7 +42,7 @@ from .metadata import (
 )
 from .network import NetworkManifest
 from .plot.common import format_byte_size
-from .remote import RemoteHost, RemoteProcess, ssh_command
+from .remote import RemoteHost, RemoteProcess
 from .render import render
 
 # Pinned for every implementation, so a run cannot silently negotiate a version
@@ -398,11 +404,7 @@ def _capture(
         if relay_host is None:
             session = LttngSession(ctf)
         else:
-            lttng = relay_host.host.lttng
-            session = LttngSession(
-                f"{relay_directory}/trace",
-                wrap=lambda argv: ssh_command(relay_host.host, f"{lttng} {shlex.join(argv[1:])}"),
-            )
+            session = LttngSession(f"{relay_directory}/trace", runner=relay_host.lttng)
     processes: list[ManagedProcess] = []
     where = roles.where
     try:
@@ -548,34 +550,45 @@ def _file_hash(path: pathlib.Path) -> str | None:
 
 
 def _generate_certificate(config: ExperimentConfig, output: pathlib.Path) -> None:
-    """Generate the certificate requested by relay command placeholders."""
+    """Generate the certificate requested by relay command placeholders.
+
+    It matches what `openssl req -x509 -newkey rsa:2048 -nodes` writes: a
+    self-signed RSA certificate for localhost valid for one day, with an
+    unencrypted PKCS#8 key. The peers do not verify it, so it only has to be a
+    certificate every relay accepts.
+    """
 
     if config.relay_args is None or not any(
         placeholder in argument for argument in config.relay_args for placeholder in ("{certificate}", "{key}")
     ):
         return
-    command = (
-        "openssl",
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-days",
-        "1",
-        "-keyout",
-        str(output / "relay.key"),
-        "-out",
-        str(output / "relay.crt"),
-        "-subj",
-        "/CN=localhost",
-        "-addext",
-        "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    public_key = key.public_key()
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(public_key), critical=False)
+        .sign(key, hashes.SHA256())
     )
-    try:
-        subprocess.run(command, check=True, capture_output=True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise ExperimentError("failed to generate the relay TLS certificate with openssl") from error
+    (output / "relay.key").write_bytes(
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    (output / "relay.crt").write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
 
 
 def _binaries(config: ExperimentConfig, roles: _Roles) -> Binaries:

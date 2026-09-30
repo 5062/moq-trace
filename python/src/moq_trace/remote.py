@@ -1,29 +1,38 @@
 """Run experiment roles on other hosts over ssh.
 
 The controller never keeps state on a remote host beyond one run directory per
-host. Commands go through non-interactive ssh, so every host must accept key
-authentication. Output streams back through ssh into the controller's logs, and
-the files a run records on the relay host are copied back once it finishes.
+host. Every host is reached through asyncssh, which reads `~/.ssh/config` (host
+aliases, `User`, `IdentityFile`, `ProxyJump` and the like) and
+`~/.ssh/known_hosts`, and never prompts, so every host must accept key
+authentication and have a known host key. Output streams back over the
+connection into the controller's logs, and the files a run records on the relay
+host are copied back over SFTP once it finishes.
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import json
 import logging
-import os
 import pathlib
 import shlex
 import subprocess
-import tempfile
+import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
+from typing import Any, TypeVar
+
+import asyncssh
 
 from .capture import CaptureError, ManagedProcess
 from .config import Host
 
 _log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # Reports the relay host's clocks and loopback interfaces in one process, so the
 # realtime and monotonic readings are taken back to back.
@@ -41,42 +50,53 @@ offset = time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(time
 print(json.dumps({"realtime_offset_ns": offset, "loopback_ifindexes": indexes}))
 """
 
+# An unreachable host fails after this long rather than after a command's own
+# timeout, so the error names the connection as the problem.
+_CONNECT_TIMEOUT = 15.0
 
-# How long a host's shared connection outlives its last use, so consecutive runs
-# of one bench reuse it too.
-_CONTROL_PERSIST = "10m"
+# What an OpenSSH client reports when the connection, rather than the command,
+# ended the session, as when a remote process loses its connection.
+_CONNECTION_LOST = 255
+
+# One connection per ssh destination, shared by every run in this process. They
+# are only touched from the loop thread, and the lock keeps two callers from
+# opening the same destination twice.
+_connections: dict[str, asyncssh.SSHClientConnection] = {}
+_connecting = asyncio.Lock()
 
 
 @functools.cache
-def _control_path() -> str:
-    """The socket template for shared connections, private to this user.
+def _loop() -> asyncio.AbstractEventLoop:
+    """The event loop every ssh connection lives on.
 
-    It lives in the user's runtime directory rather than `TMPDIR`, which a
-    development shell points at a directory it deletes on exit, so a connection
-    outlives the shell that opened it and later runs can reuse it.
+    The runner is synchronous, but a connection and a remote process outlive any
+    one call, so they live on a loop that runs for the rest of the process in a
+    daemon thread. Callers hand it coroutines and block on the result.
     """
 
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    base = pathlib.Path(runtime) if runtime and os.path.isdir(runtime) else pathlib.Path("/tmp")
-    directory = base / f"moq-trace-ssh-{os.getuid()}"
-    directory.mkdir(mode=0o700, exist_ok=True)
-    return str(directory / "%C")
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, name="moq-trace-ssh", daemon=True).start()
+    return loop
 
 
-def _ssh_options() -> list[str]:
-    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", f"ControlPath={_control_path()}"]
+def _submit(coroutine: Coroutine[Any, Any, _T]) -> concurrent.futures.Future[_T]:
+    return asyncio.run_coroutine_threadsafe(coroutine, _loop())
 
 
-def ssh_command(host: Host, script: str) -> list[str]:
-    """Run a shell script on `host` without a terminal or a password prompt.
+async def _connection(destination: str) -> asyncssh.SSHClientConnection:
+    """Return the open connection to `destination`, connecting on first use.
 
-    The command rides the host's shared connection when `RemoteHost.connect`
-    opened one, and connects on its own otherwise. An unreachable host fails
-    after the connect timeout rather than after the command's own, so the error
-    names the connection as the problem.
+    `destination` is an ssh destination, `[user@]host`, where `host` may be an
+    alias from the ssh config file.
     """
 
-    return ["ssh", "-T", *_ssh_options(), "-o", "ControlMaster=no", host.ssh, script]
+    async with _connecting:
+        connection = _connections.get(destination)
+        if connection is None or connection.is_closed():
+            user, _, host = destination.rpartition("@")
+            connection = await asyncssh.connect(host, username=user or (), connect_timeout=_CONNECT_TIMEOUT)
+            _connections[destination] = connection
+        return connection
 
 
 class RemoteHost:
@@ -95,63 +115,49 @@ class RemoteHost:
 
         return self.host.ssh
 
-    def run(self, script: str, timeout: float = 60.0) -> str:
-        """Run a script to completion and return its standard output."""
+    def _call(self, coroutine: Coroutine[Any, Any, _T], failure: str | None = None) -> _T:
+        """Run a coroutine on the ssh loop and turn an ssh failure into a `CaptureError`."""
 
         try:
-            result = subprocess.run(
-                ssh_command(self.host, script),
-                check=False,
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise CaptureError(f"ssh {self.name} failed: {error}") from error
+            return _submit(coroutine).result()
+        except (OSError, asyncssh.Error) as error:
+            raise CaptureError(f"{failure or f'ssh {self.name} failed'}: {error}") from error
+
+    async def _run(self, script: str, timeout: float | None) -> asyncssh.SSHCompletedProcess:
+        connection = await _connection(self.name)
+        return await connection.run(script, check=False, timeout=timeout, errors="replace")
+
+    def run(self, script: str, timeout: float | None = 60.0) -> str:
+        """Run a script to completion and return its standard output."""
+
+        result = self._call(self._run(script, timeout))
         if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
+            detail = (result.stderr or "").strip() or (result.stdout or "").strip()
             raise CaptureError(f"ssh {self.name} `{script}` failed with status {result.returncode}: {detail}")
-        return result.stdout
+        return result.stdout or ""
+
+    def lttng(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        """Run `lttng` on this host through the host's configured command.
+
+        This is an `LttngRunner`: the status is returned rather than checked, so
+        the session reports a failure the same way for every host.
+        """
+
+        result = self._call(self._run(f"{self.host.lttng} {shlex.join(args)}", None))
+        status = _CONNECTION_LOST if result.returncode is None else result.returncode
+        return subprocess.CompletedProcess(list(args), status, result.stdout or "", result.stderr or "")
 
     def connect(self) -> None:
-        """Open one shared connection that every later command on this host reuses.
+        """Open the one connection that every later command on this host reuses.
 
         A run issues many short commands. Logging in once instead of once per
         command makes a run one authentication: faster behind a jump host, and a
         gateway whose machines present different host keys is met only once.
+        The connection lasts as long as this process, so later runs of one bench
+        reuse it too.
         """
 
-        check = subprocess.run(
-            ["ssh", *_ssh_options(), "-O", "check", self.host.ssh],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-        )
-        if check.returncode == 0:
-            return
-        command = [
-            "ssh",
-            *_ssh_options(),
-            "-o",
-            "ControlMaster=yes",
-            "-o",
-            f"ControlPersist={_CONTROL_PERSIST}",
-            "-f",
-            "-N",
-            self.host.ssh,
-        ]
-        # The connection moves to the background and keeps its output open, so
-        # errors go to a file: a pipe would never reach end of file.
-        with tempfile.TemporaryFile() as errors:
-            try:
-                status = subprocess.run(
-                    command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors, timeout=60
-                ).returncode
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise CaptureError(f"ssh {self.name} failed: {error}") from error
-            errors.seek(0)
-            detail = errors.read().decode(errors="replace").strip()
-        if status != 0:
-            raise CaptureError(f"ssh {self.name} failed with status {status}: {detail}")
+        self._call(_connection(self.name))
 
     @functools.cached_property
     def home(self) -> str:
@@ -189,23 +195,21 @@ class RemoteHost:
         """
 
         script = f"cd {shlex.quote(self.path(checkout))} && {command}"
-        with log.open("w") as handle:
-            try:
-                build = subprocess.Popen(
-                    ssh_command(self.host, script),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    errors="replace",
-                )
-            except OSError as error:
-                raise CaptureError(f"ssh {self.name} failed: {error}") from error
+
+        async def build(handle) -> int | None:
+            connection = await _connection(self.name)
+            process = await connection.create_process(
+                script, stdin=asyncssh.DEVNULL, stderr=asyncssh.STDOUT, errors="replace"
+            )
             # A first build can take many minutes, so its output is shown as it
             # arrives rather than only kept in the log.
-            for line in build.stdout:
+            async for line in process.stdout:
                 handle.write(line)
                 _log.info("  %s | %s", self.name, line.rstrip())
-            status = build.wait()
+            return (await process.wait()).returncode
+
+        with log.open("w") as handle:
+            status = self._call(build(handle))
         if status != 0:
             raise CaptureError(f"build on {self.name} failed with status {status}; see {log}")
 
@@ -226,38 +230,87 @@ class RemoteHost:
     def put(self, source: pathlib.Path, destination: str) -> None:
         """Copy one local file to this host."""
 
-        with source.open("rb") as handle:
-            status = subprocess.run(
-                ssh_command(self.host, f"cat > {shlex.quote(destination)}"),
-                stdin=handle,
-                capture_output=True,
-            ).returncode
-        if status != 0:
-            raise CaptureError(f"failed to copy {source} to {self.name}:{destination}")
+        async def put() -> None:
+            connection = await _connection(self.name)
+            async with connection.start_sftp_client() as sftp:
+                await sftp.put(str(source), destination)
+
+        self._call(put(), f"failed to copy {source} to {self.name}:{destination}")
 
     def fetch(self, directory: str, names: Sequence[str], destination: pathlib.Path) -> None:
-        """Copy files and directories under `directory` on this host into `destination`.
-
-        tar streams them over the ssh connection, so neither side needs rsync.
-        """
+        """Copy files and directories under `directory` on this host into `destination`."""
 
         if not names:
             return
-        script = f"tar -C {shlex.quote(directory)} -cf - {shlex.join(names)}"
-        with subprocess.Popen(ssh_command(self.host, script), stdout=subprocess.PIPE) as source:
-            extract = subprocess.run(["tar", "-C", str(destination), "-xf", "-"], stdin=source.stdout)
-            source.stdout.close()
-            status = source.wait()
-        if status != 0 or extract.returncode != 0:
-            raise CaptureError(f"failed to copy {', '.join(names)} back from {self.name}:{directory}")
+
+        async def fetch() -> None:
+            connection = await _connection(self.name)
+            async with connection.start_sftp_client() as sftp:
+                await sftp.get([f"{directory}/{name}" for name in names], str(destination), recurse=True)
+
+        self._call(fetch(), f"failed to copy {', '.join(names)} back from {self.name}:{directory}")
+
+    def spawn(
+        self, script: str, log, stdin: bytes | None
+    ) -> tuple[asyncssh.SSHClientProcess, concurrent.futures.Future[int]]:
+        """Start a script that outlives this call, writing its output to `log`.
+
+        Returns the process and a future for its exit status. The status is
+        negative for a signal, and 255 when the connection ended the session, as
+        an OpenSSH client reports it.
+        """
+
+        async def start() -> asyncssh.SSHClientProcess:
+            connection = await _connection(self.name)
+            # `input` is the command's entire standard input, followed by end of
+            # input; without it the command reads an empty one.
+            source = {"input": stdin} if stdin is not None else {"stdin": asyncssh.DEVNULL}
+            return await connection.create_process(script, stderr=asyncssh.STDOUT, encoding=None, **source)
+
+        async def drain(process: asyncssh.SSHClientProcess) -> int:
+            try:
+                while chunk := await process.stdout.read(65_536):
+                    log.write(chunk)
+                status = (await process.wait()).returncode
+            except (OSError, ValueError, asyncssh.Error):
+                return _CONNECTION_LOST
+            return _CONNECTION_LOST if status is None else status
+
+        process = self._call(start())
+        return process, _submit(drain(process))
+
+
+class _Exit:
+    """The `poll` and `wait` of a `Popen`, for a process on another host.
+
+    The capture watches every role through these two calls, so a remote process
+    answers them the way a local one does.
+    """
+
+    def __init__(self, status: concurrent.futures.Future[int]) -> None:
+        self._status = status
+
+    def poll(self) -> int | None:
+        """Return the exit status, or `None` while the process runs."""
+
+        return self._status.result() if self._status.done() else None
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for the exit status, raising `subprocess.TimeoutExpired` on timeout."""
+
+        try:
+            return self._status.result(timeout)
+        except concurrent.futures.TimeoutError as error:
+            raise subprocess.TimeoutExpired("ssh", timeout or 0.0) from error
 
 
 class RemoteProcess(ManagedProcess):
-    """One process on a remote host, driven through a local ssh client.
+    """One process on a remote host, run over that host's ssh connection.
 
     The remote shell records its PID before it `exec`s the command, so the PID
-    is the command's own. Stopping signals that PID over a second ssh
-    connection, because a signal to the local client never reaches it.
+    is the command's own. Stopping signals that PID with a second command,
+    because closing the channel does not signal a command run without a
+    terminal.
     """
 
     def __init__(
@@ -270,6 +323,7 @@ class RemoteProcess(ManagedProcess):
         env: Mapping[str, str] | None = None,
         stdin: bytes | None = None,
     ) -> None:
+        self.name = name
         self.host = host
         self.pidfile = f"{cwd}/.{name}.pid"
         prefix = "env " + " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items()) + " " if env else ""
@@ -278,7 +332,14 @@ class RemoteProcess(ManagedProcess):
             f"echo $$ > {shlex.quote(self.pidfile)} && exec {prefix}{shlex.join(command)}"
         )
         self._remote_pid: int | None = None
-        super().__init__(name, ssh_command(host.host, script), log.parent, log, stdin=stdin)
+        # Unbuffered, so a readiness check sees each line as soon as it arrives.
+        self.log_handle = log.open("wb", buffering=0)
+        try:
+            self._channel, status = host.spawn(script, self.log_handle, stdin)
+        except CaptureError:
+            self.log_handle.close()
+            raise
+        self.process = _Exit(status)
 
     @property
     def pid(self) -> int:
@@ -296,7 +357,7 @@ class RemoteProcess(ManagedProcess):
         return self._remote_pid
 
     def stop(self, graceful: bool) -> None:
-        """Signal the remote command, then wait for the ssh client to report its exit."""
+        """Signal the remote command, then wait for its channel to report its exit."""
 
         status = self.process.poll()
         if status is None:
@@ -307,7 +368,7 @@ class RemoteProcess(ManagedProcess):
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(CaptureError):
                     self.host.run(f"kill -KILL {self.pid}")
-                self.process.kill()
+                _loop().call_soon_threadsafe(self._channel.close)
                 status = self.process.wait()
         self.log_handle.close()
         if graceful and status != 0:
