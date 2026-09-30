@@ -1422,9 +1422,7 @@ dependencies = [
 name = "moq-trace-lttng-sys"
 version = "0.1.0"
 dependencies = [
- "bindgen",
- "cc",
- "pkg-config",
+ "trace-provider-build",
 ]
 
 [[package]]
@@ -1757,9 +1755,7 @@ dependencies = [
 name = "quic-trace-lttng-sys"
 version = "0.1.0"
 dependencies = [
- "bindgen",
- "cc",
- "pkg-config",
+ "trace-provider-build",
 ]
 
 [[package]]
@@ -2594,6 +2590,15 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "quic-trace-lttng-sys",
+]
+
+[[package]]
+name = "trace-provider-build"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]

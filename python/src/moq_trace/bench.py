@@ -17,6 +17,8 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import pydantic
+
 from .config import ExperimentConfig, Hosts
 from .errors import ExperimentError
 
@@ -37,6 +39,22 @@ LAUNCH_KEYS = frozenset(
         "relay_url",
         "transport_profile",
     }
+)
+
+
+def _optional(name: str) -> tuple[Any, None]:
+    return ExperimentConfig.model_fields[name].annotation | None, None
+
+
+# The schema of a profile file. Each launch key takes its type from the
+# `ExperimentConfig` field it sets, so a profile is checked the way the run it
+# configures would be, and no key's type is declared twice.
+_ProfileFile = pydantic.create_model(
+    "_ProfileFile",
+    __config__=pydantic.ConfigDict(extra="forbid"),
+    checkout=(pathlib.Path, ...),
+    relay_bin=(pathlib.Path, ...),
+    **{key: _optional(key) for key in sorted(LAUNCH_KEYS - {"relay_bin"})},
 )
 
 
@@ -80,18 +98,11 @@ def load_profile(name: str) -> RelayProfile:
     if entry is None:
         raise ValueError(f"unknown relay {name!r}; available: {', '.join(profiles())}")
     try:
-        document = tomllib.loads(entry.read_text())
-    except tomllib.TOMLDecodeError as error:
-        raise ValueError(f"relay profile {name} is not valid TOML: {error}") from error
-    checkout = document.pop("checkout", None)
-    if not isinstance(checkout, str):
-        raise ValueError(f"relay profile {name} must set checkout to a path")
-    if "relay_bin" not in document:
-        raise ValueError(f"relay profile {name} must set relay_bin")
-    unknown = sorted(set(document) - LAUNCH_KEYS)
-    if unknown:
-        raise ValueError(f"relay profile {name} sets keys a profile may not set: {', '.join(unknown)}")
-    return RelayProfile(name=name, checkout=pathlib.Path(checkout), launch=document)
+        document = _ProfileFile.model_validate(tomllib.loads(entry.read_text()))
+    except (tomllib.TOMLDecodeError, pydantic.ValidationError) as error:
+        raise ValueError(f"relay profile {name} is invalid: {error}") from error
+    launch = document.model_dump(exclude={"checkout"}, exclude_unset=True)
+    return RelayProfile(name=name, checkout=document.checkout, launch=launch)
 
 
 def experiment_config(

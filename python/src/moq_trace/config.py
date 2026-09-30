@@ -70,7 +70,9 @@ class ExperimentConfig(StrictModel):
     relay_graceful_stop: bool = True
     # Defaults to the reference peers, which are the constant side of a measurement.
     # `just moq-bench-build` writes it, and a run from the toolkit root picks it up.
-    bench_bin: pathlib.Path = pathlib.Path("moq-bench/target/release/moq-bench")
+    bench_bin: pathlib.Path = Field(
+        default=pathlib.Path("moq-bench/target/release/moq-bench"), description="Workload peer binary."
+    )
     # Run in the relay's checkout on a remote relay host before each run.
     relay_build: str | None = None
     # The address a peer on the relay's own host dials. A relay that listens on
@@ -81,15 +83,15 @@ class ExperimentConfig(StrictModel):
     # the relay host's address.
     relay_url: str | None = None
     hosts: Hosts = Field(default_factory=Hosts)
-    relay_cpu: int | None = Field(default=None, ge=0)
-    subscribers: int = Field(default=1, gt=0)
-    object_size: int = Field(default=16_384, gt=0)
-    fps: int = Field(default=30, gt=0)
+    relay_cpu: int | None = Field(default=None, ge=0, description="Pin each relay to this CPU.")
+    subscribers: int = Field(default=1, gt=0, description="Subscriber sessions, one subscription each.")
+    object_size: int = Field(default=16_384, gt=0, description="Bytes per object.")
+    fps: int = Field(default=30, gt=0, description="Objects published per second.")
     # A second at each end keeps connection and subscription ramp-up out of the measurement.
-    warmup_seconds: float = Field(default=1.0, ge=0)
-    duration_seconds: float = Field(default=20.0, gt=0)
-    cooldown_seconds: float = Field(default=1.0, ge=0)
-    port: int = Field(default=4443, gt=0, le=65_535)
+    warmup_seconds: float = Field(default=1.0, ge=0, description="Run time trimmed from the front of the window.")
+    duration_seconds: float = Field(default=20.0, gt=0, description="Steady-state window length.")
+    cooldown_seconds: float = Field(default=1.0, ge=0, description="Run time trimmed from the back of the window.")
+    port: int = Field(default=4443, gt=0, le=65_535, description="UDP port every relay listens on.")
     transport_profile: TransportProfile = "generic"
     # Off runs the same workload without an LTTng session, so the run keeps only the
     # peers' logs and produces no analysis artifact.

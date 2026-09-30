@@ -8,6 +8,4 @@ version.workspace = true
 links = "quic_trace_provider"
 
 [build-dependencies]
-bindgen.workspace = true
-cc.workspace = true
-pkg-config.workspace = true
+trace-provider-build.workspace = true

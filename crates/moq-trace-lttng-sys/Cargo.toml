@@ -1,13 +1,11 @@
 [package]
 name = "moq-trace-lttng-sys"
 description = "Native LTTng-UST provider for MoQ object tracing."
-authors = ["Luke Curley"]
-version = "0.1.0"
-edition = "2024"
+authors.workspace = true
+edition.workspace = true
 rust-version.workspace = true
+version.workspace = true
 links = "moq_trace_provider"
 
 [build-dependencies]
-bindgen.workspace = true
-cc.workspace = true
-pkg-config.workspace = true
+trace-provider-build.workspace = true

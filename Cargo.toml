@@ -5,6 +5,7 @@ members = [
     "crates/quic-trace",
     "crates/quic-trace-lttng-sys",
     "crates/trace-core",
+    "crates/trace-provider-build",
 ]
 # The measurement peers depend on the MoQ implementation under test, which lives
 # in a sibling repository. Keeping them out of the workspace keeps
@@ -28,3 +29,4 @@ moq-trace-lttng-sys = { version = "0.1.0", path = "crates/moq-trace-lttng-sys" }
 quic-trace = { version = "0.1.0", path = "crates/quic-trace", default-features = false }
 quic-trace-lttng-sys = { version = "0.1.0", path = "crates/quic-trace-lttng-sys" }
 trace-core = { version = "0.1.0", path = "crates/trace-core", default-features = false }
+trace-provider-build = { version = "0.1.0", path = "crates/trace-provider-build" }

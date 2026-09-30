@@ -1,11 +1,10 @@
 [package]
 name = "moq-trace"
 description = "MoQ object instrumentation layered over quic-trace."
-authors = ["Luke Curley"]
-
-version = "0.1.0"
-edition = "2024"
+authors.workspace = true
+edition.workspace = true
 rust-version.workspace = true
+version.workspace = true
 
 [features]
 default = []

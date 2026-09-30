@@ -1,0 +1,12 @@
+[package]
+name = "trace-provider-build"
+description = "Build script support shared by the native LTTng-UST provider crates."
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+bindgen.workspace = true
+cc.workspace = true
+pkg-config.workspace = true

@@ -8,6 +8,7 @@ import logging
 import pathlib
 import sys
 import tomllib
+import typing
 
 from pydantic import ValidationError
 
@@ -42,30 +43,29 @@ def _checkout(value: str) -> tuple[str, pathlib.Path]:
     return name, pathlib.Path(path)
 
 
-# `bench` flags that map one-to-one onto `ExperimentConfig` fields. A flag left
-# unset keeps the configuration default, so the defaults live in one place.
+# `bench` flags that map one-to-one onto `ExperimentConfig` fields. Each takes its
+# type, help, and default from the field, and a flag left unset keeps the
+# configuration default, so all three live in one place.
 _BENCH_SETTINGS = (
-    ("--subscribers", int, "Subscriber sessions, one subscription each."),
-    ("--object-size", int, "Bytes per object."),
-    ("--fps", int, "Objects published per second."),
-    ("--warmup-seconds", float, "Run time trimmed from the front of the window."),
-    ("--duration-seconds", float, "Steady-state window length."),
-    ("--cooldown-seconds", float, "Run time trimmed from the back of the window."),
-    ("--port", int, "UDP port every relay listens on."),
-    ("--relay-cpu", int, "Pin each relay to this CPU."),
-    ("--bench-bin", pathlib.Path, "Workload peer binary."),
+    "subscribers",
+    "object_size",
+    "fps",
+    "warmup_seconds",
+    "duration_seconds",
+    "cooldown_seconds",
+    "port",
+    "relay_cpu",
+    "bench_bin",
 )
 
 
-def _setting(flag: str) -> str:
-    return flag.removeprefix("--").replace("-", "_")
-
-
-def _default(flag: str) -> str:
+def _add_setting(parser: argparse.ArgumentParser, name: str) -> None:
+    field = ExperimentConfig.model_fields[name]
+    kind = next(kind for kind in typing.get_args(field.annotation) or (field.annotation,) if kind is not type(None))
     # Defaults that validators rewrite, such as the resolved peer path, are shown
     # as written in the configuration model.
-    value = ExperimentConfig.model_fields[_setting(flag)].default
-    return "unpinned" if value is None else str(value)
+    default = "unpinned" if field.default is None else field.default
+    parser.add_argument(f"--{name.replace('_', '-')}", type=kind, help=f"{field.description} (default: {default})")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -109,8 +109,8 @@ def parser() -> argparse.ArgumentParser:
         metavar="RELAY=PATH",
         help="Use this checkout instead of the profile's. Repeatable.",
     )
-    for flag, kind, description in _BENCH_SETTINGS:
-        bench.add_argument(flag, type=kind, help=f"{description} (default: {_default(flag)})")
+    for name in _BENCH_SETTINGS:
+        _add_setting(bench, name)
     bench.add_argument(
         "--hosts",
         type=pathlib.Path,
@@ -206,7 +206,7 @@ def _run(args: argparse.Namespace) -> None:
     elif args.command == "bench":
         from .bench import bench, default_output
 
-        names = [_setting(flag) for flag, _, _ in _BENCH_SETTINGS] + ["capture_packets", "qlog", "render"]
+        names = [*_BENCH_SETTINGS, "capture_packets", "qlog", "render"]
         settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
         settings["trace"] = args.trace
         if args.hosts is not None:

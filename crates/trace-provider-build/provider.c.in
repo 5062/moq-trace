@@ -1,3 +1,11 @@
+/*
+ * The native half of one LTTng-UST provider, shared by every provider.
+ *
+ * Both Cargo, through trace-provider-build, and CMake, through configure_file,
+ * substitute the provider name for each @PROVIDER@ marker, so the two builds
+ * compile the same source. Everything a provider declares lives beside its
+ * interface.h: the schema in events.tp and the event list in events.inc.
+ */
 #include "interface.h"
 
 #define LTTNG_UST_TRACEPOINT_DEFINE
@@ -6,12 +14,12 @@
 
 #if defined(__has_attribute)
 #	if __has_attribute(retain)
-#		define QUIC_TRACE_RETAIN __attribute__((retain))
+#		define TRACE_PROVIDER_RETAIN __attribute__((retain))
 #	endif
 #endif
 
-#ifndef QUIC_TRACE_RETAIN
-#	define QUIC_TRACE_RETAIN
+#ifndef TRACE_PROVIDER_RETAIN
+#	define TRACE_PROVIDER_RETAIN
 #endif
 
 /*
@@ -27,8 +35,8 @@
  * of the retained set. A missing entry drops the event from a capture while
  * `lttng list` still reports it.
  */
-QUIC_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const quic_trace_tracepoints[] = {
-#define EVENT(name) &lttng_ust_tracepoint_ptr_quic_trace___##name,
+TRACE_PROVIDER_RETAIN __attribute__((used, visibility("default"))) void *const @PROVIDER@_tracepoints[] = {
+#define EVENT(name) &lttng_ust_tracepoint_ptr_@PROVIDER@___##name,
 #include "events.inc"
 };
 #undef EVENT
@@ -38,7 +46,7 @@ QUIC_TRACE_RETAIN __attribute__((used, visibility("default"))) void *const quic_
  * point only gives instrumented code a symbol to reference so the linker keeps
  * the provider object.
  */
-void quic_trace_provider_init(void) {}
+void @PROVIDER@_provider_init(void) {}
 
 /*
  * Every wrapper comes from events.inc for the same reason. The enablement
@@ -46,11 +54,11 @@ void quic_trace_provider_init(void) {}
  * word, so a disabled event never enters the tracepoint.
  */
 #define EVENT(name) \
-	bool quic_trace_##name##_enabled(void) { \
-		return lttng_ust_tracepoint_enabled(quic_trace, name); \
+	bool @PROVIDER@_##name##_enabled(void) { \
+		return lttng_ust_tracepoint_enabled(@PROVIDER@, name); \
 	} \
-	void quic_trace_##name(const struct quic_trace_##name *event) { \
-		lttng_ust_tracepoint(quic_trace, name, event); \
+	void @PROVIDER@_##name(const struct @PROVIDER@_##name *event) { \
+		lttng_ust_tracepoint(@PROVIDER@, name, event); \
 	}
 
 #include "events.inc"

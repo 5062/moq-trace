@@ -10,34 +10,45 @@ find_program(LTTNG_GEN_TP lttng-gen-tp REQUIRED)
 
 set(QUIC_PROVIDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/crates/quic-trace-lttng-sys/provider")
 set(MOQ_PROVIDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/crates/moq-trace-lttng-sys/provider")
-set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-file(MAKE_DIRECTORY "${GENERATED_DIR}/quic" "${GENERATED_DIR}/moq")
+set(PROVIDER_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/crates/trace-provider-build/provider.c.in")
 
-add_custom_command(
-  OUTPUT "${GENERATED_DIR}/quic/events.h"
-  COMMAND "${LTTNG_GEN_TP}" "${QUIC_PROVIDER_DIR}/events.tp" -o events.h
-  WORKING_DIRECTORY "${GENERATED_DIR}/quic"
-  DEPENDS "${QUIC_PROVIDER_DIR}/events.tp" "${QUIC_PROVIDER_DIR}/interface.h"
-  VERBATIM
-)
+# Build the static library `<provider>_provider` from the schema in `directory`.
+#
+# The C source comes from the template the Rust provider crates build through
+# trace-provider-build, so Cargo and CMake compile the same provider.
+function(add_trace_provider provider directory)
+  set(generated "${CMAKE_CURRENT_BINARY_DIR}/generated/${provider}")
+  file(MAKE_DIRECTORY "${generated}")
+  set(PROVIDER "${provider}")
+  configure_file("${PROVIDER_TEMPLATE}" "${generated}/provider.c" @ONLY)
+  add_custom_command(
+    OUTPUT "${generated}/events.h"
+    COMMAND "${LTTNG_GEN_TP}" "${directory}/events.tp" -o events.h
+    WORKING_DIRECTORY "${generated}"
+    DEPENDS "${directory}/events.tp" "${directory}/interface.h"
+    VERBATIM
+  )
+  add_library(${provider}_provider STATIC
+    "${generated}/provider.c"
+    "${directory}/identity.c"
+    "${generated}/events.h"
+  )
+  add_library(${provider}::provider ALIAS ${provider}_provider)
+  set_target_properties(${provider}_provider PROPERTIES
+    EXPORT_NAME provider
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(${provider}_provider PUBLIC
+    "$<BUILD_INTERFACE:${directory}>"
+    "$<INSTALL_INTERFACE:include/${provider}>"
+    PRIVATE "${generated}"
+  )
+  target_link_libraries(${provider}_provider PUBLIC PkgConfig::LTTNG_UST)
+  target_compile_features(${provider}_provider PUBLIC c_std_11)
+endfunction()
 
-add_library(quic_trace_provider STATIC
-  "${QUIC_PROVIDER_DIR}/interface.c"
-  "${QUIC_PROVIDER_DIR}/identity.c"
-  "${GENERATED_DIR}/quic/events.h"
-)
-add_library(quic_trace::provider ALIAS quic_trace_provider)
-set_target_properties(quic_trace_provider PROPERTIES
-  EXPORT_NAME provider
-  POSITION_INDEPENDENT_CODE ON
-)
-target_include_directories(quic_trace_provider PUBLIC
-  "$<BUILD_INTERFACE:${QUIC_PROVIDER_DIR}>"
-  "$<INSTALL_INTERFACE:include/quic_trace>"
-  PRIVATE "${GENERATED_DIR}/quic"
-)
-target_link_libraries(quic_trace_provider PUBLIC PkgConfig::LTTNG_UST)
-target_compile_features(quic_trace_provider PUBLIC c_std_11)
+add_trace_provider(quic_trace "${QUIC_PROVIDER_DIR}")
+add_trace_provider(moq_trace "${MOQ_PROVIDER_DIR}")
 
 add_library(quic_trace_cpp INTERFACE)
 add_library(quic_trace::cpp ALIAS quic_trace_cpp)
@@ -48,32 +59,6 @@ target_include_directories(quic_trace_cpp INTERFACE
   "$<INSTALL_INTERFACE:include>"
 )
 target_compile_features(quic_trace_cpp INTERFACE cxx_std_17)
-
-add_custom_command(
-  OUTPUT "${GENERATED_DIR}/moq/events.h"
-  COMMAND "${LTTNG_GEN_TP}" "${MOQ_PROVIDER_DIR}/events.tp" -o events.h
-  WORKING_DIRECTORY "${GENERATED_DIR}/moq"
-  DEPENDS "${MOQ_PROVIDER_DIR}/events.tp" "${MOQ_PROVIDER_DIR}/interface.h"
-  VERBATIM
-)
-
-add_library(moq_trace_provider STATIC
-  "${MOQ_PROVIDER_DIR}/interface.c"
-  "${MOQ_PROVIDER_DIR}/identity.c"
-  "${GENERATED_DIR}/moq/events.h"
-)
-add_library(moq_trace::provider ALIAS moq_trace_provider)
-set_target_properties(moq_trace_provider PROPERTIES
-  EXPORT_NAME provider
-  POSITION_INDEPENDENT_CODE ON
-)
-target_include_directories(moq_trace_provider PUBLIC
-  "$<BUILD_INTERFACE:${MOQ_PROVIDER_DIR}>"
-  "$<INSTALL_INTERFACE:include/moq_trace>"
-  PRIVATE "${GENERATED_DIR}/moq"
-)
-target_link_libraries(moq_trace_provider PUBLIC PkgConfig::LTTNG_UST)
-target_compile_features(moq_trace_provider PUBLIC c_std_11)
 
 add_library(moq_trace_cpp INTERFACE)
 add_library(moq_trace::cpp ALIAS moq_trace_cpp)

@@ -18,27 +18,33 @@ mod source {
     }
 }
 
-#[cfg(not(all(feature = "lttng", target_os = "linux")))]
+#[cfg(all(not(all(feature = "lttng", target_os = "linux")), unix))]
+mod source {
+    pub(super) fn now_ns() -> u64 {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // CLOCK_MONOTONIC cannot fail given a valid pointer, as the provider
+        // library's clock also assumes.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
+        let seconds = u64::try_from(value.tv_sec).unwrap_or(0);
+        let nanos = u64::try_from(value.tv_nsec).unwrap_or(0);
+        seconds.saturating_mul(1_000_000_000).saturating_add(nanos)
+    }
+}
+
+/// Off Unix there is no `CLOCK_MONOTONIC` to share, and no provider to share it
+/// with, so time counts from the first read.
+#[cfg(not(unix))]
 mod source {
     use std::sync::OnceLock;
+    use std::time::Instant;
 
     pub(super) fn now_ns() -> u64 {
-        #[cfg(unix)]
-        {
-            let mut value = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
-            if result == 0 {
-                let seconds = u64::try_from(value.tv_sec).unwrap_or(0);
-                let nanos = u64::try_from(value.tv_nsec).unwrap_or(0);
-                return seconds.saturating_mul(1_000_000_000).saturating_add(nanos);
-            }
-        }
-        static START: OnceLock<std::time::Instant> = OnceLock::new();
+        static START: OnceLock<Instant> = OnceLock::new();
         START
-            .get_or_init(std::time::Instant::now)
+            .get_or_init(Instant::now)
             .elapsed()
             .as_nanos()
             .try_into()

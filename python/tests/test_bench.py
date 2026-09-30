@@ -71,7 +71,8 @@ class BenchTests(unittest.TestCase):
             with mock.patch.object(
                 bench, "_profile_files", return_value={"rogue": pathlib.Path(directory) / "rogue.toml"}
             ):
-                with self.assertRaisesRegex(ValueError, "may not set: subscribers"):
+                expected = r"(?s)relay profile rogue is invalid.*\bsubscribers\n\s+Extra inputs are not permitted"
+                with self.assertRaisesRegex(ValueError, expected):
                     load_profile("rogue")
 
     def test_bench_checks_every_binary_before_running(self) -> None:
