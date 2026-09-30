@@ -7,8 +7,9 @@ import pathlib
 
 import duckdb
 
+from . import labels
 from .artifact import open_artifact
-from .comparison import write_comparison
+from .comparison import SNAPSHOT
 from .errors import TraceError
 from .metadata import ComparisonMetadata, RunMetadata
 from .plot import (
@@ -73,9 +74,7 @@ def _render_comparison(
         prefix, title = "relays", "Object latency by relay"
     else:
         comparison = (
-            f"{options.object_size} bytes"
-            if dimension == "subscribers"
-            else f"{options.subscribers} {'subscriber' if options.subscribers == 1 else 'subscribers'}"
+            f"{options.object_size} bytes" if dimension == "subscribers" else labels.subscribers(options.subscribers)
         )
         subtitle = f"{describe(options)} | {comparison}"
         prefix, title = "comparison", f"Object latency by {dimension}"
@@ -84,44 +83,23 @@ def _render_comparison(
     plot_breakdown_comparison(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
 
 
-def render_relays(output: pathlib.Path, databases: dict[str, pathlib.Path]) -> pathlib.Path:
-    """Refresh the snapshot atomically and render relay runs sharing one workload."""
+def render(path: pathlib.Path) -> None:
+    """Render figures from a run or comparison artifact, or from a bench output directory.
 
-    database = output / "comparison.duckdb"
-    write_comparison(database, "relay", [(label, path, None) for label, path in databases.items()], replace=True)
-    render(database)
-    return output / "plots"
-
-
-def render(database: pathlib.Path) -> None:
-    """Render a run or comparison DuckDB artifact, or a bench output directory.
-
-    A directory is read as `moq-trace bench` output: one subdirectory per relay,
-    each holding that relay's run artifact. Available runs refresh the snapshot;
-    without source runs, the saved snapshot supplies the figures. Opening the
-    comparison database directly always renders its saved data.
+    A directory is read as `moq-trace bench` output and renders its comparison
+    snapshot. Rendering only reads: building or refreshing a snapshot is
+    `comparison.snapshot_bench`, which a caller runs first when it wants one.
     """
 
-    database = database.resolve()
+    database = path.resolve()
     if database.is_dir():
-        snapshot = database / "comparison.duckdb"
-        databases = {path.parent.name: path for path in sorted(database.glob("*/analysis.duckdb"))}
-        if not databases and snapshot.exists():
-            render(snapshot)
-            return
-        try:
-            render_relays(database, databases)
-        except (KeyError, TypeError, ValueError) as error:
-            raise TraceError(f"failed to render {database}: {error}") from error
-        return
+        database = database / SNAPSHOT
     try:
-        with open_artifact(database) as (connection, kind, metadata):
-            if kind == "run":
-                _render_run(database, connection, metadata)
-            elif kind == "comparison":
-                _render_comparison(database, connection, metadata)
+        with open_artifact(database) as artifact:
+            if isinstance(artifact.metadata, RunMetadata):
+                _render_run(database, artifact.connection, artifact.metadata)
             else:
-                raise TraceError(f"unsupported artifact kind: {kind}")
+                _render_comparison(database, artifact.connection, artifact.metadata)
     except TraceError:
         raise
     except (KeyError, TypeError, ValueError) as error:

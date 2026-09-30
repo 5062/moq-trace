@@ -22,11 +22,11 @@ from support import run_metadata  # noqa: E402
 
 from moq_trace import analyze, coverage, ctf  # noqa: E402
 from moq_trace.artifact import open_artifact, write_metadata  # noqa: E402
-from moq_trace.comparison import write_comparison  # noqa: E402
+from moq_trace.comparison import bench_runs, snapshot_bench, write_comparison  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 from moq_trace.metadata import Window, Workload  # noqa: E402
 from moq_trace.plot.timeline import _timelines  # noqa: E402
-from moq_trace.render import render, render_relays  # noqa: E402
+from moq_trace.render import render  # noqa: E402
 
 
 @contextmanager
@@ -123,13 +123,15 @@ class ArtifactTests(unittest.TestCase):
             trace.connection.execute("UPDATE raw.quic_packet_end SET outcome = 'future_outcome' WHERE trace_id = 5")
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
-            with open_artifact(output) as (connection, _, _):
+            with open_artifact(output) as artifact:
                 self.assertEqual(
-                    connection.execute("SELECT outcome FROM model.packets WHERE trace_id = 5").fetchone(),
+                    artifact.connection.execute("SELECT outcome FROM model.packets WHERE trace_id = 5").fetchone(),
                     ("future_outcome",),
                 )
                 self.assertEqual(
-                    connection.execute("SELECT typeof(timestamp_ns) FROM raw.quic_packet_end LIMIT 1").fetchone(),
+                    artifact.connection.execute(
+                        "SELECT typeof(timestamp_ns) FROM raw.quic_packet_end LIMIT 1"
+                    ).fetchone(),
                     ("BIGINT",),
                 )
 
@@ -176,17 +178,20 @@ class ArtifactTests(unittest.TestCase):
             trace.object_start(1, "rx", 99, pid=9)
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
-            with open_artifact(output) as (connection, _, metadata):
-                self.assertEqual(connection.execute("SELECT schema_version FROM metadata").fetchone(), (2,))
-                self.assertEqual(connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
-                self.assertEqual(connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,))
-                self.assertEqual(connection.execute("SELECT count(*) FROM model.objects").fetchone(), (2,))
-                self.assertEqual(metadata.processes.process_id, 0)
-                tables = connection.execute("""SELECT table_name FROM information_schema.tables
+            with open_artifact(output) as artifact:
+                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (2,))
+                self.assertEqual(artifact.connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
+                self.assertEqual(
+                    artifact.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,)
+                )
+                self.assertEqual(artifact.connection.execute("SELECT count(*) FROM model.objects").fetchone(), (2,))
+                self.assertEqual(artifact.metadata.processes.process_id, 0)
+                tables = artifact.connection.execute("""SELECT table_name FROM information_schema.tables
                     WHERE table_schema = 'main' ORDER BY table_name""").fetchall()
                 self.assertEqual(tables, [("metadata",), ("processes",)])
                 self.assertEqual(
-                    connection.execute("SELECT count(*) FROM duckdb_views() WHERE NOT internal").fetchone(), (0,)
+                    artifact.connection.execute("SELECT count(*) FROM duckdb_views() WHERE NOT internal").fetchone(),
+                    (0,),
                 )
 
     def test_frame_grain_keeps_disjoint_ranges_and_completion_prefix(self):
@@ -324,8 +329,8 @@ class ArtifactTests(unittest.TestCase):
                 [(3, 10_000)],
             )
 
-    def test_relay_refresh_rebuilds_changed_runs_and_preserves_snapshot_on_failure(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch("moq_trace.render._render_comparison"):
+    def test_relay_snapshot_rebuilds_changed_runs_and_preserves_the_snapshot_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             sources = {}
             for name in ("a", "b"):
@@ -333,16 +338,16 @@ class ArtifactTests(unittest.TestCase):
                 with fixture() as trace:
                     publish(trace, output)
                 sources[name] = output
-            render_relays(root, sources)
-            snapshot = root / "comparison.duckdb"
+            snapshot = snapshot_bench(root, sources)
             # Reanalysis changes data at the same path, so path equality is insufficient.
             sources["a"].unlink()
             with fixture("cut_through") as trace:
                 publish(trace, sources["a"])
-            render(root)
-            with open_artifact(snapshot) as (connection, _, _):
+            self.assertEqual(bench_runs(root), sources)
+            snapshot_bench(root, bench_runs(root))
+            with open_artifact(snapshot) as artifact:
                 self.assertEqual(
-                    connection.execute(
+                    artifact.connection.execute(
                         "SELECT value_ns FROM metrics.samples WHERE run_id = 0 AND metric = 'rx_packet_span'"
                     ).fetchone()[0],
                     310_000,
@@ -350,16 +355,31 @@ class ArtifactTests(unittest.TestCase):
             sources["c"] = root / "c" / "analysis.duckdb"
             with fixture() as trace:
                 publish(trace, sources["c"])
-            render_relays(root, sources)
-            with open_artifact(snapshot) as (connection, _, _):
+            snapshot_bench(root, sources)
+            with open_artifact(snapshot) as artifact:
                 self.assertEqual(
-                    connection.execute("SELECT label FROM runs ORDER BY run_id").fetchall(), [("a",), ("b",), ("c",)]
+                    artifact.connection.execute("SELECT label FROM runs ORDER BY run_id").fetchall(),
+                    [("a",), ("b",), ("c",)],
                 )
             saved = snapshot.read_bytes()
             with self.assertRaises(TraceError):
-                render_relays(root, {"a": sources["a"], "missing": root / "missing.duckdb"})
+                snapshot_bench(root, {"a": sources["a"], "missing": root / "missing.duckdb"})
             self.assertEqual(snapshot.read_bytes(), saved)
-            sources["a"].unlink()
+
+    def test_rendering_only_reads(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch("moq_trace.render._render_comparison"):
+            root = pathlib.Path(directory)
+            sources = {}
+            for name in ("a", "b"):
+                sources[name] = root / name / "analysis.duckdb"
+                with fixture() as trace:
+                    publish(trace, sources[name])
+            snapshot = snapshot_bench(root, sources)
+            saved = snapshot.read_bytes()
+            with fixture("cut_through") as trace:
+                sources["a"].unlink()
+                publish(trace, sources["a"])
+            render(root)
             render(snapshot)
             self.assertEqual(snapshot.read_bytes(), saved)
 
@@ -374,30 +394,31 @@ class ArtifactTests(unittest.TestCase):
                 sources.append((name, output, 16))
             comparison = root / "comparison.duckdb"
             write_comparison(comparison, "object_size", sources)
-            with open_artifact(comparison, "comparison") as (connection, _, metadata):
-                self.assertEqual([entry.run_id for entry in metadata.runs], [0, 1])
+            with open_artifact(comparison, "comparison") as artifact:
+                self.assertEqual([entry.run_id for entry in artifact.metadata.runs], [0, 1])
                 self.assertEqual(
-                    connection.execute("""SELECT typeof(subject), typeof(direction)
+                    artifact.connection.execute("""SELECT typeof(subject), typeof(direction)
                     FROM metrics.phase_totals LIMIT 1""").fetchone(),
                     ("ENUM('object', 'packet')", "ENUM('rx', 'tx')"),
                 )
                 self.assertEqual(
-                    connection.execute("SELECT dimension_value, repeat FROM runs ORDER BY run_id").fetchall(),
+                    artifact.connection.execute("SELECT dimension_value, repeat FROM runs ORDER BY run_id").fetchall(),
                     [(16, 0), (16, 1)],
                 )
                 self.assertEqual(
-                    connection.execute("""SELECT run_id, process_id, count(*)
+                    artifact.connection.execute("""SELECT run_id, process_id, count(*)
                     FROM metrics.samples JOIN processes USING(run_id, process_id)
                     GROUP BY ALL ORDER BY run_id""").fetchall(),
                     [(0, 0, 10), (1, 0, 10)],
                 )
                 self.assertEqual(
-                    connection.execute("""SELECT run_id, value_ns FROM metrics.samples
+                    artifact.connection.execute("""SELECT run_id, value_ns FROM metrics.samples
                     WHERE metric = 'rx_packet_span' ORDER BY run_id""").fetchall(),
                     [(0, 115_000), (1, 310_000)],
                 )
             relay_output = root / "relays"
-            render_relays(relay_output, {name: path for name, path, _ in sources})
+            relay_output.mkdir()
+            snapshot_bench(relay_output, {name: path for name, path, _ in sources})
             shutil.rmtree(root / "a")
             shutil.rmtree(root / "b")
             render(comparison)

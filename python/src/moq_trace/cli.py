@@ -12,6 +12,7 @@ import tomllib
 from pydantic import ValidationError
 
 from .config import ComparisonConfig, ExperimentConfig, Hosts
+from .errors import ExperimentError, MoqTraceError
 from .tcpdump import take_sudo_password
 
 
@@ -221,7 +222,7 @@ def _run(args: argparse.Namespace) -> None:
                 print(f"{result.relay}: error: {result.error}", file=sys.stderr)
         failed = [result.relay for result in results if result.error is not None]
         if failed:
-            raise RuntimeError(f"{len(failed)} of {len(results)} relay runs failed: {', '.join(failed)}")
+            raise ExperimentError(f"{len(failed)} of {len(results)} relay runs failed: {', '.join(failed)}")
     elif args.command == "analyze":
         from .analyze import run
         from .metadata import Window, Workload
@@ -238,8 +239,13 @@ def _run(args: argparse.Namespace) -> None:
         )
         print(args.output.resolve())
     elif args.command == "plot":
+        from .comparison import bench_runs, snapshot_bench
         from .render import render
 
+        # A bench directory is compared from the runs it holds now, so a run that
+        # was analyzed again is picked up; without runs, its saved snapshot renders.
+        if args.database.is_dir() and (runs := bench_runs(args.database)):
+            snapshot_bench(args.database, runs)
         render(args.database)
 
 
@@ -253,7 +259,7 @@ def main() -> None:
     take_sudo_password()
     try:
         _run(parser().parse_args())
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, MoqTraceError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 

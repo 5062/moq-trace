@@ -8,6 +8,8 @@ from collections.abc import Collection, Iterable, Iterator
 
 import pyarrow as pa
 
+from .errors import CtfError
+
 try:
     import bt2
 except ModuleNotFoundError as error:
@@ -113,10 +115,6 @@ PROVIDER_EVENTS = {
     "moq_trace": frozenset(name for name in SCHEMAS if name.startswith("moq_")),
     "quic_trace": frozenset(name for name in SCHEMAS if name.startswith(("quic_", "udp_"))),
 }
-
-
-class CtfError(RuntimeError):
-    """The CTF input is incomplete or incompatible with the analyzer schema."""
 
 
 def _discarded_count(message) -> int:

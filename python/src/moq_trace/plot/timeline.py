@@ -8,6 +8,7 @@ import duckdb
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
+from .. import phases
 from .common import PlotOptions, describe
 
 
@@ -124,28 +125,20 @@ def plot_object_timelines(
         raise ValueError("cannot plot an empty object timeline selection")
     for timeline in timelines:
         _rebase(timeline)
-    rx_quic_rows = (
-        ("rx", "quic_header_parse", "RX QUIC Header Parse"),
-        ("rx", "quic_routing", "RX QUIC Routing"),
-        ("rx", "quic_header_unprotect", "RX QUIC Header Unprotect"),
-        ("rx", "quic_payload_decrypt", "RX QUIC Payload Decrypt"),
-        ("rx", "quic_frame_process", "RX QUIC Frame Process"),
-        # The application phase is left out, as in the breakdown: it is the MoQ
-        # work drawn in the rows below.
-    )
-    moq_rows = (
-        ("rx", "header_parse", "RX Header Parse"),
-        ("rx", "create", "RX Create"),
-        ("rx", "payload_read", "RX Payload Read"),
-        ("rx", "frame_commit", "RX Frame Commit"),
-        ("tx", "clone", "TX Clone"),
-        ("tx", "header_encode", "TX Header Encode"),
-        ("tx", "payload_write", "TX Payload Write"),
-    )
-    tx_quic_rows = (
-        ("tx", "quic_frame_encode", "TX QUIC Frame Encode"),
-        ("tx", "quic_packet_encrypt", "TX QUIC Packet Encrypt"),
-    )
+
+    # QUIC rows carry the `quic_` prefix the interval query gives packet phases.
+    # The application phase is left out, as in the breakdown: it is the MoQ work
+    # drawn in the rows below. Waits are left out too, since the rows show work.
+    def rows(subject: str, direction: str, prefix: str, title: str) -> tuple[tuple[str, str, str], ...]:
+        return tuple(
+            (direction, f"{prefix}{phase.name}", f"{direction.upper()} {title}{phase.label.title()}")
+            for phase in phases.select(subject, direction)
+            if phase.drawn and not phase.wait
+        )
+
+    rx_quic_rows = rows("packet", "rx", "quic_", "QUIC ")
+    moq_rows = rows("object", "rx", "", "") + rows("object", "tx", "", "")
+    tx_quic_rows = rows("packet", "tx", "quic_", "QUIC ")
     present = {
         (interval["direction"], interval["phase"]) for timeline in timelines for interval in timeline["intervals"]
     }

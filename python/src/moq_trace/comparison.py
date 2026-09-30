@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import pathlib
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 import duckdb
@@ -14,6 +14,9 @@ from . import sql
 from .artifact import open_artifact, write_metadata
 from .errors import TraceError
 from .metadata import ComparisonMetadata, ComparisonRun
+
+# The comparison artifact a bench output directory holds beside its runs.
+SNAPSHOT = "comparison.duckdb"
 
 
 def write_comparison(
@@ -43,12 +46,12 @@ def write_comparison(
             entries = []
             first_workload = None
             for run_id, (label, source, value) in enumerate(runs):
-                with open_artifact(source, "run") as (run, _, metadata):
+                with open_artifact(source, "run") as artifact:
                     if dimension == "relay":
-                        if first_workload is not None and metadata.workload != first_workload:
+                        if first_workload is not None and artifact.metadata.workload != first_workload:
                             raise TraceError("relay runs used different workloads")
-                        first_workload = metadata.workload
-                    elif value is None or getattr(metadata.workload, dimension) != value:
+                        first_workload = artifact.metadata.workload
+                    elif value is None or getattr(artifact.metadata.workload, dimension) != value:
                         raise TraceError(f"run {label!r} does not match comparison dimension {dimension}")
                     repeat = repeats.get(value, 0) if dimension != "relay" else 0
                     repeats[value] = repeat + 1
@@ -60,7 +63,7 @@ def write_comparison(
                             value,
                             repeat,
                             os.path.relpath(source.resolve(), output.parent.resolve()),
-                            metadata.model_dump_json(),
+                            artifact.metadata.model_dump_json(),
                         ],
                     )
                     for table in (
@@ -71,7 +74,7 @@ def write_comparison(
                         "metrics.statistics",
                     ):
                         query = f"SELECT * FROM {table}" + (" WHERE analyzed" if table == "processes" else "")
-                        connection.register("snapshot", run.execute(query).arrow())
+                        connection.register("snapshot", artifact.connection.execute(query).arrow())
                         try:
                             connection.execute(f"INSERT INTO {table} SELECT ?::UINTEGER, * FROM snapshot", [run_id])
                         finally:
@@ -80,3 +83,26 @@ def write_comparison(
             write_metadata(connection, ComparisonMetadata(dimension=dimension, runs=tuple(entries)))
             connection.execute("CHECKPOINT")
         os.replace(database, output)
+
+
+def bench_runs(directory: pathlib.Path) -> dict[str, pathlib.Path]:
+    """The run artifacts of a bench output directory, keyed by relay.
+
+    Each subdirectory is one relay's run, and it holds an artifact only when that
+    run was traced and analyzed.
+    """
+
+    return {path.parent.name: path for path in sorted(directory.glob("*/analysis.duckdb"))}
+
+
+def snapshot_bench(directory: pathlib.Path, runs: Mapping[str, pathlib.Path]) -> pathlib.Path:
+    """Snapshot the relay runs of one bench into the directory's comparison artifact.
+
+    Replacement keeps the previous snapshot intact until the new one is
+    complete, so a run that was analyzed again is picked up by snapshotting
+    again.
+    """
+
+    database = directory / SNAPSHOT
+    write_comparison(database, "relay", [(relay, path, None) for relay, path in runs.items()], replace=True)
+    return database

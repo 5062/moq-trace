@@ -11,26 +11,22 @@ import re
 import shlex
 from collections.abc import Callable, Sequence
 
-from . import network, tls
+from . import labels, network, tls
 from .analyze import run as analyze
 from .artifact import open_artifact
 from .commands import PROTOCOL, commands
 from .comparison import write_comparison
 from .config import ComparisonConfig, ExperimentConfig
+from .errors import ExperimentError
 from .hosts import Host, Process, SshPool
 from .lttng import LttngSession
 from .metadata import Affinity, Binaries, CommandSet, Window, Workload
 from .network import NetworkManifest
 from .placement import Placement
-from .plot.common import format_byte_size
 from .render import render
 from .tcpdump import start_packet_capture
 
 _log = logging.getLogger(__name__)
-
-
-class ExperimentError(RuntimeError):
-    """Experiment configuration, capture, or analysis failed."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -221,8 +217,8 @@ async def _binaries(placement: Placement) -> Binaries:
 
 
 def _validate_workload(database: pathlib.Path) -> None:
-    with open_artifact(database, "run") as (connection, _, _metadata):
-        count, first, last = connection.execute(
+    with open_artifact(database, "run") as artifact:
+        count, first, last = artifact.connection.execute(
             "SELECT count(DISTINCT group_id), min(group_id), max(group_id) "
             "FROM model.selected_objects JOIN model.objects USING(process_id, trace_id)"
         ).fetchone()
@@ -309,11 +305,7 @@ async def compare(config: ComparisonConfig, pool: SshPool) -> pathlib.Path:
             }
         )
         database = await run(run_config, pool)
-        label = (
-            f"{value} {'subscriber' if value == 1 else 'subscribers'}"
-            if field == "subscribers"
-            else format_byte_size(value)
-        )
+        label = labels.subscribers(value) if field == "subscribers" else labels.byte_size(value)
         runs.append((label, database, value))
     database = output / "comparison.duckdb"
     await asyncio.to_thread(write_comparison, database, config.dimension, runs)

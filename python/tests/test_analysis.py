@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -13,8 +14,28 @@ sys.path.insert(0, str(SOURCE))
 
 from support import run_metadata, write_raw_metadata  # noqa: E402
 
+from moq_trace import phases  # noqa: E402
 from moq_trace.artifact import open_artifact, write_metadata  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
+
+
+class PhaseTableTests(unittest.TestCase):
+    def test_phases_match_the_provider_enums(self) -> None:
+        """The Python phase table names exactly the phases each provider declares.
+
+        The enum order is the wire encoding and the table order is the pipeline, so only the names are compared.
+        """
+
+        crates = pathlib.Path(__file__).resolve().parents[2] / "crates"
+        for subject, header, prefix in (
+            ("object", "moq-trace-lttng-sys", "MOQ_TRACE_OBJECT_PHASE_"),
+            ("packet", "quic-trace-lttng-sys", "QUIC_TRACE_PACKET_PHASE_"),
+        ):
+            with self.subTest(subject=subject):
+                source = (crates / header / "provider/interface.h").read_text()
+                declared = [name.lower() for name in re.findall(rf"\b{prefix}(\w+),", source)]
+                table = [phase.name for phase in phases.PHASES if phase.subject == subject]
+                self.assertCountEqual(table, declared)
 
 
 class AnalysisDatabaseTests(unittest.TestCase):
@@ -39,12 +60,12 @@ class AnalysisDatabaseTests(unittest.TestCase):
             write_metadata(connection, run_metadata())
             connection.close()
 
-            with open_artifact(database, "run") as (_connection, kind, metadata):
-                self.assertEqual(kind, "run")
-                self.assertEqual(metadata.workload.object_size, 1024)
-                self.assertEqual(metadata.workload.subscribers, 1)
-                self.assertEqual(metadata.counts.correlated_objects, 1)
-                self.assertEqual(metadata.processes.captured_pids, (0,))
+            with open_artifact(database, "run") as artifact:
+                self.assertEqual(artifact.kind, "run")
+                self.assertEqual(artifact.metadata.workload.object_size, 1024)
+                self.assertEqual(artifact.metadata.workload.subscribers, 1)
+                self.assertEqual(artifact.metadata.counts.correlated_objects, 1)
+                self.assertEqual(artifact.metadata.processes.captured_pids, (0,))
 
     def test_rejects_metadata_that_belongs_to_another_kind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

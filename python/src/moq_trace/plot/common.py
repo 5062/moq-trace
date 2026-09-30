@@ -11,6 +11,8 @@ from matplotlib import ticker
 from matplotlib.axis import Axis
 from matplotlib.figure import Figure
 
+from .. import labels
+
 
 @dataclasses.dataclass(frozen=True)
 class PlotOptions:
@@ -36,7 +38,7 @@ def describe(options: PlotOptions) -> str:
     """Summarize a run's workload for a figure subtitle."""
 
     affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
-    values = [affinity, f"{options.subscribers} subscriber(s)", f"{options.object_size} bytes"]
+    values = [affinity, labels.subscribers(options.subscribers), f"{options.object_size} bytes"]
     if options.fps is not None:
         values.append(f"{options.fps} fps")
     if options.protocol is not None:
@@ -87,12 +89,3 @@ _OBJECT_SPANS = (
     ("full_span", "MoQ"),
     ("quic_full_span", "QUIC+MoQ"),
 )
-
-
-def format_byte_size(value: int) -> str:
-    """Label a byte count using an exact binary unit when possible."""
-
-    for divisor, suffix in ((1024 * 1024, "MiB"), (1024, "KiB")):
-        if value % divisor == 0:
-            return f"{value // divisor} {suffix}"
-    return f"{value} bytes"

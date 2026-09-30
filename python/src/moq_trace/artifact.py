@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import pathlib
 from collections.abc import Generator
 
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 
 from . import sql
 from .errors import TraceError
-from .metadata import ArtifactModel, ComparisonMetadata, RunMetadata
+from .metadata import ComparisonMetadata, RunMetadata
 
 # The on-disk schema version this tool writes and reads. An artifact of any other
 # version is rebuilt rather than migrated.
@@ -38,7 +39,7 @@ def write_metadata(connection: duckdb.DuckDBPyConnection, metadata: RunMetadata 
     )
 
 
-def _decode(kind: str, encoded: str) -> ArtifactModel:
+def _decode(kind: str, encoded: str) -> RunMetadata | ComparisonMetadata:
     """Validate one artifact's metadata against the schema for its kind."""
 
     model = ARTIFACT_MODELS[kind]
@@ -48,11 +49,22 @@ def _decode(kind: str, encoded: str) -> ArtifactModel:
         raise TraceError(f"{kind} artifact metadata does not match its schema: {error}") from error
 
 
+@dataclasses.dataclass(frozen=True)
+class Artifact:
+    """An open artifact: its read-only connection and its validated metadata."""
+
+    connection: duckdb.DuckDBPyConnection
+    metadata: RunMetadata | ComparisonMetadata
+
+    @property
+    def kind(self) -> str:
+        """The on-disk kind, which the metadata model names."""
+
+        return self.metadata.KIND
+
+
 @contextlib.contextmanager
-def open_artifact(
-    database: pathlib.Path,
-    expected_kind: str | None = None,
-) -> Generator[tuple[duckdb.DuckDBPyConnection, str, ArtifactModel], None, None]:
+def open_artifact(database: pathlib.Path, expected_kind: str | None = None) -> Generator[Artifact, None, None]:
     """Open an artifact and close it when the caller finishes.
 
     Metadata is validated against its kind before it is returned, so a reader
@@ -91,6 +103,6 @@ def open_artifact(
         raise TraceError(f"failed to load analysis database {database}: {error}") from error
 
     try:
-        yield connection, str(kind), value
+        yield Artifact(connection, value)
     finally:
         connection.close()

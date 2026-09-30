@@ -463,7 +463,7 @@ class SqlAnalysisTests(unittest.TestCase):
         self.packet(4, "tx", 2)
         self.phase(4, "application", 230_000, 240_000)
 
-        with self.assertRaisesRegex(TraceError, "application packet phases outside inbound packets"):
+        with self.assertRaisesRegex(TraceError, "packet phases have invalid directions"):
             self.prepare_model()
 
     def test_rejects_application_phases_overlapping_other_phases(self) -> None:
@@ -529,16 +529,16 @@ class SqlAnalysisTests(unittest.TestCase):
                     window=Window(warmup_seconds=0, cooldown_seconds=0),
                 )
 
-            with open_artifact(output, "run") as (connection, kind, metadata):
-                self.assertEqual(kind, "run")
-                self.assertEqual(metadata.counts.correlated_objects, 1)
-                self.assertEqual(metadata.window.warmup_seconds, 0)
-                self.assertEqual(metadata.transport_profile, "generic")
-                self.assertEqual(metadata.transport_capabilities.packet_phases, ("routing", "scheduling"))
-                self.assertEqual(metadata.processes.analyzed_pid, 0)
-                self.assertEqual(metadata.processes.captured_pids, (0,))
+            with open_artifact(output, "run") as artifact:
+                self.assertEqual(artifact.kind, "run")
+                self.assertEqual(artifact.metadata.counts.correlated_objects, 1)
+                self.assertEqual(artifact.metadata.window.warmup_seconds, 0)
+                self.assertEqual(artifact.metadata.transport_profile, "generic")
+                self.assertEqual(artifact.metadata.transport_capabilities.packet_phases, ("routing", "scheduling"))
+                self.assertEqual(artifact.metadata.processes.analyzed_pid, 0)
+                self.assertEqual(artifact.metadata.processes.captured_pids, (0,))
                 self.assertEqual(
-                    connection.execute("SELECT count(*) FROM metrics.statistics").fetchone()[0],
+                    artifact.connection.execute("SELECT count(*) FROM metrics.statistics").fetchone()[0],
                     10,
                 )
 
@@ -561,11 +561,11 @@ class SqlAnalysisTests(unittest.TestCase):
                     transport_profile="generic",
                 )
 
-            with open_artifact(output, "run") as (connection, _kind, metadata):
-                self.assertEqual(metadata.transport_profile, "generic")
-                self.assertEqual(metadata.transport_capabilities.packet_phases, ())
+            with open_artifact(output, "run") as artifact:
+                self.assertEqual(artifact.metadata.transport_profile, "generic")
+                self.assertEqual(artifact.metadata.transport_capabilities.packet_phases, ())
                 self.assertEqual(
-                    connection.execute(
+                    artifact.connection.execute(
                         "SELECT count(*) FROM metrics.statistics WHERE metric = 'rx_packet_span'"
                     ).fetchone()[0],
                     1,
@@ -638,20 +638,20 @@ class SqlAnalysisTests(unittest.TestCase):
                     workload=Workload(object_size=16, subscribers=1),
                     window=Window(warmup_seconds=0.5, cooldown_seconds=0),
                 )
-            with open_artifact(trimmed) as (connection, _, metadata):
-                self.assertEqual(metadata.counts.correlated_objects, 1)
-                self.assertEqual(metadata.window.warmup_seconds, 0.5)
+            with open_artifact(trimmed) as artifact:
+                self.assertEqual(artifact.metadata.counts.correlated_objects, 1)
+                self.assertEqual(artifact.metadata.window.warmup_seconds, 0.5)
                 self.assertEqual(
-                    connection.execute(
+                    artifact.connection.execute(
                         """SELECT DISTINCT packet_trace_id FROM metrics.samples WHERE packet_trace_id IS
                             NOT NULL ORDER BY
                         packet_trace_id"""
                     ).fetchall(),
                     [(13,), (14,)],
                 )
-                self.assertEqual(metadata.population.packet, "selected_object_packets")
+                self.assertEqual(artifact.metadata.population.packet, "selected_object_packets")
                 self.assertEqual(
-                    connection.execute("SELECT origin_ns, start_ns, end_ns FROM model.window").fetchall(),
+                    artifact.connection.execute("SELECT origin_ns, start_ns, end_ns FROM model.window").fetchall(),
                     [(100_000, 500_100_000, 1_000_100_000)],
                 )
 

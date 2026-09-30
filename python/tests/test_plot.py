@@ -10,6 +10,7 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
+from moq_trace.phases import Phase  # noqa: E402
 from moq_trace.plot import (  # noqa: E402
     ComparisonRun,
     PlotOptions,
@@ -19,7 +20,7 @@ from moq_trace.plot import (  # noqa: E402
     plot_latency_comparison,
     plot_stability,
 )
-from moq_trace.plot.breakdown import _Row, _row_summary  # noqa: E402
+from moq_trace.plot.breakdown import _row_summary  # noqa: E402
 
 OPTIONS = PlotOptions(None, 1, 1_024, 30, "test")
 
@@ -80,8 +81,8 @@ class RunPlotTests(unittest.TestCase):
     def test_breakdown_sums_repeated_phases_within_a_unit(self) -> None:
         connection = _artifact(packet_phases=True)
         try:
-            summary = _row_summary(connection, _Row("Frame commit", "object", "rx", "frame_commit"))
-            absent = _row_summary(connection, _Row("Routing", "packet", "rx", "routing"))
+            summary = _row_summary(connection, Phase("object", "rx", "frame_commit", "Frame commit"))
+            absent = _row_summary(connection, Phase("packet", "rx", "routing", "Routing"))
         finally:
             connection.close()
         self.assertIsNotNone(summary)

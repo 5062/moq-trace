@@ -9,7 +9,10 @@ import duckdb
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
+from .. import phases
 from .common import _OBJECT_SPANS, PlotOptions, _metrics, _plain_log, _save, describe
+
+_QUEUING = next(phase for phase in phases.select("packet", "rx") if phase.name == "scheduling")
 
 
 def _rx_packet_metric(available: set[str]) -> str:
@@ -74,7 +77,7 @@ def plot_stability(
 
     available = _metrics(connection)
     candidates = [
-        ("rx_scheduling", "RX queuing"),
+        ("rx_scheduling", f"RX {_QUEUING.label.lower()}"),
         (_rx_packet_metric(available), "RX processing"),
         ("tx_packet_span", "TX packet span"),
     ]

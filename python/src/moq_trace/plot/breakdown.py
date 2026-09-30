@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import pathlib
 from collections.abc import Sequence
 
@@ -11,69 +10,25 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.patches import Patch
 
+from .. import phases
+from ..phases import Phase
 from .common import ComparisonRun, PlotOptions, _format_us, _plain_log, _save, describe
 
-
-@dataclasses.dataclass(frozen=True)
-class _Row:
-    """One breakdown row: a single processing phase of a packet, object, or copy."""
-
-    label: str
-    source: str
-    direction: str
-    name: str
-
-
-# Rows in pipeline order. Phase rows sum every occurrence of the phase within one
-# unit (packet, object, or copy), because a phase that repeats per chunk only
-# means something as the unit's total. Spans that contain other rows, such as
-# the end-to-end latencies, are left out; `latency_cdf` shows those. The RX
-# `application` phase is left out too: only a stack that runs MoQ inside packet
-# processing records it, and that time already appears in the MoQ rows.
-# Each section keeps its CDF line style beside its rows, so colors can repeat
-# while the phase curves remain distinct.
-_SECTIONS: tuple[tuple[str, str, tuple[_Row, ...]], ...] = (
-    (
-        "RX QUIC",
-        "-",
-        (
-            _Row("Header parse", "packet", "rx", "header_parse"),
-            _Row("Routing", "packet", "rx", "routing"),
-            # Quinn's `scheduling` phase is the wait in the connection's queue,
-            # including waking its task, so it is labeled for what it measures.
-            _Row("Queuing", "packet", "rx", "scheduling"),
-            _Row("Header unprotect", "packet", "rx", "header_unprotect"),
-            _Row("Payload decrypt", "packet", "rx", "payload_decrypt"),
-            _Row("Frame process", "packet", "rx", "frame_process"),
-        ),
-    ),
-    (
-        "RX MoQ",
-        "--",
-        (
-            _Row("Header parse", "object", "rx", "header_parse"),
-            _Row("Create", "object", "rx", "create"),
-            _Row("Payload read", "object", "rx", "payload_read"),
-            _Row("Frame commit", "object", "rx", "frame_commit"),
-        ),
-    ),
-    (
-        "TX MoQ",
-        "-.",
-        (
-            _Row("Clone", "object", "tx", "clone"),
-            _Row("Header encode", "object", "tx", "header_encode"),
-            _Row("Payload write", "object", "tx", "payload_write"),
-        ),
-    ),
-    (
-        "TX QUIC",
-        ":",
-        (
-            _Row("Frame encode", "packet", "tx", "frame_encode"),
-            _Row("Packet encrypt", "packet", "tx", "packet_encrypt"),
-        ),
-    ),
+# Sections in pipeline order, each drawing the known phases of one subject and
+# direction. Phase rows sum every occurrence of the phase within one unit
+# (packet, object, or copy), because a phase that repeats per chunk only means
+# something as the unit's total. Spans that contain other rows, such as the
+# end-to-end latencies, are left out; `latency_cdf` shows those. Each section
+# keeps its CDF line style beside its rows, so colors can repeat while the phase
+# curves remain distinct.
+_SECTIONS: tuple[tuple[str, str, tuple[Phase, ...]], ...] = tuple(
+    (title, style, tuple(phase for phase in phases.select(subject, direction) if phase.drawn))
+    for title, style, subject, direction in (
+        ("RX QUIC", "-", "packet", "rx"),
+        ("RX MoQ", "--", "object", "rx"),
+        ("TX MoQ", "-.", "object", "tx"),
+        ("TX QUIC", ":", "packet", "tx"),
+    )
 )
 
 # Quantiles each breakdown row is summarized by: whisker, box, median, box, whisker.
@@ -83,19 +38,19 @@ _BREAKDOWN_QUANTILES = (0.01, 0.25, 0.50, 0.75, 0.99)
 _FLOOR_US = 0.01
 
 
-def _row_query(row: _Row, run_id: int | None = None) -> tuple[str, list]:
+def _row_query(row: Phase, run_id: int | None = None) -> tuple[str, list]:
     """SQL yielding one phase total in microseconds per selected subject."""
 
     scope = " AND run_id = ?" if run_id is not None else ""
     return (
         "SELECT total_ns / 1000.0 AS us FROM metrics.phase_totals "
         f"WHERE subject = ? AND direction = ? AND phase = ?{scope}",
-        [row.source, row.direction, row.name] + ([run_id] if run_id is not None else []),
+        [row.subject, row.direction, row.name] + ([run_id] if run_id is not None else []),
     )
 
 
 def _row_summary(
-    connection: duckdb.DuckDBPyConnection, row: _Row, run_id: int | None = None
+    connection: duckdb.DuckDBPyConnection, row: Phase, run_id: int | None = None
 ) -> tuple[float, ...] | None:
     """Quantiles of one row, or None when the provider did not emit it."""
 

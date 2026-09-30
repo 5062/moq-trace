@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .config import ExperimentConfig, Hosts
+from .errors import ExperimentError
 
 _log = logging.getLogger(__name__)
 
@@ -148,9 +149,10 @@ async def bench(
 
     # Deferred like the CLI's own imports: the runner pulls in the analysis stack,
     # which listing profiles for `--help` does not need.
-    from .experiment import ExperimentError, run
+    from .comparison import snapshot_bench
+    from .experiment import run
     from .hosts import SshPool
-    from .render import render_relays
+    from .render import render
 
     checkouts = checkouts or {}
     unknown = sorted(set(checkouts) - set(relays))
@@ -173,6 +175,8 @@ async def bench(
             _log.info("[%d/%d] %s", index, len(configs), name)
             try:
                 results.append(BenchResult(relay=name, path=await run(config, pool)))
+            # Broad on purpose: one relay's failure, even a bug, must not cost the
+            # relays after it their runs.
             except (OSError, RuntimeError, ValueError) as error:
                 _log.info("%s failed: %s", name, error)
                 results.append(BenchResult(relay=name, error=str(error)))
@@ -181,5 +185,6 @@ async def bench(
     }
     if settings.get("render", True) and len(databases) >= 2:
         _log.info("rendering the relay comparison into %s", output / "plots")
-        await asyncio.to_thread(render_relays, output, databases)
+        await asyncio.to_thread(snapshot_bench, output, databases)
+        await asyncio.to_thread(render, output)
     return results

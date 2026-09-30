@@ -11,7 +11,7 @@ from collections.abc import Collection, Sequence
 import duckdb
 import pyarrow as pa
 
-from . import coverage, ctf, sql
+from . import coverage, ctf, phases, sql
 from . import network as network_capture
 from .artifact import write_metadata
 from .errors import TraceError
@@ -30,15 +30,25 @@ from .metadata import (
     Workload,
 )
 
+# The RX packet phases the Quinn profile requires, which the packet processing
+# metric depends on.
+_QUINN_PHASES = ("routing", "scheduling")
+
 
 def _count(connection: duckdb.DuckDBPyConnection, query: str, parameters=()) -> int:
     return int(connection.execute(query, parameters).fetchone()[0])
 
 
-def _require_zero(connection: duckdb.DuckDBPyConnection, query: str, message: str) -> None:
-    count = _count(connection, query)
-    if count:
-        raise TraceError(f"{message}: {count}")
+def _check(connection: duckdb.DuckDBPyConnection, checks: str) -> None:
+    """Run a packaged check query and reject the trace if any defect it counts is present.
+
+    A check query returns one `(defect, count)` row per invariant, so one pass
+    reports every violated invariant rather than only the first.
+    """
+
+    defects = [f"{defect}: {count}" for defect, count in connection.execute(sql.read(checks)).fetchall() if count]
+    if defects:
+        raise TraceError("; ".join(defects))
 
 
 def _ingest(
@@ -161,134 +171,19 @@ def _materialize_model(connection: duckdb.DuckDBPyConnection) -> None:
         connection.execute(f"CREATE OR REPLACE TEMP VIEW {name} AS {query}")
 
 
-def _validate_boundaries(connection: duckdb.DuckDBPyConnection) -> None:
-    """Reject traces whose raw events cannot be correlated."""
-
-    for table in ("moq_object_start", "moq_object_end", "quic_packet_start", "quic_packet_end"):
-        _require_zero(
-            connection,
-            f"SELECT count(*) FROM (SELECT process_id, trace_id FROM {table} "
-            "GROUP BY process_id, trace_id HAVING count(*) <> 1)",
-            f"{table} contains duplicate trace IDs",
-        )
-    for kind, start, finish, lifecycles in (
-        ("object", "moq_object_start", "moq_object_end", "object_lifecycles"),
-        ("packet", "quic_packet_start", "quic_packet_end", "packet_lifecycles"),
-    ):
-        _require_zero(
-            connection,
-            f"SELECT count(*) FROM {finish} ANTI JOIN {start} USING (process_id, trace_id)",
-            f"{kind} completions without starts",
-        )
-    for table, intervals in (
-        ("moq_object_phase", "object_phase_intervals"),
-        ("quic_packet_phase", "packet_phase_intervals"),
-    ):
-        _require_zero(
-            connection,
-            f"""SELECT count(*) FROM (
-                  SELECT process_id, trace_id, span_id, phase, edge FROM {table}
-                  GROUP BY ALL HAVING count(*) > 1
-                )""",
-            f"{table} contains duplicate phase boundaries",
-        )
-        _require_zero(
-            connection,
-            f"""SELECT count(*) FROM {table} AS done
-                ANTI JOIN {table} AS start
-                  ON start.process_id = done.process_id AND start.trace_id = done.trace_id
-                 AND start.span_id = done.span_id
-                 AND start.phase = done.phase AND start.edge = 'start'
-                WHERE done.edge = 'done'""",
-            f"{table} contains unmatched phase boundaries",
-        )
-
-
 def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     """Check raw boundaries, store paired relations, then check their invariants."""
 
-    _validate_boundaries(connection)
+    _check(connection, "checks-raw")
     _materialize_model(connection)
-    for relation, message in (
-        ("object_lifecycles", "objects completing before they start"),
-        ("packet_lifecycles", "packets completing before they start"),
-        ("object_phase_intervals", "moq_object_phase contains phases completing before they start"),
-        ("packet_phase_intervals", "quic_packet_phase contains phases completing before they start"),
-    ):
-        _require_zero(connection, f"SELECT count(*) FROM {relation} WHERE end_ns < start_ns", message)
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM object_phase_intervals AS phase
-           JOIN object_lifecycles AS object USING (process_id, trace_id)
-           WHERE NOT ((object.direction = 'rx' AND phase.phase IN
-               ('header_parse', 'create', 'payload_read', 'frame_commit')) OR
-              (object.direction = 'tx' AND phase.phase IN
-               ('clone', 'header_encode', 'payload_write')))""",
-        "object phases have invalid directions",
-    )
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM packet_phase_intervals AS phase
-           JOIN packet_lifecycles AS packet USING (process_id, trace_id)
-           WHERE phase.phase = 'application' AND packet.direction <> 'rx'""",
-        "application packet phases outside inbound packets",
-    )
-    # The transport share of a packet subtracts application time from the
-    # packet span, which is only sound when that time overlaps no other phase.
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM packet_phase_intervals AS application
-           JOIN packet_phase_intervals AS other USING (process_id, trace_id)
-           WHERE application.phase = 'application'
-             AND other.span_id <> application.span_id
-             AND other.start_ns < application.end_ns
-             AND application.start_ns < other.end_ns""",
-        "application packet phases overlap other packet phases",
-    )
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM (
-             SELECT process_id, logical_group, logical_frame,
-                    count(*) FILTER (direction = 'rx') AS ingress
-             FROM object_lifecycles GROUP BY ALL HAVING ingress <> 1
-           )""",
-        "logical objects do not have exactly one ingress lifecycle",
-    )
+    phases.register(connection)
+    _check(connection, "checks-model")
 
 
 def _validate_truncation(connection: duckdb.DuckDBPyConnection) -> None:
-    """Reject starts without ends inside the window, allowing a cut-off tail.
+    """Reject starts without ends inside the window, allowing a cut-off tail."""
 
-    A relay without a graceful stop is killed, and an object or packet it was
-    handling then never records its end. Those start after the window closes,
-    since the window ends a cooldown before the last event, and they reach no
-    metric because lifecycles pair each start with its end. One that starts
-    inside the window lost its end some other way, which is an instrumentation
-    fault.
-    """
-
-    for kind, start, finish in (
-        ("object", "moq_object_start", "moq_object_end"),
-        ("packet", "quic_packet_start", "quic_packet_end"),
-    ):
-        _require_zero(
-            connection,
-            f"""SELECT count(*) FROM {start} ANTI JOIN {finish} USING (process_id, trace_id)
-                WHERE timestamp_ns <= (SELECT end_ns FROM analysis_window)""",
-            f"{kind} starts without completions inside the analysis window",
-        )
-    for table in ("moq_object_phase", "quic_packet_phase"):
-        _require_zero(
-            connection,
-            f"""SELECT count(*) FROM {table} AS start
-                ANTI JOIN {table} AS done
-                  ON done.process_id = start.process_id AND done.trace_id = start.trace_id
-                 AND done.span_id = start.span_id
-                 AND done.phase = start.phase AND done.edge = 'done'
-                WHERE start.edge = 'start'
-                  AND start.timestamp_ns <= (SELECT end_ns FROM analysis_window)""",
-            f"{table} contains unmatched phase boundaries inside the analysis window",
-        )
+    _check(connection, "checks-window")
 
 
 def _select_window(
@@ -382,11 +277,6 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
         sql.read("quic-object-samples-stage"),
         {"origin": origin},
     )
-    _require_zero(
-        connection,
-        "SELECT count(*) FROM quic_object_samples WHERE latency_ns < 0",
-        "QUIC object metrics are negative",
-    )
     connection.execute(
         """CREATE TEMP VIEW selected_packets AS
            SELECT * FROM packet_lifecycles
@@ -400,34 +290,52 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     )
 
 
-def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
-    """Declare the metric catalog and its per-metric statistics."""
+def _catalog() -> list[tuple[str, str, str, str, str, int]]:
+    """The metric definitions: every span, then one metric per known packet phase.
 
-    definitions = (
-        ("object", "full_span", "Full relay span", 0),
-        ("quic_object", "quic_forward_start", "QUIC forward start", 0),
-        ("quic_object", "quic_tail_gap", "QUIC tail gap", 1),
-        ("quic_object", "quic_full_span", "QUIC full span", 2),
-        ("packet", "rx_packet_span", "RX packet span", 0),
-        ("packet", "rx_packet_transport_span", "RX packet transport span", 1),
-        ("packet", "rx_header_parse", "RX header parse", 2),
-        ("packet", "rx_routing", "RX routing", 3),
-        ("packet", "rx_scheduling", "RX scheduling", 4),
-        ("packet", "rx_header_unprotect", "RX header unprotect", 5),
-        ("packet", "rx_payload_decrypt", "RX payload decrypt", 6),
-        ("packet", "rx_frame_process", "RX frame process", 7),
-        ("packet", "rx_application", "RX application", 8),
-        ("packet", "rx_packet_processing_span", "RX packet processing span", 9),
-        ("packet", "tx_packet_span", "TX packet span", 10),
-        ("packet", "tx_frame_encode", "TX frame encode", 11),
-        ("packet", "tx_packet_encrypt", "TX packet encrypt", 12),
+    A span contains the phases of its unit, so its grain is the copy or the
+    packet. A phase recurs within one packet, so its grain is the occurrence.
+    """
+
+    copy = (
+        ("full_span", "object", "Full relay span"),
+        ("quic_forward_start", "quic_object", "QUIC forward start"),
+        ("quic_tail_gap", "quic_object", "QUIC tail gap"),
+        ("quic_full_span", "quic_object", "QUIC full span"),
     )
-    connection.execute(sql.read("metrics-schema"))
+
+    def packet_phases(direction: phases.Direction) -> list[tuple[str, str, str]]:
+        return [
+            (f"{direction}_{phase.name}", f"{direction.upper()} {phase.label.lower()}", "occurrence")
+            for phase in phases.select("packet", direction)
+        ]
+
+    packet = [
+        ("rx_packet_span", "RX packet span", "packet"),
+        ("rx_packet_transport_span", "RX packet transport span", "packet"),
+        *packet_phases("rx"),
+        ("rx_packet_processing_span", "RX packet processing span", "packet"),
+        ("tx_packet_span", "TX packet span", "packet"),
+        *packet_phases("tx"),
+    ]
+    orders: dict[str, int] = {}
     catalog = []
-    packet_grain = {"rx_packet_span", "tx_packet_span", "rx_packet_transport_span", "rx_packet_processing_span"}
-    for domain, metric, label, order in definitions:
-        grain = "copy" if domain != "packet" else "packet" if metric in packet_grain else "occurrence"
-        catalog.append((metric, domain, label, "ns", grain, order))
+    for metric, domain, label in copy:
+        catalog.append((metric, domain, label, "ns", "copy", orders.setdefault(domain, 0)))
+        orders[domain] += 1
+    catalog.extend((metric, "packet", label, "ns", grain, order) for order, (metric, label, grain) in enumerate(packet))
+    return catalog
+
+
+def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
+    """Declare the metric catalog and its per-metric statistics.
+
+    A packet phase this table does not know is still measured, because the
+    generic analyzer uses whichever phases a provider emits.
+    """
+
+    connection.execute(sql.read("metrics-schema"))
+    catalog = _catalog()
     known = {row[0] for row in catalog}
     extra = connection.execute("SELECT DISTINCT metric FROM packet_samples ORDER BY metric").fetchall()
     for (metric,) in extra:
@@ -443,25 +351,7 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
 def _validate_samples(connection: duckdb.DuckDBPyConnection) -> None:
     """Require exactly the lifecycle identity declared by each metric's grain."""
 
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM metrics.samples s
-        JOIN metrics.definitions d USING(metric) WHERE NOT (
-          (grain = 'copy' AND rx_trace_id IS NOT NULL AND tx_trace_id IS NOT NULL
-            AND packet_trace_id IS NULL AND span_id IS NULL) OR
-          (grain = 'packet' AND rx_trace_id IS NULL AND tx_trace_id IS NULL
-            AND packet_trace_id IS NOT NULL AND span_id IS NULL) OR
-          (grain = 'occurrence' AND rx_trace_id IS NULL AND tx_trace_id IS NULL
-            AND packet_trace_id IS NOT NULL AND span_id IS NOT NULL))""",
-        "metric samples have invalid identity columns",
-    )
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM (
-        SELECT process_id, metric, rx_trace_id, tx_trace_id, packet_trace_id, span_id
-        FROM metrics.samples GROUP BY ALL HAVING count(*) > 1)""",
-        "duplicate metric sample identities",
-    )
+    _check(connection, "checks-samples")
 
 
 def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
@@ -479,7 +369,8 @@ def _verify_transport_metrics(connection: duckdb.DuckDBPyConnection, transport_p
     if transport_profile != "quinn":
         raise TraceError(f"unsupported transport profile: {transport_profile}")
 
-    for required in ("rx_routing", "rx_scheduling"):
+    for phase in _QUINN_PHASES:
+        required = f"rx_{phase}"
         count = _count(connection, "SELECT count(*) FROM metrics.statistics WHERE metric = ?", [required])
         if count == 0:
             raise TraceError(f"Quinn transport profile is missing packet metric: {required}")
