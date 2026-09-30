@@ -180,12 +180,6 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     _check(connection, "checks-model")
 
 
-def _validate_truncation(connection: duckdb.DuckDBPyConnection) -> None:
-    """Reject starts without ends inside the window, allowing a cut-off tail."""
-
-    _check(connection, "checks-window")
-
-
 def _select_window(
     connection: duckdb.DuckDBPyConnection,
     *,
@@ -343,15 +337,9 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
             catalog.append((metric, "packet", metric.replace("_", " "), "ns", "occurrence", len(catalog)))
     connection.executemany("INSERT INTO metrics.definitions VALUES (?, ?, ?, ?, ?, ?)", catalog)
     connection.execute(sql.read("samples-populate"))
-    _validate_samples(connection)
+    _check(connection, "checks-samples")
     connection.execute(sql.read("statistics-populate"))
     connection.execute(sql.read("phase-totals-populate"))
-
-
-def _validate_samples(connection: duckdb.DuckDBPyConnection) -> None:
-    """Require exactly the lifecycle identity declared by each metric's grain."""
-
-    _check(connection, "checks-samples")
 
 
 def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
@@ -475,8 +463,7 @@ def run(
     with tempfile.TemporaryDirectory(prefix=".moq-trace-analysis-", dir=output.parent) as staging_name:
         staging = pathlib.Path(staging_name)
         database = staging / output.name
-        connection = duckdb.connect(str(database))
-        try:
+        with duckdb.connect(str(database)) as connection:
             connection.execute(sql.read("macros"))
             captured = _ingest(connection, input_path, expected_pids)
             analyzed = _select_process(connection, pid, captured)
@@ -489,7 +476,7 @@ def run(
                 warmup_seconds=window.warmup_seconds,
                 cooldown_seconds=window.cooldown_seconds,
             )
-            _validate_truncation(connection)
+            _check(connection, "checks-window")
             coverage.resolve(connection)
             _derive_samples(connection, origin)
             _define_metrics(connection)
@@ -510,6 +497,4 @@ def run(
                 network=capabilities,
             )
             connection.execute("CHECKPOINT")
-        finally:
-            connection.close()
         os.replace(database, output)

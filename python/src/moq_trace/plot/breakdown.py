@@ -154,10 +154,7 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
     axis.set_ylim(y - 0.4, -0.6)
     axis.set_xscale("log")
     _plain_log(axis.xaxis)
-    axis.set_xlabel(
-        "Duration (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. "
-        # f"Durations under {_FLOOR_US} µs are drawn at {_FLOOR_US} µs."
-    )
+    axis.set_xlabel("Duration (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. ")
     axis.grid(axis="x", alpha=0.25)
     if single:
         axis.annotate(

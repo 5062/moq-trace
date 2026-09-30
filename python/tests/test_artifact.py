@@ -261,7 +261,7 @@ class ArtifactTests(unittest.TestCase):
             )
             trace.connection.execute("UPDATE metrics.samples SET span_id = NULL WHERE span_id = 900")
             with self.assertRaisesRegex(TraceError, "invalid identity"):
-                analyze._validate_samples(trace.connection)
+                analyze._check(trace.connection, "checks-samples")
 
     def test_raw_duplicate_and_unmatched_boundaries_cannot_be_hidden_by_pairing(self):
         for defect in ("duplicate", "unmatched"):

@@ -91,7 +91,7 @@ class Placement:
         in seconds instead of after another host's build.
         """
 
-        hosts = {id(host): host for host in map(self.host, ROLES)}.values()
+        hosts = dict.fromkeys(map(self.host, ROLES))
         for host in hosts:
             _log.info("connecting to %s", host.name)
         await asyncio.gather(*(host.connect() for host in hosts))
