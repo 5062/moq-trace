@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import pathlib
 import sys
 import tempfile
@@ -75,13 +76,15 @@ class BenchTests(unittest.TestCase):
 
     def test_bench_checks_every_binary_before_running(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with mock.patch("moq_trace.experiment.run") as run:
+            with mock.patch("moq_trace.experiment.run", new_callable=mock.AsyncMock) as run:
                 with self.assertRaisesRegex(ValueError, "relay binary not found"):
-                    bench.bench(
-                        ["moq-dev-moq"],
-                        pathlib.Path(directory) / "out",
-                        {},
-                        {"moq-dev-moq": pathlib.Path(directory)},
+                    asyncio.run(
+                        bench.bench(
+                            ["moq-dev-moq"],
+                            pathlib.Path(directory) / "out",
+                            {},
+                            {"moq-dev-moq": pathlib.Path(directory)},
+                        )
                     )
             run.assert_not_called()
 
@@ -92,12 +95,14 @@ class BenchTests(unittest.TestCase):
                 (root / binary).parent.mkdir(parents=True)
                 (root / binary).touch()
             outcomes = [RuntimeError("relay exited"), root / "out/cloudflare-moq-rs/analysis.duckdb"]
-            with mock.patch("moq_trace.experiment.run", side_effect=outcomes):
-                results = bench.bench(
-                    ["moq-dev-moq", "cloudflare-moq-rs"],
-                    root / "out",
-                    {},
-                    {"moq-dev-moq": root / "a", "cloudflare-moq-rs": root / "b"},
+            with mock.patch("moq_trace.experiment.run", new_callable=mock.AsyncMock, side_effect=outcomes):
+                results = asyncio.run(
+                    bench.bench(
+                        ["moq-dev-moq", "cloudflare-moq-rs"],
+                        root / "out",
+                        {},
+                        {"moq-dev-moq": root / "a", "cloudflare-moq-rs": root / "b"},
+                    )
                 )
 
         self.assertEqual([result.relay for result in results], ["moq-dev-moq", "cloudflare-moq-rs"])

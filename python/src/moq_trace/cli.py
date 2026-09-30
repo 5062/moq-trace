@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import pathlib
 import sys
@@ -10,8 +11,8 @@ import tomllib
 
 from pydantic import ValidationError
 
-from .capture import take_sudo_password
 from .config import ComparisonConfig, ExperimentConfig, Hosts
+from .tcpdump import take_sudo_password
 
 
 def _model(path: pathlib.Path, model):
@@ -180,6 +181,15 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+async def _pooled(command, config):
+    """Run one experiment command with ssh connections that close when it finishes."""
+
+    from .hosts import SshPool
+
+    async with SshPool() as pool:
+        return await command(config, pool)
+
+
 def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
         from .experiment import run
@@ -187,11 +197,11 @@ def _run(args: argparse.Namespace) -> None:
         config = _model(args.config, ExperimentConfig)
         if args.output is not None:
             config = config.model_copy(update={"output": args.output})
-        print(run(config))
+        print(asyncio.run(_pooled(run, config)))
     elif args.command == "compare":
         from .experiment import compare
 
-        print(compare(_model(args.config, ComparisonConfig)))
+        print(asyncio.run(_pooled(compare, _model(args.config, ComparisonConfig))))
     elif args.command == "bench":
         from .bench import bench, default_output
 
@@ -201,7 +211,7 @@ def _run(args: argparse.Namespace) -> None:
         if args.hosts is not None:
             settings["hosts"] = _model(args.hosts, Hosts)
         try:
-            results = bench(args.relay, args.output or default_output(), settings, dict(args.checkout))
+            results = asyncio.run(bench(args.relay, args.output or default_output(), settings, dict(args.checkout)))
         except ValidationError as error:
             raise ValueError(str(error)) from error
         for result in results:

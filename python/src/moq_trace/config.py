@@ -16,7 +16,7 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class Host(StrictModel):
+class HostConfig(StrictModel):
     """A remote host one role runs on, reached with non-interactive ssh.
 
     Every path is a path on that host, and a relative path or one starting with
@@ -50,9 +50,9 @@ class Host(StrictModel):
 class Hosts(StrictModel):
     """Where each role runs. A role without a host runs on the controller."""
 
-    relay: Host | None = None
-    publisher: Host | None = None
-    subscriber: Host | None = None
+    relay: HostConfig | None = None
+    publisher: HostConfig | None = None
+    subscriber: HostConfig | None = None
 
 
 class ExperimentConfig(StrictModel):

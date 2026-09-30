@@ -7,6 +7,7 @@ in one invocation runs the workload the caller chose and nothing else.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 import importlib.resources
@@ -130,7 +131,7 @@ def default_output() -> pathlib.Path:
     return pathlib.Path("artifacts") / f"bench-{stamp}"
 
 
-def bench(
+async def bench(
     relays: Sequence[str],
     output: pathlib.Path,
     settings: Mapping[str, Any],
@@ -148,6 +149,7 @@ def bench(
     # Deferred like the CLI's own imports: the runner pulls in the analysis stack,
     # which listing profiles for `--help` does not need.
     from .experiment import ExperimentError, run
+    from .hosts import SshPool
     from .render import render_relays
 
     checkouts = checkouts or {}
@@ -165,17 +167,19 @@ def bench(
         raise ExperimentError(f"bench output already exists: {output.resolve()}")
 
     results = []
-    for index, (name, config) in enumerate(configs.items(), start=1):
-        _log.info("[%d/%d] %s", index, len(configs), name)
-        try:
-            results.append(BenchResult(relay=name, path=run(config)))
-        except (OSError, RuntimeError, ValueError) as error:
-            _log.info("%s failed: %s", name, error)
-            results.append(BenchResult(relay=name, error=str(error)))
+    # One pool for every run, so each remote host is logged in to once.
+    async with SshPool() as pool:
+        for index, (name, config) in enumerate(configs.items(), start=1):
+            _log.info("[%d/%d] %s", index, len(configs), name)
+            try:
+                results.append(BenchResult(relay=name, path=await run(config, pool)))
+            except (OSError, RuntimeError, ValueError) as error:
+                _log.info("%s failed: %s", name, error)
+                results.append(BenchResult(relay=name, error=str(error)))
     databases = {
         result.relay: result.path for result in results if result.path is not None and result.path.suffix == ".duckdb"
     }
     if settings.get("render", True) and len(databases) >= 2:
         _log.info("rendering the relay comparison into %s", output / "plots")
-        render_relays(output, databases)
+        await asyncio.to_thread(render_relays, output, databases)
     return results
