@@ -42,9 +42,7 @@ def write_metadata(connection: duckdb.DuckDBPyConnection, metadata: RunMetadata 
 def _decode(kind: str, encoded: str) -> ArtifactModel:
     """Validate one artifact's metadata against the schema for its kind."""
 
-    model = ARTIFACT_MODELS.get(kind)
-    if model is None:
-        raise TraceError(f"unknown artifact kind {kind!r}; this tool reads {sorted(ARTIFACT_MODELS)}")
+    model = ARTIFACT_MODELS[kind]
     try:
         return model.model_validate_json(encoded)
     except ValidationError as error:

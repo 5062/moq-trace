@@ -155,9 +155,8 @@ def _materialize_model(connection: duckdb.DuckDBPyConnection) -> None:
     """
 
     for table in ctf.SCHEMAS:
-        for field in ("timestamp_ns", "ctf_timestamp_ns"):
-            if connection.execute(f"SELECT count(*) FROM {table} WHERE {field} >= 9223372036854775808").fetchone()[0]:
-                raise TraceError(f"{table}.{field} cannot be narrowed to BIGINT")
+        if connection.execute(f"SELECT count(*) FROM {table} WHERE timestamp_ns >= 9223372036854775808").fetchone()[0]:
+            raise TraceError(f"{table}.timestamp_ns cannot be narrowed to BIGINT")
     connection.execute(sql.read("model-schema"))
     connection.execute(sql.read("model-populate"))
     for name, query in (
