@@ -17,10 +17,8 @@ sys.path.insert(0, str(SOURCE))
 import trace_source  # noqa: E402
 from trace_source import Enum, Event  # noqa: E402
 
-from moq_trace import coverage, ctf, macros  # noqa: E402
+from moq_trace import coverage, ctf, sql  # noqa: E402
 from moq_trace.analyze import (  # noqa: E402
-    _create_processes,
-    _define_lifecycle_views,
     _define_metrics,
     _define_timelines,
     _derive_samples,
@@ -41,16 +39,16 @@ class SqlAnalysisTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.connection = duckdb.connect(":memory:")
-        macros.define(self.connection)
+        self.connection.execute(sql.read("macros"))
         self.connection.execute("CREATE SCHEMA raw")
         for name, schema in ctf.SCHEMAS.items():
             self.connection.register("rows", pa.Table.from_batches([], schema=schema))
             self.connection.execute(f"CREATE TABLE raw.{name} AS SELECT *, 0::UINTEGER AS process_id FROM rows")
             self.connection.unregister("rows")
-        _create_processes(self.connection)
+        self.connection.execute(sql.read("processes"))
         self.connection.execute("INSERT INTO processes VALUES (0, 'fixture', 'test-host', 0, 0, 0, true)")
         _select_process(self.connection, 0, (0,))
-        _define_lifecycle_views(self.connection)
+        self.connection.execute(sql.read("lifecycles-stage"))
 
     def prepare_model(self) -> None:
         """Validate fixture events through the same model-building path as analysis."""

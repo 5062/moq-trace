@@ -29,6 +29,7 @@ import duckdb
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import sql
 from .errors import TraceError
 from .metadata import NetworkCapabilities
 
@@ -223,11 +224,9 @@ def _load(
     connection.register("network_batch", batch)
     try:
         connection.execute(
-            f"CREATE TABLE {table} AS SELECT "
-            "(SELECT process_id FROM processes WHERE analyzed)::UINTEGER AS process_id, * FROM network_batch"
+            f"INSERT INTO {table} SELECT "
+            "(SELECT process_id FROM processes WHERE analyzed)::UINTEGER, * FROM network_batch"
         )
-        for column in ("process_id", "elapsed_ns"):
-            connection.execute(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL")
     finally:
         connection.unregister("network_batch")
 
@@ -381,7 +380,7 @@ def ingest(
     next update.
     """
 
-    connection.execute("CREATE SCHEMA IF NOT EXISTS network")
+    connection.execute(sql.read("network-schema"))
     manifest = read_manifest(manifest_path)
     root = manifest_path.parent
     packets = _ingest_packets(connection, manifest, root, origin_ns)

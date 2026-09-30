@@ -1,0 +1,43 @@
+CREATE TABLE metrics.definitions (
+    metric VARCHAR NOT NULL,
+    domain VARCHAR NOT NULL,
+    label VARCHAR NOT NULL,
+    unit VARCHAR NOT NULL,
+    grain VARCHAR NOT NULL,
+    display_order INTEGER NOT NULL,
+    PRIMARY KEY (metric)
+);
+
+CREATE TABLE metrics.samples (
+    process_id UINTEGER NOT NULL,
+    metric VARCHAR NOT NULL,
+    rx_trace_id UBIGINT,
+    tx_trace_id UBIGINT,
+    packet_trace_id UBIGINT,
+    span_id UBIGINT,
+    elapsed_ns BIGINT NOT NULL,
+    value_ns BIGINT NOT NULL,
+    FOREIGN KEY (metric) REFERENCES metrics.definitions(metric)
+);
+
+CREATE TABLE metrics.statistics (
+    process_id UINTEGER NOT NULL,
+    metric VARCHAR NOT NULL,
+    count UBIGINT NOT NULL,
+    mean_ns DOUBLE NOT NULL,
+    p50_ns DOUBLE NOT NULL,
+    p95_ns DOUBLE NOT NULL,
+    p99_ns DOUBLE NOT NULL,
+    max_ns BIGINT NOT NULL,
+    PRIMARY KEY (process_id, metric)
+);
+
+CREATE TABLE metrics.phase_totals (
+    process_id UINTEGER NOT NULL,
+    subject subject NOT NULL,
+    direction direction NOT NULL,
+    trace_id UBIGINT NOT NULL,
+    phase VARCHAR NOT NULL,
+    total_ns BIGINT NOT NULL,
+    PRIMARY KEY (process_id, subject, trace_id, phase)
+);

@@ -78,8 +78,8 @@ def plot_latency_cdf(
 
     fig, (ecdf, phases) = plt.subplots(1, 2, figsize=(15, 6))
     counts = []
-    for index, (table, metric, label) in enumerate(_OBJECT_SPANS):
-        values = _values_us(connection, table, metric)
+    for index, (metric, label) in enumerate(_OBJECT_SPANS):
+        values = _values_us(connection, metric)
         if not values:
             raise ValueError(f"cannot plot object latency without {metric} samples")
         _draw_distribution(ecdf, None, values, label, index)
@@ -101,11 +101,11 @@ def plot_latency_comparison(
     if len(runs) < 2:
         raise ValueError("a latency comparison requires at least two runs")
     fig, axes = plt.subplots(2, len(_OBJECT_SPANS), figsize=(14, 9), sharex="col")
-    for column, (table, metric, label) in enumerate(_OBJECT_SPANS):
+    for column, (metric, label) in enumerate(_OBJECT_SPANS):
         ecdf, ccdf = axes[0][column], axes[1][column]
         counts = []
         for index, run in enumerate(runs):
-            values = _values_us(run.connection, table, metric, run.run_id)
+            values = _values_us(run.connection, metric, run.run_id)
             if not values:
                 raise ValueError(f"cannot compare {run.label} without {metric} samples")
             _draw_distribution(ecdf, ccdf, values, run.label, index)

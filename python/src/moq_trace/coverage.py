@@ -4,28 +4,12 @@ from __future__ import annotations
 
 import duckdb
 
+from . import sql
 from .errors import TraceError
 
 # The stream offset span of one range-join bucket. Any value is exact; this one
 # keeps a large object to a few buckets while a bucket holds few frames.
 _BUCKET_BYTES = 16 * 1024
-
-
-def _stage_targets(connection: duckdb.DuckDBPyConnection) -> None:
-    """Stage the selected object lifecycles in `coverage_targets`."""
-
-    connection.execute(
-        """CREATE TEMP TABLE coverage_targets AS
-           SELECT lifecycle.process_id, lifecycle.trace_id, lifecycle.connection_id, lifecycle.direction,
-                  lifecycle.stream_id, lifecycle.stream_offset_start, lifecycle.stream_offset_end
-           FROM object_lifecycles AS lifecycle
-           SEMI JOIN (
-             SELECT process_id, trace_id FROM selected_rx
-             UNION ALL
-             SELECT tx.process_id, tx.trace_id FROM selected_rx AS rx
-             JOIN object_copies AS tx ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
-           ) AS selected USING (process_id, trace_id)"""
-    )
 
 
 def _first_trace(connection: duckdb.DuckDBPyConnection, query: str) -> int | None:
@@ -71,40 +55,7 @@ def _stage_frames(connection: duckdb.DuckDBPyConnection) -> None:
     """
 
     connection.execute(
-        """CREATE TEMP TABLE coverage_frames AS
-           WITH targets AS (
-             SELECT *, unnest(offset_buckets(stream_offset_start, stream_offset_end, $bucket)) AS bucket
-             FROM coverage_targets
-           ), frames AS (
-             SELECT packet.process_id, packet.connection_id, packet.direction, frame.stream_id,
-                    frame.offset_start, frame.offset_end, frame.timestamp_ns,
-                    packet.trace_id, packet.start_ns, packet.end_ns,
-                    unnest(offset_buckets(frame.offset_start, frame.offset_end, $bucket)) AS bucket
-             FROM quic_stream_frame AS frame
-             JOIN packet_lifecycles AS packet USING (process_id, trace_id)
-             WHERE packet.outcome = 'success' AND frame.outcome = 'success'
-               AND frame.offset_start < frame.offset_end
-           )
-           SELECT object.process_id, object.trace_id, frame.offset_start, frame.offset_end,
-                  greatest(frame.offset_start, object.stream_offset_start) AS covered_start,
-                  least(frame.offset_end, object.stream_offset_end) AS covered_end,
-                  frame.trace_id AS packet_id,
-                  frame.start_ns AS packet_start_ns,
-                  frame.end_ns AS packet_end_ns,
-                  row_number() OVER (
-                    PARTITION BY object.process_id, object.trace_id
-                    ORDER BY frame.timestamp_ns, frame.end_ns, frame.trace_id,
-                             frame.offset_start, frame.offset_end
-                  ) AS seq
-           FROM targets AS object
-           JOIN frames AS frame
-             ON frame.process_id = object.process_id AND frame.connection_id = object.connection_id
-            AND frame.direction = object.direction
-            AND frame.stream_id = object.stream_id
-            AND frame.bucket = object.bucket
-            AND frame.offset_start < object.stream_offset_end
-            AND object.stream_offset_start < frame.offset_end
-            AND object.bucket = greatest(object.stream_offset_start, frame.offset_start) // $bucket""",
+        sql.read("coverage-frames-stage"),
         {"bucket": _BUCKET_BYTES},
     )
 
@@ -125,43 +76,7 @@ def _stage_completion(connection: duckdb.DuckDBPyConnection) -> None:
     """
 
     connection.execute(
-        """CREATE TEMP TABLE coverage_completion AS
-           WITH boundaries AS (
-             SELECT process_id, trace_id, stream_offset_start AS boundary FROM coverage_targets
-             UNION
-             SELECT process_id, trace_id, stream_offset_end FROM coverage_targets
-             UNION
-             SELECT process_id, trace_id, covered_start FROM coverage_frames
-             UNION
-             SELECT process_id, trace_id, covered_end FROM coverage_frames
-           ), segments AS (
-             SELECT process_id, trace_id, segment_start, segment_end,
-                    (segment_start // $bucket)::BIGINT AS bucket
-             FROM (
-               SELECT process_id, trace_id, boundary AS segment_start,
-                      lead(boundary) OVER (PARTITION BY process_id, trace_id ORDER BY boundary) AS segment_end
-               FROM boundaries
-             )
-             WHERE segment_end IS NOT NULL
-           ), covering AS (
-             SELECT process_id, trace_id, seq, covered_start, covered_end,
-                    unnest(offset_buckets(covered_start, covered_end, $bucket)) AS bucket
-             FROM coverage_frames
-             WHERE covered_start < covered_end
-           ), first_cover AS (
-             SELECT segment.process_id, segment.trace_id, min(frame.seq) AS seq
-             FROM segments AS segment
-             LEFT JOIN covering AS frame
-               ON frame.process_id = segment.process_id AND frame.trace_id = segment.trace_id
-              AND frame.bucket = segment.bucket
-              AND frame.covered_start <= segment.segment_start
-              AND segment.segment_end <= frame.covered_end
-             GROUP BY segment.process_id, segment.trace_id, segment.segment_start
-           )
-           SELECT process_id, trace_id,
-                  CASE WHEN count(seq) = count(*) THEN max(seq) END AS complete_seq
-           FROM first_cover
-           GROUP BY process_id, trace_id""",
+        sql.read("coverage-completion-stage"),
         {"bucket": _BUCKET_BYTES},
     )
 
@@ -185,49 +100,8 @@ def _resolve_targets(connection: duckdb.DuckDBPyConnection) -> None:
     )
     if incomplete is not None:
         raise TraceError(f"object trace {incomplete} does not have complete packet coverage")
-    connection.execute("""CREATE TABLE model.coverage_frames AS
-        SELECT frame.process_id, frame.trace_id AS object_trace_id, frame.seq::UINTEGER AS seq,
-               frame.packet_id AS packet_trace_id, frame.offset_start, frame.offset_end,
-               frame.covered_start, frame.covered_end
-        FROM coverage_frames frame JOIN coverage_completion completion USING(process_id, trace_id)
-        WHERE frame.seq <= completion.complete_seq""")
-    connection.execute("ALTER TABLE model.coverage_frames ADD PRIMARY KEY(process_id, object_trace_id, seq)")
-    connection.execute("""CREATE TABLE model.coverage AS
-        SELECT completion.process_id, completion.trace_id AS object_trace_id,
-               completion.complete_seq::UINTEGER AS complete_seq,
-               opening.packet_id AS first_packet_trace_id, closing.packet_id AS complete_packet_trace_id,
-               opening.packet_start_ns::BIGINT AS first_start_ns,
-               opening.packet_end_ns::BIGINT AS first_end_ns,
-               closing.packet_end_ns::BIGINT AS complete_end_ns
-        FROM coverage_completion completion JOIN coverage_frames opening
-          ON opening.process_id = completion.process_id AND opening.trace_id = completion.trace_id AND opening.seq = 1
-        JOIN coverage_frames closing ON closing.process_id = completion.process_id
-          AND closing.trace_id = completion.trace_id AND closing.seq = completion.complete_seq""")
-    connection.execute("ALTER TABLE model.coverage ADD PRIMARY KEY(process_id, object_trace_id)")
-    connection.execute("""CREATE TABLE model.coverage_packets AS
-        SELECT process_id, object_trace_id, packet_trace_id, min(seq)::UINTEGER AS first_seq,
-               (dense_rank() OVER (PARTITION BY process_id, object_trace_id ORDER BY min(seq)) - 1)::UINTEGER AS ordinal
-        FROM model.coverage_frames GROUP BY process_id, object_trace_id, packet_trace_id""")
-    connection.execute(
-        "ALTER TABLE model.coverage_packets ADD PRIMARY KEY(process_id, object_trace_id, packet_trace_id)"
-    )
-    for table, columns in (
-        ("coverage_frames", ("packet_trace_id", "offset_start", "offset_end", "covered_start", "covered_end")),
-        (
-            "coverage",
-            (
-                "complete_seq",
-                "first_packet_trace_id",
-                "complete_packet_trace_id",
-                "first_start_ns",
-                "first_end_ns",
-                "complete_end_ns",
-            ),
-        ),
-        ("coverage_packets", ("first_seq", "ordinal")),
-    ):
-        for column in columns:
-            connection.execute(f"ALTER TABLE model.{table} ALTER COLUMN {column} SET NOT NULL")
+    connection.execute(sql.read("coverage-schema"))
+    connection.execute(sql.read("coverage-populate"))
     for table in ("coverage_completion", "coverage_frames", "coverage_targets"):
         connection.execute(f"DROP TABLE {table}")
 
@@ -235,5 +109,5 @@ def _resolve_targets(connection: duckdb.DuckDBPyConnection) -> None:
 def resolve(connection: duckdb.DuckDBPyConnection) -> None:
     """Materialize packet coverage for every selected object lifecycle."""
 
-    _stage_targets(connection)
+    connection.execute(sql.read("coverage-targets-stage"))
     _resolve_targets(connection)

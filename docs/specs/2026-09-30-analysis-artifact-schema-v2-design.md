@@ -81,6 +81,19 @@ analysis refuses to overwrite an existing artifact. If that trace is no longer
 available, rebuilding requires a new capture. A v1 comparison must be rebuilt
 from its rebuilt v2 run artifacts. Rebuild errors distinguish the two kinds.
 
+## SQL Organization
+
+Packaged files in `python/src/moq_trace/sql/` define the current public tables,
+including their types, keys, foreign keys, and nullability. Separate SQL files
+populate those tables and construct the temporary analysis relations.
+`moq_trace.sql.read` loads resources with `importlib.resources`, so installed
+packages use the same SQL as source checkouts.
+
+Python controls pipeline order, parameter binding, validation errors, and SQL
+that depends on provider schemas or captured outcome labels. These are current
+schema construction scripts, not an upgrade chain. Existing artifacts retain
+the version check and rebuild policy above.
+
 ## Process Identity
 
 ```sql
@@ -485,6 +498,12 @@ inspecting sample identities require only the comparison artifact.
 of artifact into the bench output directory, `comparison.duckdb`, and renders
 from it. It then has one code path with `_render_comparison`.
 
+Explicit relay rendering atomically rebuilds the snapshot from the supplied
+runs, including when a run was re-analyzed at the same path. Rendering a bench
+directory refreshes its snapshot when run artifacts are present and uses the
+saved snapshot when none remain. Rendering `comparison.duckdb` directly always
+uses its saved data. A failed rebuild leaves the previous snapshot intact.
+
 ## Reader Migration
 
 | Reader | v1 source | v2 source |
@@ -545,5 +564,6 @@ and `nix develop --command just check`.
 
 - Whether `coverage_frames` should also keep frames after `complete_seq` for
   retransmission analysis. This design drops them because no metric reads them.
+
 Approximate comparison distributions are outside v2. A future design may add
 an explicitly approximate representation if full-sample storage becomes costly.

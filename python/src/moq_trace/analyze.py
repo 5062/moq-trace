@@ -11,7 +11,7 @@ from collections.abc import Collection, Sequence
 import duckdb
 import pyarrow as pa
 
-from . import coverage, ctf, macros
+from . import coverage, ctf, sql
 from . import network as network_capture
 from .artifact import write_metadata
 from .errors import TraceError
@@ -41,75 +41,6 @@ def _require_zero(connection: duckdb.DuckDBPyConnection, query: str, message: st
         raise TraceError(f"{message}: {count}")
 
 
-def _define_lifecycle_views(connection: duckdb.DuckDBPyConnection) -> None:
-    """Pair raw starts and completions into validated lifecycle relations."""
-
-    connection.execute(
-        """CREATE TEMP VIEW object_lifecycles AS
-           SELECT start.* EXCLUDE (ctf_timestamp_ns, timestamp_ns),
-                  start.ctf_timestamp_ns AS start_ctf_timestamp_ns,
-                  start.timestamp_ns AS start_ns,
-                  finish.ctf_timestamp_ns AS end_ctf_timestamp_ns,
-                  finish.timestamp_ns AS end_ns,
-                  finish.stream_offset_end,
-                  finish.payload_bytes,
-                  finish.outcome
-           FROM moq_object_start AS start
-           JOIN moq_object_end AS finish USING (process_id, trace_id);
-
-           CREATE TEMP VIEW packet_lifecycles AS
-           SELECT start.* EXCLUDE (ctf_timestamp_ns, timestamp_ns, packet_number, packet_space, byte_len),
-                  finish.packet_number, finish.packet_space, finish.byte_len,
-                  start.ctf_timestamp_ns AS start_ctf_timestamp_ns,
-                  start.timestamp_ns AS start_ns,
-                  finish.ctf_timestamp_ns AS end_ctf_timestamp_ns,
-                  finish.timestamp_ns AS end_ns,
-                  finish.outcome
-           FROM quic_packet_start AS start
-           JOIN quic_packet_end AS finish USING (process_id, trace_id);
-
-           -- Every successful outbound copy of a logical object, keyed by the
-           -- trace of its ingress lifecycle. Validation guarantees one ingress
-           -- per logical object, so `rx_trace_id` names it unambiguously.
-           CREATE TEMP VIEW object_copies AS
-           SELECT rx.process_id, rx.trace_id AS rx_trace_id, tx.trace_id, tx.session_id, tx.end_ns
-           FROM object_lifecycles AS rx
-           JOIN object_lifecycles AS tx USING (process_id, logical_group, logical_frame)
-           WHERE rx.direction = 'rx' AND tx.direction = 'tx' AND tx.outcome = 'success';"""
-    )
-    # Both providers share the phase record shape, so one pairing serves both.
-    for view, table in (
-        ("object_phase_intervals", "moq_object_phase"),
-        ("packet_phase_intervals", "quic_packet_phase"),
-    ):
-        connection.execute(
-            f"""CREATE TEMP VIEW {view} AS
-               WITH paired AS (
-                 SELECT starts.process_id, starts.trace_id, starts.span_id, starts.phase,
-                        starts.ctf_timestamp_ns, starts.timestamp_ns AS start_ns,
-                        finishes.timestamp_ns AS end_ns, finishes.outcome
-                 FROM {table} AS starts
-                 JOIN {table} AS finishes USING (process_id, trace_id, span_id, phase)
-                 WHERE starts.edge = 'start' AND finishes.edge = 'done'
-               )
-               SELECT process_id, trace_id, span_id, phase,
-                      row_number() OVER (
-                        PARTITION BY process_id, trace_id, phase ORDER BY ctf_timestamp_ns, start_ns, span_id
-                      ) - 1 AS occurrence,
-                      start_ns, end_ns, outcome
-               FROM paired"""
-        )
-
-
-def _create_processes(connection: duckdb.DuckDBPyConnection) -> None:
-    """Create the catalog of capture-scoped process identities."""
-
-    connection.execute("""CREATE TABLE processes(
-        process_id UINTEGER PRIMARY KEY, capture VARCHAR NOT NULL, hostname VARCHAR NOT NULL,
-        pid UBIGINT NOT NULL, first_ctf_ns BIGINT NOT NULL, last_ctf_ns BIGINT NOT NULL,
-        analyzed BOOLEAN NOT NULL, UNIQUE(capture, hostname, pid))""")
-
-
 def _ingest(
     connection: duckdb.DuckDBPyConnection,
     input_path: pathlib.Path,
@@ -123,7 +54,7 @@ def _ingest(
     """
 
     connection.execute("CREATE SCHEMA raw")
-    _create_processes(connection)
+    connection.execute(sql.read("processes"))
     sources = {}
     outcomes = {"success"}
     for name, schema in ctf.SCHEMAS.items():
@@ -178,8 +109,7 @@ def _ingest(
 def _captured_pids(connection: duckdb.DuckDBPyConnection) -> tuple[int, ...]:
     """Return every process the capture recorded, in ascending order."""
 
-    union = " UNION ALL ".join(f"SELECT pid FROM raw.{name}" for name in ctf.SCHEMAS)
-    rows = connection.execute(f"SELECT DISTINCT pid FROM ({union}) ORDER BY pid").fetchall()
+    rows = connection.execute("SELECT DISTINCT pid FROM processes ORDER BY pid").fetchall()
     return tuple(int(row[0]) for row in rows)
 
 
@@ -224,68 +154,12 @@ def _materialize_model(connection: duckdb.DuckDBPyConnection) -> None:
     They are never published as compatibility views in the artifact.
     """
 
-    for name in ("model", "metrics", "network"):
-        connection.execute(f"CREATE SCHEMA {name}")
     for table in ctf.SCHEMAS:
         for field in ("timestamp_ns", "ctf_timestamp_ns"):
             if connection.execute(f"SELECT count(*) FROM {table} WHERE {field} >= 9223372036854775808").fetchone()[0]:
                 raise TraceError(f"{table}.{field} cannot be narrowed to BIGINT")
-    connection.execute("CREATE TYPE direction AS ENUM ('rx', 'tx')")
-    connection.execute("CREATE TYPE subject AS ENUM ('object', 'packet')")
-    for source, target in (("object_lifecycles", "objects"), ("packet_lifecycles", "packets")):
-        connection.execute(
-            f"""CREATE TABLE model.{target} AS
-                SELECT * EXCLUDE(pid, start_ctf_timestamp_ns, end_ctf_timestamp_ns)
-                    REPLACE(start_ns::BIGINT AS start_ns, end_ns::BIGINT AS end_ns,
-                            direction::direction AS direction, outcome::outcome AS outcome),
-                       start_ctf_timestamp_ns::BIGINT AS start_ctf_ns,
-                       end_ctf_timestamp_ns::BIGINT AS end_ctf_ns
-                FROM {source}"""
-        )
-        connection.execute(f"ALTER TABLE model.{target} ADD PRIMARY KEY(process_id, trace_id)")
-        required = ["start_ns", "end_ns", "start_ctf_ns", "end_ctf_ns", "direction", "outcome"]
-        if target == "objects":
-            required += [
-                "logical_group",
-                "logical_frame",
-                "session_id",
-                "track_alias",
-                "group_id",
-                "object_id",
-                "payload_bytes",
-            ]
-        for column in required:
-            connection.execute(f"ALTER TABLE model.{target} ALTER COLUMN {column} SET NOT NULL")
-    connection.execute("ALTER TABLE model.objects ADD COLUMN rx_trace_id UBIGINT")
-    connection.execute("ALTER TABLE model.objects ADD COLUMN copy_ordinal UINTEGER")
-    connection.execute(
-        """UPDATE model.objects AS tx SET rx_trace_id = rx.trace_id
-           FROM model.objects AS rx
-           WHERE rx.process_id = tx.process_id AND rx.logical_group = tx.logical_group
-             AND rx.logical_frame = tx.logical_frame AND rx.direction = 'rx' AND tx.direction = 'tx'"""
-    )
-    connection.execute(
-        """UPDATE model.objects AS tx SET copy_ordinal = copy.ordinal
-           FROM (SELECT process_id, trace_id,
-                        (row_number() OVER (PARTITION BY process_id, rx_trace_id
-                         ORDER BY session_id, trace_id) - 1)::UINTEGER AS ordinal
-                 FROM model.objects WHERE direction = 'tx' AND outcome = 'success'
-                   AND rx_trace_id IS NOT NULL) AS copy
-           WHERE tx.process_id = copy.process_id AND tx.trace_id = copy.trace_id"""
-    )
-    connection.execute(
-        """CREATE TABLE model.intervals AS
-           SELECT process_id, 'object'::subject AS subject, trace_id, span_id, phase,
-                  occurrence::UINTEGER AS occurrence, start_ns::BIGINT AS start_ns,
-                  end_ns::BIGINT AS end_ns, outcome::outcome AS outcome FROM object_phase_intervals
-           UNION ALL
-           SELECT process_id, 'packet'::subject, trace_id, span_id, phase,
-                  occurrence::UINTEGER, start_ns::BIGINT, end_ns::BIGINT, outcome::outcome
-           FROM packet_phase_intervals"""
-    )
-    connection.execute("ALTER TABLE model.intervals ADD PRIMARY KEY(process_id, subject, trace_id, span_id, phase)")
-    for column in ("occurrence", "start_ns", "end_ns", "outcome"):
-        connection.execute(f"ALTER TABLE model.intervals ALTER COLUMN {column} SET NOT NULL")
+    connection.execute(sql.read("model-schema"))
+    connection.execute(sql.read("model-populate"))
     for name, query in (
         ("object_copies", "SELECT * FROM model.objects WHERE direction = 'tx' AND copy_ordinal IS NOT NULL"),
         ("object_lifecycles", "SELECT * FROM model.objects"),
@@ -493,16 +367,12 @@ def _select_window(
     )
     if bad:
         raise TraceError(f"{bad} steady-state objects do not have exactly {subscribers} outbound copies")
-    connection.execute(
-        """CREATE TABLE model.window(process_id UINTEGER PRIMARY KEY,
-           origin_ns BIGINT NOT NULL, start_ns BIGINT NOT NULL, end_ns BIGINT NOT NULL)"""
-    )
+    connection.execute(sql.read("window-schema"))
     connection.execute(
         "INSERT INTO model.window SELECT process_id, ?, ?, ? FROM processes WHERE analyzed", [origin, start, end]
     )
     connection.execute("CREATE TEMP VIEW analysis_window AS SELECT origin_ns, start_ns, end_ns FROM model.window")
-    connection.execute("CREATE TABLE model.selected_objects AS SELECT process_id, trace_id FROM selected_rx")
-    connection.execute("ALTER TABLE model.selected_objects ADD PRIMARY KEY(process_id, trace_id)")
+    connection.execute("INSERT INTO model.selected_objects SELECT process_id, trace_id FROM selected_rx")
     return origin
 
 
@@ -514,44 +384,11 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     """
 
     connection.execute(
-        """CREATE TEMP TABLE object_samples AS
-           SELECT rx.process_id, rx.trace_id AS rx_trace_id, tx.trace_id AS tx_trace_id,
-                  rx.group_id, rx.object_id, 'full_span' AS metric,
-                  tx.copy_ordinal,
-                  elapsed_ns(rx.start_ns, $origin) AS elapsed_ns,
-                  span_ns(rx.start_ns, tx.end_ns) AS latency_ns
-           FROM selected_rx AS rx
-           JOIN object_copies AS tx ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id""",
+        sql.read("object-samples-stage"),
         {"origin": origin},
     )
     connection.execute(
-        """CREATE TEMP TABLE quic_object_samples AS
-           WITH copies AS (
-             SELECT rx.process_id, rx.trace_id AS rx_trace_id, tx.trace_id AS tx_trace_id,
-                    rx.group_id, rx.object_id, tx.copy_ordinal,
-                    inbound.first_start_ns, inbound.first_end_ns,
-                    outbound.first_end_ns AS outbound_first_end_ns,
-                    inbound.complete_end_ns AS inbound_complete_end_ns,
-                    outbound.complete_end_ns AS outbound_complete_end_ns
-             FROM selected_rx AS rx
-             JOIN model.coverage AS inbound ON inbound.process_id = rx.process_id AND inbound.object_trace_id =
-             rx.trace_id
-             JOIN object_copies AS tx ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
-             JOIN model.coverage AS outbound ON outbound.process_id = tx.process_id AND outbound.object_trace_id =
-             tx.trace_id
-           )
-           SELECT process_id, rx_trace_id, tx_trace_id, group_id, object_id, metric, copy_ordinal,
-                  elapsed_ns(first_start_ns, $origin) AS elapsed_ns,
-                  CASE WHEN metric = 'quic_tail_gap'
-                       THEN greatest(span_ns(start_ns, finish_ns), 0)
-                       ELSE span_ns(start_ns, finish_ns)
-                  END AS latency_ns
-           FROM copies
-           CROSS JOIN LATERAL (VALUES
-             ('quic_forward_start', first_start_ns, outbound_first_end_ns),
-             ('quic_tail_gap', inbound_complete_end_ns, outbound_complete_end_ns),
-             ('quic_full_span', first_start_ns, outbound_complete_end_ns)
-           ) AS metric(metric, start_ns, finish_ns)""",
+        sql.read("quic-object-samples-stage"),
         {"origin": origin},
     )
     _require_zero(
@@ -567,54 +404,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
            ) AS selected USING (process_id, trace_id)"""
     )
     connection.execute(
-        """CREATE TEMP TABLE packet_samples AS
-           WITH application AS (
-             SELECT process_id, trace_id, start_ns, span_ns(start_ns, end_ns) AS ns
-             FROM packet_phase_intervals WHERE phase = 'application'
-           )
-           SELECT process_id, direction || '_packet_span' AS metric, direction, connection_id,
-                  trace_id, NULL::UBIGINT AS span_id, 0 AS occurrence,
-                  elapsed_ns(start_ns, $origin) AS elapsed_ns,
-                  span_ns(start_ns, end_ns) AS latency_ns
-           FROM selected_packets WHERE outcome = 'success'
-           UNION ALL
-           -- A stack that delivers data after the packet returns records no
-           -- application phase, so its transport span equals its packet span.
-           SELECT packet.process_id, 'rx_packet_transport_span', packet.direction, packet.connection_id,
-                  packet.trace_id, NULL::UBIGINT, 0,
-                  elapsed_ns(packet.start_ns, $origin),
-                  span_ns(packet.start_ns, packet.end_ns)
-                    - coalesce((SELECT sum(ns) FROM application
-                                WHERE application.process_id = packet.process_id AND application.trace_id =
-                                packet.trace_id), 0)
-           FROM selected_packets AS packet
-           WHERE packet.direction = 'rx' AND packet.outcome = 'success'
-           UNION ALL
-           SELECT packet.process_id, packet.direction || '_' || phase.phase, packet.direction,
-                  packet.connection_id, packet.trace_id, phase.span_id, phase.occurrence,
-                  elapsed_ns(phase.start_ns, $origin),
-                  span_ns(phase.start_ns, phase.end_ns)
-           FROM packet_phase_intervals AS phase
-           JOIN selected_packets AS packet USING (process_id, trace_id)
-           WHERE phase.outcome = 'success'
-           UNION ALL
-           SELECT packet.process_id, 'rx_packet_processing_span', packet.direction, packet.connection_id,
-                  packet.trace_id, NULL::UBIGINT, 0,
-                  elapsed_ns(schedule.end_ns, $origin),
-                  span_ns(schedule.end_ns, packet.end_ns)
-                    - coalesce((SELECT sum(ns) FROM application
-                                WHERE application.process_id = packet.process_id AND application.trace_id =
-                                packet.trace_id
-                                  AND application.start_ns >= schedule.end_ns), 0)
-           FROM selected_packets AS packet
-           JOIN (
-             SELECT process_id, trace_id, max(end_ns) AS end_ns
-             FROM packet_phase_intervals
-             WHERE phase = 'scheduling' AND outcome = 'success'
-             GROUP BY process_id, trace_id
-           ) AS schedule USING (process_id, trace_id)
-           WHERE packet.direction = 'rx' AND packet.outcome = 'success'
-             AND packet.end_ns >= schedule.end_ns""",
+        sql.read("packet-samples-stage"),
         {"origin": origin},
     )
 
@@ -641,9 +431,7 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
         ("packet", "tx_frame_encode", "TX frame encode", 11),
         ("packet", "tx_packet_encrypt", "TX packet encrypt", 12),
     )
-    connection.execute("""CREATE TABLE metrics.definitions(
-        metric VARCHAR PRIMARY KEY, domain VARCHAR NOT NULL, label VARCHAR NOT NULL,
-        unit VARCHAR NOT NULL, grain VARCHAR NOT NULL, display_order INTEGER NOT NULL)""")
+    connection.execute(sql.read("metrics-schema"))
     catalog = []
     packet_grain = {"rx_packet_span", "tx_packet_span", "rx_packet_transport_span", "rx_packet_processing_span"}
     for domain, metric, label, order in definitions:
@@ -655,45 +443,10 @@ def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
         if metric not in known:
             catalog.append((metric, "packet", metric.replace("_", " "), "ns", "occurrence", len(catalog)))
     connection.executemany("INSERT INTO metrics.definitions VALUES (?, ?, ?, ?, ?, ?)", catalog)
-    connection.execute("""CREATE TABLE metrics.samples(
-        process_id UINTEGER NOT NULL, metric VARCHAR NOT NULL REFERENCES metrics.definitions(metric),
-        rx_trace_id UBIGINT, tx_trace_id UBIGINT, packet_trace_id UBIGINT, span_id UBIGINT,
-        elapsed_ns BIGINT NOT NULL, value_ns BIGINT NOT NULL)""")
-    connection.execute("""INSERT INTO metrics.samples
-        SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM object_samples
-        UNION ALL
-        SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM quic_object_samples
-        UNION ALL
-        SELECT process_id, metric, NULL, NULL, trace_id, span_id, elapsed_ns, latency_ns FROM packet_samples""")
+    connection.execute(sql.read("samples-populate"))
     _validate_samples(connection)
-    connection.execute("""CREATE TABLE metrics.statistics AS
-        SELECT process_id, metric, count(*)::UBIGINT AS count, avg(value_ns) AS mean_ns,
-               quantile_cont(value_ns, 0.50)::DOUBLE AS p50_ns,
-               quantile_cont(value_ns, 0.95)::DOUBLE AS p95_ns,
-               quantile_cont(value_ns, 0.99)::DOUBLE AS p99_ns, max(value_ns)::BIGINT AS max_ns
-        FROM metrics.samples GROUP BY process_id, metric""")
-    connection.execute("ALTER TABLE metrics.statistics ADD PRIMARY KEY(process_id, metric)")
-    for column in ("count", "mean_ns", "p50_ns", "p95_ns", "p99_ns", "max_ns"):
-        connection.execute(f"ALTER TABLE metrics.statistics ALTER COLUMN {column} SET NOT NULL")
-    connection.execute("""CREATE TABLE metrics.phase_totals AS
-        WITH subjects AS (
-            SELECT object.process_id, 'object'::subject AS subject, object.trace_id, object.direction
-            FROM model.objects AS object SEMI JOIN (
-                SELECT process_id, trace_id FROM model.selected_objects
-                UNION ALL
-                SELECT tx.process_id, tx.trace_id FROM object_copies tx
-                JOIN model.selected_objects rx ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
-            ) selected USING(process_id, trace_id)
-            UNION ALL
-            SELECT process_id, 'packet'::subject, trace_id, direction FROM selected_packets WHERE outcome = 'success'
-        )
-        SELECT phase.process_id, phase.subject, object.direction, phase.trace_id, phase.phase,
-               sum(span_ns(phase.start_ns, phase.end_ns))::BIGINT AS total_ns
-        FROM model.intervals phase JOIN subjects object USING(process_id, subject, trace_id)
-        WHERE phase.outcome = 'success' GROUP BY ALL""")
-    connection.execute("ALTER TABLE metrics.phase_totals ADD PRIMARY KEY(process_id, subject, trace_id, phase)")
-    for column in ("direction", "total_ns"):
-        connection.execute(f"ALTER TABLE metrics.phase_totals ALTER COLUMN {column} SET NOT NULL")
+    connection.execute(sql.read("statistics-populate"))
+    connection.execute(sql.read("phase-totals-populate"))
 
 
 def _validate_samples(connection: duckdb.DuckDBPyConnection) -> None:
@@ -723,35 +476,8 @@ def _validate_samples(connection: duckdb.DuckDBPyConnection) -> None:
 def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
     """Select representative objects and their aligned timeline intervals."""
 
-    connection.execute("""CREATE TABLE metrics.timeline_selections AS
-        WITH slowest AS (
-            SELECT rx.process_id, rx.trace_id AS rx_trace_id,
-                   max(span_ns(rx.start_ns, tx.end_ns)) AS actual_ns
-            FROM selected_rx rx JOIN object_copies tx
-              ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id GROUP BY ALL
-        ), targets(selection_order, statistic, target_ns) AS (
-            SELECT 0, 'mean', avg(actual_ns) FROM slowest
-            UNION ALL SELECT 1, 'median', quantile_cont(actual_ns, 0.50)::DOUBLE FROM slowest
-            UNION ALL SELECT 2, 'p99', quantile_cont(actual_ns, 0.99)::DOUBLE FROM slowest
-        )
-        SELECT object.process_id, target.selection_order, target.statistic, target.target_ns,
-               object.rx_trace_id, object.actual_ns
-        FROM targets target CROSS JOIN LATERAL (
-            SELECT * FROM slowest ORDER BY abs(actual_ns - target.target_ns), rx_trace_id LIMIT 1
-        ) object""")
-    connection.execute("ALTER TABLE metrics.timeline_selections ADD PRIMARY KEY(process_id, selection_order)")
-    for column in ("statistic", "target_ns", "rx_trace_id", "actual_ns"):
-        connection.execute(f"ALTER TABLE metrics.timeline_selections ALTER COLUMN {column} SET NOT NULL")
-    _require_zero(
-        connection,
-        """SELECT count(*) FROM model.objects object
-        SEMI JOIN (SELECT process_id, rx_trace_id AS trace_id FROM metrics.timeline_selections
-                   UNION ALL SELECT tx.process_id, tx.trace_id FROM object_copies tx
-                   JOIN metrics.timeline_selections s ON tx.process_id = s.process_id AND tx.rx_trace_id = s.rx_trace_id
-                  ) chosen USING(process_id, trace_id)
-        WHERE session_id IS NULL""",
-        "timeline objects missing session IDs",
-    )
+    connection.execute(sql.read("timeline-schema"))
+    connection.execute(sql.read("timeline-populate"))
 
 
 def _verify_transport_metrics(connection: duckdb.DuckDBPyConnection, transport_profile: TransportProfile) -> None:
@@ -792,12 +518,10 @@ def _write_run_metadata(
             transport_profile=transport_profile,
             transport_capabilities=TransportCapabilities(
                 packet_phases=tuple(
-                    sorted(
-                        str(phase)
-                        for (phase,) in connection.execute(
-                            "SELECT DISTINCT phase FROM packet_phase_intervals ORDER BY phase"
-                        ).fetchall()
-                    )
+                    phase
+                    for (phase,) in connection.execute(
+                        "SELECT DISTINCT phase FROM packet_phase_intervals ORDER BY phase"
+                    ).fetchall()
                 )
             ),
             population=Population(
@@ -871,10 +595,10 @@ def run(
         database = staging / output.name
         connection = duckdb.connect(str(database))
         try:
-            macros.define(connection)
+            connection.execute(sql.read("macros"))
             captured = _ingest(connection, input_path, expected_pids)
             analyzed = _select_process(connection, pid, captured)
-            _define_lifecycle_views(connection)
+            connection.execute(sql.read("lifecycles-stage"))
             _validate_raw(connection)
             origin = _select_window(
                 connection,

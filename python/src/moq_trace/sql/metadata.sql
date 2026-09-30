@@ -1,0 +1,1 @@
+CREATE TABLE metadata(kind VARCHAR PRIMARY KEY, schema_version INTEGER NOT NULL, value JSON NOT NULL);

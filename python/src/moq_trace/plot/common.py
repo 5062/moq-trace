@@ -65,18 +65,16 @@ def _save(fig: Figure, path: pathlib.Path, title: str) -> None:
     plt.close(fig)
 
 
-def _metrics(connection: duckdb.DuckDBPyConnection, table: str) -> set[str]:
-    return {metric for (metric,) in connection.execute(f"SELECT DISTINCT metric FROM {table}").fetchall()}
+def _metrics(connection: duckdb.DuckDBPyConnection) -> set[str]:
+    return {metric for (metric,) in connection.execute("SELECT DISTINCT metric FROM metrics.samples").fetchall()}
 
 
-def _values_us(
-    connection: duckdb.DuckDBPyConnection, table: str, metric: str, run_id: int | None = None
-) -> list[float]:
+def _values_us(connection: duckdb.DuckDBPyConnection, metric: str, run_id: int | None = None) -> list[float]:
     scope = " AND run_id = ?" if run_id is not None else ""
     return [
         value
         for (value,) in connection.execute(
-            f"SELECT value_ns / 1000.0 FROM {table} WHERE metric = ?{scope} ORDER BY value_ns",
+            f"SELECT value_ns / 1000.0 FROM metrics.samples WHERE metric = ?{scope} ORDER BY value_ns",
             [metric, run_id] if run_id is not None else [metric],
         ).fetchall()
     ]
@@ -86,8 +84,8 @@ def _values_us(
 # contains the MoQ span, so the two are drawn as nested measurements rather than
 # alternatives.
 _OBJECT_SPANS = (
-    ("metrics.samples", "full_span", "MoQ"),
-    ("metrics.samples", "quic_full_span", "QUIC+MoQ"),
+    ("full_span", "MoQ"),
+    ("quic_full_span", "QUIC+MoQ"),
 )
 
 

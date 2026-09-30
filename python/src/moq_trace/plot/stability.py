@@ -28,16 +28,15 @@ def _rx_packet_metric(available: set[str]) -> str:
 
 def _windows(
     connection: duckdb.DuckDBPyConnection,
-    table: str,
     metric: str,
 ) -> list[tuple[float, float, float]]:
     """Per-second p50 and p99 of one metric, keyed by the window's midpoint."""
 
     return connection.execute(
-        f"""SELECT floor(elapsed_ns / 1e9) + 0.5 AS second,
+        """SELECT floor(elapsed_ns / 1e9) + 0.5 AS second,
                    quantile_cont(value_ns, 0.50) / 1000.0,
                    quantile_cont(value_ns, 0.99) / 1000.0
-            FROM {table} WHERE metric = ? GROUP BY second ORDER BY second""",
+            FROM metrics.samples WHERE metric = ? GROUP BY second ORDER BY second""",
         [metric],
     ).fetchall()
 
@@ -63,8 +62,8 @@ def plot_stability(
     """
 
     fig, (objects, packets) = plt.subplots(2, 1, figsize=(13, 7.5), sharex=True, height_ratios=(3, 2))
-    for index, (table, metric, label) in enumerate(_OBJECT_SPANS):
-        windows = _windows(connection, table, metric)
+    for index, (metric, label) in enumerate(_OBJECT_SPANS):
+        windows = _windows(connection, metric)
         if not windows:
             raise ValueError(f"cannot plot stability without {metric} samples")
         _draw_windows(objects, windows, label, index)
@@ -73,7 +72,7 @@ def plot_stability(
     objects.legend(loc="upper right", fontsize=8)
     objects.grid(alpha=0.25)
 
-    available = _metrics(connection, "metrics.samples")
+    available = _metrics(connection)
     candidates = [
         ("rx_scheduling", "RX queuing"),
         (_rx_packet_metric(available), "RX processing"),
@@ -83,7 +82,7 @@ def plot_stability(
     for metric, label in candidates:
         if metric not in available:
             continue
-        _draw_windows(packets, _windows(connection, "metrics.samples", metric), label, len(_OBJECT_SPANS) + drawn)
+        _draw_windows(packets, _windows(connection, metric), label, len(_OBJECT_SPANS) + drawn)
         drawn += 1
     if drawn == 0:
         raise ValueError("cannot plot stability without packet samples")

@@ -10,6 +10,7 @@ from typing import Literal
 
 import duckdb
 
+from . import sql
 from .artifact import open_artifact, write_metadata
 from .errors import TraceError
 from .metadata import ComparisonMetadata, ComparisonRun
@@ -37,12 +38,7 @@ def write_comparison(
     with tempfile.TemporaryDirectory(prefix=".moq-trace-comparison-", dir=output.parent) as staging:
         database = pathlib.Path(staging) / output.name
         with duckdb.connect(str(database)) as connection:
-            connection.execute("CREATE SCHEMA metrics")
-            connection.execute("CREATE TYPE subject AS ENUM ('object', 'packet')")
-            connection.execute("CREATE TYPE direction AS ENUM ('rx', 'tx')")
-            connection.execute("""CREATE TABLE runs(
-                run_id UINTEGER PRIMARY KEY, label VARCHAR NOT NULL, dimension_value BIGINT,
-                repeat UINTEGER NOT NULL, database VARCHAR NOT NULL, metadata JSON NOT NULL)""")
+            connection.execute(sql.read("comparison-schema"))
             repeats: dict[int | None, int] = {}
             entries = []
             first_workload = None
@@ -67,42 +63,16 @@ def write_comparison(
                             metadata.model_dump_json(),
                         ],
                     )
-                    for table, key in (
-                        ("processes", "process_id"),
-                        ("metrics.definitions", "metric"),
-                        ("metrics.samples", None),
-                        ("metrics.phase_totals", "process_id, subject, trace_id, phase"),
-                        ("metrics.statistics", "process_id, metric"),
+                    for table in (
+                        "processes",
+                        "metrics.definitions",
+                        "metrics.samples",
+                        "metrics.phase_totals",
+                        "metrics.statistics",
                     ):
                         query = f"SELECT * FROM {table}" + (" WHERE analyzed" if table == "processes" else "")
-                        columns = run.execute(f"DESCRIBE {table}").fetchall() if run_id == 0 else []
                         connection.register("snapshot", run.execute(query).arrow())
                         try:
-                            if run_id == 0:
-                                if table == "metrics.samples":
-                                    connection.execute("""CREATE TABLE metrics.samples(
-                                        run_id UINTEGER NOT NULL, process_id UINTEGER NOT NULL, metric VARCHAR NOT NULL,
-                                        rx_trace_id UBIGINT, tx_trace_id UBIGINT, packet_trace_id UBIGINT, span_id
-                                        UBIGINT,
-                                        elapsed_ns BIGINT NOT NULL, value_ns BIGINT NOT NULL,
-                                        FOREIGN KEY(run_id, metric) REFERENCES metrics.definitions(run_id, metric))""")
-                                else:
-                                    projection = (
-                                        "* REPLACE(subject::subject AS subject, direction::direction AS direction)"
-                                        if table == "metrics.phase_totals"
-                                        else "*"
-                                    )
-                                    connection.execute(
-                                        f"CREATE TABLE {table} AS SELECT ?::UINTEGER AS run_id, "
-                                        f"{projection} FROM snapshot WHERE false",
-                                        [run_id],
-                                    )
-                                    connection.execute(f"ALTER TABLE {table} ADD PRIMARY KEY(run_id, {key})")
-                                    for column, _, nullable, *_ in columns:
-                                        if nullable == "NO" and column not in key.split(", "):
-                                            connection.execute(
-                                                f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL"
-                                            )
                             connection.execute(f"INSERT INTO {table} SELECT ?::UINTEGER, * FROM snapshot", [run_id])
                         finally:
                             connection.unregister("snapshot")

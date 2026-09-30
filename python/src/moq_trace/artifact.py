@@ -9,6 +9,7 @@ from collections.abc import Generator
 import duckdb
 from pydantic import ValidationError
 
+from . import sql
 from .errors import TraceError
 from .metadata import ArtifactModel, ComparisonMetadata, RunMetadata
 
@@ -34,9 +35,7 @@ def write_metadata(connection: duckdb.DuckDBPyConnection, metadata: RunMetadata 
     # the schema only ever adds a key to a payload. A reader gets the default
     # back, and a field this producer left unset stays visible as unset.
     encoded = metadata.model_dump_json()
-    connection.execute(
-        """CREATE TABLE metadata(kind VARCHAR PRIMARY KEY, schema_version INTEGER NOT NULL, value JSON NOT NULL)"""
-    )
+    connection.execute(sql.read("metadata"))
     connection.execute("INSERT INTO metadata VALUES (?, 2, ?)", [metadata.KIND, encoded])
 
 

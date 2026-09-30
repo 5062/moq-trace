@@ -19,7 +19,7 @@ dependencies = [
 moq-trace = "moq_trace.cli:main"
 
 [tool.setuptools.package-data]
-moq_trace = ["relays/*.toml"]
+moq_trace = ["relays/*.toml", "sql/*.sql"]
 
 [tool.ruff]
 line-length = 120
