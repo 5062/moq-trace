@@ -27,7 +27,10 @@ add_library(quic_trace_provider STATIC
   "${GENERATED_DIR}/quic/events.h"
 )
 add_library(quic_trace::provider ALIAS quic_trace_provider)
-set_target_properties(quic_trace_provider PROPERTIES EXPORT_NAME provider)
+set_target_properties(quic_trace_provider PROPERTIES
+  EXPORT_NAME provider
+  POSITION_INDEPENDENT_CODE ON
+)
 target_include_directories(quic_trace_provider PUBLIC
   "$<BUILD_INTERFACE:${QUIC_PROVIDER_DIR}>"
   "$<INSTALL_INTERFACE:include/quic_trace>"
@@ -60,7 +63,10 @@ add_library(moq_trace_provider STATIC
   "${GENERATED_DIR}/moq/events.h"
 )
 add_library(moq_trace::provider ALIAS moq_trace_provider)
-set_target_properties(moq_trace_provider PROPERTIES EXPORT_NAME provider)
+set_target_properties(moq_trace_provider PROPERTIES
+  EXPORT_NAME provider
+  POSITION_INDEPENDENT_CODE ON
+)
 target_include_directories(moq_trace_provider PUBLIC
   "$<BUILD_INTERFACE:${MOQ_PROVIDER_DIR}>"
   "$<INSTALL_INTERFACE:include/moq_trace>"
