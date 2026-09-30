@@ -54,7 +54,7 @@ class NetworkManifest(BaseModel):
     Paths are relative to the manifest's directory, so a run directory can move.
     """
 
-    model_config = ConfigDict(extra="allow", frozen=True, strict=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     relay_port: int = Field(gt=0, le=65_535)
     # CLOCK_REALTIME minus CLOCK_MONOTONIC, sampled when the capture started.

@@ -53,10 +53,12 @@ excludes every workload key so that one invocation cannot run relays under
 different workloads. Relay-specific behavior belongs in a profile's keys, never in
 branches on a relay's name in the runner or the analysis.
 
-Treat provider event names, enum values, fields, and units as a compatibility
-contract. Additive schema changes must remain readable by older analysis where
-possible. Breaking changes require a versioned provider or an explicit
-migration path.
+Provider event names, enum values, fields, and units are one contract shared by
+the providers, both facades, and the analyzer, and all of them change together
+in one commit. The analyzer reads only the current release: it rejects an event,
+field, or artifact schema version it does not know rather than skipping it, and a
+capture or artifact from another release is re-recorded or re-analyzed. Do not
+add compatibility layers, fallbacks, or migrations for older data.
 
 ## Verification
 

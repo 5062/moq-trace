@@ -1,4 +1,4 @@
-"""Check schema v2 against frozen v1 results and artifact reader behavior."""
+"""Check published artifacts against frozen results and artifact reader behavior."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from moq_trace.render import render, render_relays  # noqa: E402
 
 @contextmanager
 def fixture(scenario="basic"):
-    """Use the same trace inputs that generated fixtures/artifact_v1.json."""
+    """Use the same trace inputs that generated fixtures/frozen_results.json."""
 
     trace = test_analyze.SqlAnalysisTests()
     trace.setUp()
@@ -65,15 +65,13 @@ def publish(trace, output):
         )
 
 
-class ArtifactV2Tests(unittest.TestCase):
-    def test_capture_identity_reads_babeltrace_mip_zero_and_one(self):
-        for version, identity in ((0, {"uuid": "capture"}), (1, {"uid": "capture"})):
-            with self.subTest(version=version):
-                trace = SimpleNamespace(graph_mip_version=version, environment={"hostname": "host"}, **identity)
-                self.assertEqual(ctf._capture_identity(trace), ("capture", "host"))
-                trace.environment = {}
-                with self.assertRaisesRegex(ctf.CtfError, "UUID and hostname"):
-                    ctf._capture_identity(trace)
+class ArtifactTests(unittest.TestCase):
+    def test_capture_identity_reads_the_trace_uid_and_hostname(self):
+        trace = SimpleNamespace(uid="capture", environment={"hostname": "host"})
+        self.assertEqual(ctf._capture_identity(trace), ("capture", "host"))
+        trace.environment = {}
+        with self.assertRaisesRegex(ctf.CtfError, "UUID and hostname"):
+            ctf._capture_identity(trace)
 
     def test_same_pid_in_distinct_captures_is_ambiguous(self):
         with fixture() as trace, duckdb.connect(":memory:") as connection:
@@ -132,11 +130,11 @@ class ArtifactV2Tests(unittest.TestCase):
                 )
                 self.assertEqual(
                     connection.execute("SELECT typeof(timestamp_ns) FROM raw.quic_packet_end LIMIT 1").fetchone(),
-                    ("UBIGINT",),
+                    ("BIGINT",),
                 )
 
-    def test_samples_coverage_and_selections_match_frozen_v1_results(self):
-        expected = json.loads((pathlib.Path(__file__).parent / "fixtures/artifact_v1.json").read_text())
+    def test_samples_coverage_and_selections_match_frozen_results(self):
+        expected = json.loads((pathlib.Path(__file__).parent / "fixtures/frozen_results.json").read_text())
         for scenario, baseline in expected.items():
             with self.subTest(scenario=scenario), fixture(scenario) as trace:
                 trace._derive_all()
@@ -284,28 +282,23 @@ class ArtifactV2Tests(unittest.TestCase):
                     (0,),
                 )
 
-    def test_timestamp_narrowing_names_the_event_and_field_and_publishes_nothing(self):
-        with fixture() as trace, tempfile.TemporaryDirectory() as directory:
-            trace.connection.execute(
-                "UPDATE raw.moq_object_start SET timestamp_ns = 9223372036854775808 WHERE trace_id = 1"
-            )
-            output = pathlib.Path(directory) / "analysis.duckdb"
-            with self.assertRaisesRegex(TraceError, "moq_object_start.timestamp_ns"):
-                publish(trace, output)
-            self.assertFalse(output.exists())
+    def test_timestamp_narrowing_names_the_event_and_field(self):
+        schema = ctf.SCHEMAS["udp_socket_end"]
+        row = [
+            "success" if field.type == "string" else 2**63 if field.name == "timestamp_ns" else 0 for field in schema
+        ]
+        with self.assertRaisesRegex(ctf.CtfError, "udp_socket_end.timestamp_ns .* int64"):
+            ctf._batch("udp_socket_end", [row])
 
-    def test_unsupported_versions_have_kind_specific_rebuild_instructions(self):
-        for version in (None, 1, 3):
+    def test_other_versions_have_kind_specific_rebuild_instructions(self):
+        for version in (1, 3):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "analysis.duckdb"
                 with duckdb.connect(str(output)) as connection:
-                    if version is None:
-                        connection.execute("CREATE TABLE metadata(kind VARCHAR, value JSON)")
-                        connection.execute("INSERT INTO metadata VALUES ('run', ?)", [run_metadata().model_dump_json()])
-                    else:
-                        write_metadata(connection, run_metadata())
-                        connection.execute("UPDATE metadata SET schema_version = ?", [version])
-                with self.assertRaisesRegex(TraceError, "supported versions: .*new output path"):
+                    write_metadata(connection, run_metadata())
+                    connection.execute("UPDATE metadata SET schema_version = ?", [version])
+                expected = f"schema version {version}, .* reads only 2; .*new output path"
+                with self.assertRaisesRegex(TraceError, expected):
                     with open_artifact(output):
                         pass
 

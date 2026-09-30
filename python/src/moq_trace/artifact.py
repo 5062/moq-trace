@@ -13,8 +13,9 @@ from . import sql
 from .errors import TraceError
 from .metadata import ArtifactModel, ComparisonMetadata, RunMetadata
 
-# Supported on-disk schema versions for each artifact kind.
-SCHEMA_VERSIONS = {"run": (2,), "comparison": (2,)}
+# The on-disk schema version this tool writes and reads. An artifact of any other
+# version is rebuilt rather than migrated.
+SCHEMA_VERSION = 2
 
 # The metadata schema each artifact kind must satisfy. A kind is an on-disk
 # identity rather than an internal detail, so metadata is validated when it is
@@ -31,12 +32,10 @@ def write_metadata(connection: duckdb.DuckDBPyConnection, metadata: RunMetadata 
     kind that does not describe it.
     """
 
-    # An unset optional field is written as null rather than omitted, so growing
-    # the schema only ever adds a key to a payload. A reader gets the default
-    # back, and a field this producer left unset stays visible as unset.
-    encoded = metadata.model_dump_json()
     connection.execute(sql.read("metadata"))
-    connection.execute("INSERT INTO metadata VALUES (?, 2, ?)", [metadata.KIND, encoded])
+    connection.execute(
+        "INSERT INTO metadata VALUES (?, ?, ?)", [metadata.KIND, SCHEMA_VERSION, metadata.model_dump_json()]
+    )
 
 
 def _decode(kind: str, encoded: str) -> ArtifactModel:
@@ -63,24 +62,21 @@ def open_artifact(
     connection = None
     try:
         connection = duckdb.connect(str(database), read_only=True)
-        columns = {row[0] for row in connection.execute("DESCRIBE metadata").fetchall()}
-        version_column = "schema_version" if "schema_version" in columns else "1"
-        rows = connection.execute(f"SELECT kind, {version_column}, value::VARCHAR FROM metadata").fetchall()
+        rows = connection.execute("SELECT kind, schema_version, value::VARCHAR FROM metadata").fetchall()
         if len(rows) != 1:
             raise TraceError("artifact metadata must contain exactly one row")
         kind, version, encoded = rows[0]
         if kind not in ARTIFACT_MODELS:
             raise TraceError(f"unknown artifact kind {kind!r}; this tool reads {sorted(ARTIFACT_MODELS)}")
-        if version not in SCHEMA_VERSIONS[kind]:
+        if version != SCHEMA_VERSION:
             rebuild = (
                 "re-run moq-trace analyze on the retained CTF trace into a new output path; "
                 "if the trace is unavailable, capture a new run"
                 if kind == "run"
-                else "rebuild the comparison from rebuilt v2 run artifacts"
+                else "rebuild the comparison from rebuilt run artifacts"
             )
             raise TraceError(
-                f"unsupported {kind} artifact schema version {version}; "
-                f"supported versions: {SCHEMA_VERSIONS[kind]}; {rebuild}"
+                f"{kind} artifact has schema version {version}, but this tool reads only {SCHEMA_VERSION}; {rebuild}"
             )
         if expected_kind is not None and kind != expected_kind:
             raise TraceError(f"expected a {expected_kind} artifact, found {kind}")

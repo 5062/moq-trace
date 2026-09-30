@@ -82,15 +82,10 @@ def _ingest(
             )
         connection.unregister("arrow_batch")
     union = " UNION ALL ".join(f"SELECT process_id, ctf_timestamp_ns FROM raw.{name}" for name in ctf.SCHEMAS)
-    for name in ctf.SCHEMAS:
-        if connection.execute(
-            f"SELECT count(*) FROM raw.{name} WHERE ctf_timestamp_ns >= 9223372036854775808"
-        ).fetchone()[0]:
-            raise TraceError(f"{name}.ctf_timestamp_ns cannot be narrowed to BIGINT")
     connection.execute(
         f"UPDATE processes SET first_ctf_ns = bounds.first_ns, last_ctf_ns = bounds.last_ns "
-        f"FROM (SELECT process_id, min(ctf_timestamp_ns)::BIGINT AS first_ns, "
-        f"max(ctf_timestamp_ns)::BIGINT AS last_ns FROM ({union}) GROUP BY process_id) bounds "
+        f"FROM (SELECT process_id, min(ctf_timestamp_ns) AS first_ns, "
+        f"max(ctf_timestamp_ns) AS last_ns FROM ({union}) GROUP BY process_id) bounds "
         "WHERE processes.process_id = bounds.process_id"
     )
     labels = ", ".join("'" + label.replace("'", "''") + "'" for label in sorted(outcomes))
@@ -154,9 +149,6 @@ def _materialize_model(connection: duckdb.DuckDBPyConnection) -> None:
     They are never published as compatibility views in the artifact.
     """
 
-    for table in ctf.SCHEMAS:
-        if connection.execute(f"SELECT count(*) FROM {table} WHERE timestamp_ns >= 9223372036854775808").fetchone()[0]:
-            raise TraceError(f"{table}.timestamp_ns cannot be narrowed to BIGINT")
     connection.execute(sql.read("model-schema"))
     connection.execute(sql.read("model-populate"))
     for name, query in (

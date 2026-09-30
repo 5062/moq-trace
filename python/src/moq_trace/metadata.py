@@ -27,9 +27,9 @@ ComparisonDimension = Literal["subscribers", "object_size"]
 class ArtifactModel(BaseModel):
     """Base for the metadata an artifact records about itself.
 
-    Metadata is validated after checking the artifact schema version. Extra
-    descriptive keys are retained for callers, while required fields and types
-    remain strict. Provider compatibility is a separate contract.
+    Metadata is validated after checking the artifact schema version. A key this
+    tool does not know is an error: an artifact written by another version is
+    rebuilt, never partially read.
 
     Types are checked strictly because artifact JSON is machine-written: a
     mismatch is a producer bug, and silently reading `"16384"` as a byte count
@@ -37,7 +37,7 @@ class ArtifactModel(BaseModel):
     either form of a window duration.
     """
 
-    model_config = ConfigDict(extra="allow", frozen=True, strict=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class Affinity(ArtifactModel):

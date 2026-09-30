@@ -943,28 +943,22 @@ class CtfDecodeTests(unittest.TestCase):
         rows = self.decode([socket_start(has_connection_id=0)])
         self.assertIsNone(rows["udp_socket_start"][0]["connection_id"])
 
-    def test_ignores_additional_fields_without_decoding_them(self) -> None:
-        rows = self.decode([socket_start(future_field=trace_source.Text("not an integer"))])
-        self.assertEqual(set(rows["udp_socket_start"][0]), set(ctf.SCHEMAS["udp_socket_start"].names))
+    def test_rejects_fields_the_schema_lacks(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, r"unknown=\['future_field'\]"):
+            self.decode([socket_start(future_field=trace_source.Text("not an integer"))])
 
-    def test_unknown_provider_events_are_ignored(self) -> None:
-        """A provider may add events before the analyzer learns them."""
-
+    def test_other_providers_are_ignored(self) -> None:
         rows = self.decode(
-            [
-                Event("moq_trace:moq_object_gc", {"reason": trace_source.Text("unused")}),
-                Event("lttng_ust_statedump:procname", {"procname": trace_source.Text("relay")}),
-                Event("quic_trace:moq_object_start", {"trace_id": 1}),
-                socket_start(),
-            ]
+            [Event("lttng_ust_statedump:procname", {"procname": trace_source.Text("relay")}), socket_start()]
         )
         self.assertEqual(set(rows), {"udp_socket_start"})
 
-    def test_current_and_legacy_transport_providers_are_supported(self) -> None:
-        self.assertTrue(ctf._supported("quic_trace", "quic_packet_start"))
-        self.assertTrue(ctf._supported("moq_trace", "quic_packet_start"))
-        self.assertTrue(ctf._supported("moq_trace", "moq_object_start"))
-        self.assertFalse(ctf._supported("quic_trace", "moq_object_start"))
+    def test_rejects_events_a_provider_does_not_define(self) -> None:
+        """The providers and the analyzer are one release, so an unknown event is drift."""
+
+        for name in ("moq_trace:moq_object_gc", "moq_trace:quic_packet_start", "quic_trace:moq_object_start"):
+            with self.subTest(name=name), self.assertRaisesRegex(ctf.CtfError, "not an event this analyzer reads"):
+                self.decode([Event(name, {"trace_id": 1}), socket_start()])
 
     def test_requires_expected_fields(self) -> None:
         event = socket_start()
@@ -984,11 +978,9 @@ class CtfDecodeTests(unittest.TestCase):
         with self.assertRaisesRegex(ctf.CtfError, "value 9 does not have exactly one label"):
             self.decode([socket_start(), socket_start(direction=Enum(value=9))])
 
-    def test_events_without_a_vpid_come_from_an_unknown_process(self) -> None:
-        rows = self.decode([socket_start(vpid=None)])
-        self.assertEqual(rows["udp_socket_start"][0]["pid"], ctf.UNKNOWN_PID)
-        with self.assertRaisesRegex(ctf.CtfError, "has no vpid context"):
-            self.decode([socket_start(vpid=None)], expected_pids=(42,))
+    def test_rejects_events_without_a_vpid(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "have no vpid context"):
+            self.decode([socket_start(vpid=None)])
 
     def test_rejects_events_from_an_unexpected_process(self) -> None:
         """A recording that reaches beyond the expected processes is not read silently."""
@@ -1017,7 +1009,7 @@ class CtfDecodeTests(unittest.TestCase):
 
     def test_missing_babeltrace_bindings_have_an_actionable_error(self) -> None:
         with mock.patch.object(ctf, "bt2", None):
-            with self.assertRaisesRegex(ctf.CtfError, "requires the Babeltrace 2 Python bindings"):
+            with self.assertRaisesRegex(ctf.CtfError, "requires the Babeltrace 2.1 Python bindings"):
                 list(ctf.batches(pathlib.Path("unused.ctf")))
 
 

@@ -57,8 +57,8 @@ class AnalysisDatabaseTests(unittest.TestCase):
                 with open_artifact(database, "comparison"):
                     pass
 
-    def test_keeps_metadata_keys_this_tool_does_not_know(self) -> None:
-        """A newer producer's extra keys stay readable instead of failing the load."""
+    def test_rejects_metadata_keys_this_tool_does_not_know(self) -> None:
+        """An artifact from another release is rebuilt, never partially read."""
 
         with tempfile.TemporaryDirectory() as directory:
             database = self._database(directory)
@@ -69,10 +69,9 @@ class AnalysisDatabaseTests(unittest.TestCase):
             write_raw_metadata(connection, "run", json.dumps(payload))
             connection.close()
 
-            with open_artifact(database, "run") as (_connection, _kind, metadata):
-                self.assertEqual(metadata.collector, {"revision": "abc123"})
-                self.assertEqual(metadata.counts.unmapped, 7)
-                self.assertEqual(metadata.counts.correlated_objects, 1)
+            with self.assertRaisesRegex(TraceError, "collector.*\\n.*Extra inputs are not permitted"):
+                with open_artifact(database, "run"):
+                    pass
 
     def test_rejects_metadata_missing_a_required_section(self) -> None:
         """A payload a producer never completed names the artifact and the field."""
