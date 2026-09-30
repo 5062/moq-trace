@@ -80,7 +80,7 @@ def _render_comparison(
         subtitle = f"{describe(options)} | {comparison}"
         prefix, title = "comparison", f"Object latency by {dimension}"
     plots = database.parent / "plots"
-    plot_latency_comparison(plots / f"{prefix}_cdf.png", title, subtitle, runs)
+    plot_latency_comparison(plots / f"{prefix}_cdf.png", title, subtitle, runs, show_tail=dimension != "relay")
     plot_breakdown_comparison(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
 
 

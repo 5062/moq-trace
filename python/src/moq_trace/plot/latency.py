@@ -95,14 +95,23 @@ def plot_latency_comparison(
     title: str,
     subtitle: str,
     runs: Sequence[ComparisonRun],
+    *,
+    show_tail: bool = True,
 ) -> None:
-    """Overlay per-copy object latency across runs, body above and tail below."""
+    """Overlay per-copy object latency across runs, optionally adding a tail row."""
 
     if len(runs) < 2:
         raise ValueError("a latency comparison requires at least two runs")
-    fig, axes = plt.subplots(2, len(_OBJECT_SPANS), figsize=(14, 9), sharex="col")
+    fig, axes = plt.subplots(
+        2 if show_tail else 1,
+        len(_OBJECT_SPANS),
+        figsize=(14, 9 if show_tail else 5),
+        sharex="col",
+        squeeze=False,
+    )
     for column, (metric, label) in enumerate(_OBJECT_SPANS):
-        ecdf, ccdf = axes[0][column], axes[1][column]
+        ecdf = axes[0][column]
+        ccdf = axes[1][column] if show_tail else None
         counts = []
         for index, run in enumerate(runs):
             values = _values_us(run.connection, metric, run.run_id)
@@ -111,6 +120,7 @@ def plot_latency_comparison(
             _draw_distribution(ecdf, ccdf, values, run.label, index)
             counts.append(len(values))
         _decorate_distribution(ecdf, ccdf, min(counts))
-        ecdf.set_xlabel("")
+        if show_tail:
+            ecdf.set_xlabel("")
         ecdf.set_title(label)
     _save(fig, path, f"{title} | {subtitle}")
