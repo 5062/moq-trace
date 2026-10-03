@@ -293,7 +293,7 @@ def _batches(
     # so one lookup replaces resolving the event layout on every event.
     decoders: dict[int, _Decoder | None] = {}
     rows: dict[tuple[str, str, str], list[list]] = {}
-    sources: dict[int, tuple[str, str]] = {}
+    sources: dict[int, tuple[object, tuple[str, str]]] = {}
     metadata: dict[tuple[str, str, str], dict] = {}
     discarded_events = 0
     discarded_packets = 0
@@ -319,10 +319,16 @@ def _batches(
         pid = decoder.pid(event)
         if allowed is not None and pid not in allowed:
             raise CtfError(f"event {decoder.event_name} came from VPID {pid}, which is not in {sorted(allowed)}")
-        trace = event.stream.trace
-        if trace.addr not in sources:
-            sources[trace.addr] = _capture_identity(trace)
-        capture, hostname = sources[trace.addr]
+        # A stream belongs to one trace for its lifetime. Cache its identity so
+        # each event avoids constructing a trace wrapper just to read its address.
+        # Retain the stream too, preventing address reuse while its key is cached.
+        stream = event.stream
+        stream_address = stream.addr
+        try:
+            _, (capture, hostname) = sources[stream_address]
+        except KeyError:
+            capture, hostname = _capture_identity(stream.trace)
+            sources[stream_address] = (stream, (capture, hostname))
         key = (capture, hostname, decoder.name)
         if key not in metadata:
             outcomes = sorted(

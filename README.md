@@ -265,3 +265,6 @@ kind of the artifact it was found in.
 ```sh
 nix develop --command just check
 ```
+
+For repeatable analysis timings, memory use, and artifact sizes from retained
+captures, see the [analysis benchmark](python/benchmarks/README.md).
