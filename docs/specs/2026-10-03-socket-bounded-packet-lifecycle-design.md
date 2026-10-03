@@ -26,9 +26,12 @@ Bench run `artifacts/bench-20260930T210310Z` compared moq-dev-moq and
 cloudflare-moq-rs, both built on the Quinn fork, with google-quiche. Median
 `quic_full_span` was 711, 750, and 877 µs. Median wire-to-wire latency from the
 relay pcap, measured from the first publisher datagram arriving to the last
-subscriber datagram leaving, was 822, 843, and 947 µs. The trace and the wire
-disagree by different amounts per relay because the current boundaries fall at
-different points in each stack.
+subscriber datagram leaving within each object's burst, was 822, 871, and
+1041 µs. Those wire figures come from grouping datagrams by burst without
+decryption, which the trace showed to be correct for this run but which the pcap
+alone cannot confirm (see Acceptance). The trace and the wire disagree by
+different amounts per relay because the current boundaries fall at different
+points in each stack.
 
 **TX ends before the send.** A TX packet ends after `packet_encrypt`. Quinn
 holds encrypted packets until it has assembled a GSO batch, and moq-dev's first
@@ -285,10 +288,28 @@ copies each result's timestamp onto the `QuicReceivedPacket` it builds.
 `QuicConnection::ProcessUdpPacket` keeps the
 value for the duration of the framer call, and `OnPacket` passes it as
 `PacketContext::start_ns` and records `read_queue` from that time until it
-starts `header_parse`. A packet that the dispatcher buffers before its
-connection exists, such as a packet that arrives before the handshake finishes,
-keeps its original read time, so `read_queue` includes the time it was
-buffered.
+starts `header_parse`.
+
+The read time travels as a field on the packet, not in a thread-local value
+set by the reader. QUICHE processes some packets after a later read has
+started, and a thread-local value would give them that later read's time
+without any error. The field keeps the original read time on both such paths,
+so `read_queue` includes the time the packet waited:
+
+- **The dispatcher's buffered packet store.** Packets for a connection that
+  does not exist yet are stored as `packet.Clone()`
+  (`quic_buffered_packet_store.cc`), so `QuicReceivedPacket::Clone()` copies the
+  field.
+- **The connection's undecryptable packet queue.** `QueueUndecryptablePacket`
+  holds packets that arrive before their keys and replays them once the keys
+  are installed (`quic_connection.cc`), so the queue entry stores the field and
+  the replay passes it on.
+
+A packet that reaches `OnPacket` without a read time, such as one built by a
+test or the simulator rather than by the packet reader, cannot have a
+socket-bounded lifecycle. `OnPacket` records it with no packet trace instead of
+inventing a start, and the fork's tests that check trace output build their
+packets with a read time.
 
 **TX.** `FinishTxPacketTrace` in `quic_packet_creator.cc` ends
 `packet_encrypt`, starts `send_queue`, and moves the open `quic_trace::Packet`
@@ -458,22 +479,54 @@ the reader rejects them.
 
 ## Acceptance
 
-Acceptance compares matched observations of each object in the trace and in
-the relay pcap, not summary statistics. A difference of two medians is not the
-median of the per-object differences, and kernel time can legitimately differ
-between relays, because sending 17 separate datagrams and sending 2 GSO batches
-spend different amounts of time in the kernel.
+Acceptance compares matched observations of each packet and object in the
+trace and in the relay pcap, not summary statistics. A difference of two
+medians is not the median of the per-object differences, and kernel time can
+legitimately differ between relays, because sending 17 separate datagrams and
+sending 2 GSO batches spend different amounts of time in the kernel.
 
-**Matching.** The acceptance workload sends one object per burst, with bursts
-33 ms apart and objects completing in about 1 ms, so each burst in the pcap
-maps to one object. Pcap timestamps are converted to the trace clock with the
-`realtime_offset_ns` recorded in `network.json`. For each selected object and
-subscriber copy, the check computes two residuals separately:
+### Prerequisite: decrypted captures
 
-- **Ingress residual:** the object's RX origin, minus the pcap time of the
-  first inbound datagram of the burst.
-- **Egress residual:** the pcap time of the last outbound datagram of the burst
-  to that subscriber, minus the end of the last TX packet covering the copy.
+Matching uses decrypted captures, specified in a separate pcap decryption
+design that must land before this change can be accepted. Without decryption,
+the pcap cannot tell which datagrams carry an object's bytes. Grouping datagrams
+into one burst per object needs a rule for which datagrams belong to the object,
+and such a rule either guesses or borrows the answer from the trace it is meant
+to check. In bench run `artifacts/bench-20260930T210310Z`, a filter that kept
+datagrams of at least 1000 bytes dropped the datagram that completes every copy
+for cloudflare-moq-rs (79 bytes) and google-quiche (59 bytes), and nothing in
+the pcap revealed the mistake. Burst grouping is therefore not used for
+acceptance in any form.
+
+The decryption design (`2026-10-03-pcap-decryption-design.md`) provides:
+
+- **Key logs** from the bench peers, which hold the same secrets as the relay
+  for every relay connection, so no relay changes.
+- **Packet boundaries inside GSO sends,** found by authenticated trial
+  decryption, so the trace does not need to record segment sizes.
+- **A join from wire packets to trace packets** on the relay port, the peer
+  address, the direction, the packet number space, and the packet number. The
+  peer address comes from a new `quic_trace:connection_path` event, because
+  subscriber connections of one relay carry the same stream offsets and cannot
+  be told apart by content.
+- **The STREAM frames of each decrypted packet,** with stream ID and byte range,
+  so that the pcap yields its own object coverage.
+
+### Matching
+
+Pcap timestamps are converted to the trace clock with the `realtime_offset_ns`
+recorded in `network.json`. Every successful trace packet that carries object
+bytes is joined to its wire observation, and every wire packet that carries
+object bytes is joined to its trace packet. Coverage is then computed twice for
+each selected object and subscriber copy, with the same rule: once from the
+trace's frames and once from the pcap's frames, which are ordered by wire time.
+
+For each matched packet, the check computes two residuals:
+
+- **Ingress residual:** the trace's RX packet start, minus the pcap time of
+  the datagram that carried the packet.
+- **Egress residual:** the pcap time of the datagram that carried the packet,
+  minus the trace's TX packet end.
 
 The two residuals mean different things.
 
@@ -491,39 +544,39 @@ The two residuals mean different things.
   1.41 µs. A small negative egress residual is the expected result for a
   correct boundary.
 
-**Invariants.** These hold for every matched object:
+Object residuals follow from the packet residuals: the ingress residual of the
+packet that sets the object's RX origin, and the egress residual of the packet
+that completes the copy.
 
-- The ingress residual is non-negative, within the uncertainty of converting
+### Invariants
+
+These hold for every selected object and subscriber copy:
+
+- Every successful trace packet that carries object bytes matches exactly one
+  wire packet, and every wire packet that carries object bytes matches exactly
+  one trace packet.
+- No TX packet that the trace ends `dropped` or `abandoned` appears on the
+  wire. A send the trace reports as failed must not have left, and a send it
+  reports as successful must have.
+- The trace and the pcap agree on the set of packets that cover each object
+  and copy, and on the packet that completes it.
+- Every ingress residual is non-negative, within the uncertainty of converting
   pcap timestamps to the trace clock.
-- Every burst matches exactly one selected object, and every selected object
-  matches exactly one burst.
-- For each burst and subscriber, the bytes of the successful TX packets that
-  the trace ends within the burst do not exceed the UDP payload bytes the pcap
-  shows leaving for that subscriber in the burst. A send the trace reports as
-  successful must appear on the wire.
 
-A violation means a boundary is misplaced or an outcome is misreported, and
-acceptance fails.
+A violation means a boundary is misplaced, an outcome is misreported, or a
+coverage rule disagrees with the wire, and acceptance fails.
 
-**Characterization.** Run the bench at least five times per relay. Report the
-distribution of each signed residual per relay and per run (median, p1, p99,
-and spread between runs). The residuals are not required to be equal across
-relays, and the egress residual is not required to be non-negative. Both are
-expected to be stable across runs of one relay. A residual that is unstable
+### Characterization
+
+Run the bench at least five times per relay. Report the distribution of each
+signed residual per relay and per run (median, p1, p99, and spread between
+runs), for packets and for objects. The residuals are not required to be equal
+across relays, and the egress residual is not required to be non-negative. Both
+are expected to be stable across runs of one relay. A residual that is unstable
 between runs, or that grows with an implementation detail such as the number of
 packets per object, points to a boundary that still includes or omits work in
 user space, and the spec is revisited for that stack.
 
-## Open Questions
-
-1. **Phase names.** `read_queue` and `send_queue` describe waits.
-   `socket_read_wait` and `send_wait` are alternatives if "queue" suggests a
-   data structure that a stack does not have.
-2. **Pcap metric in the analyzer.** The acceptance check uses the pcap. Grouping
-   datagrams into bursts works only for workloads with one object per burst, so
-   a general per-object wire metric needs packet-number correlation from
-   decrypted captures. That belongs in a separate design.
-3. **QUICHE RX hook location.** A field on `QuicReceivedPacket` is explicit, but
-   the class has many constructors. A thread-local value set by the reader and
-   read in `OnPacket` is smaller and relies on dispatch being synchronous on one
-   thread. This design proposes the field.
+Because matching works per packet, the acceptance workload is not restricted
+to one object per burst. Runs with several tracks or higher object rates are
+valid acceptance runs.
