@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+from collections.abc import Sequence
 
 import duckdb
 from matplotlib import pyplot as plt
@@ -82,21 +83,42 @@ def _values_us(connection: duckdb.DuckDBPyConnection, metric: str, run_id: int |
     ]
 
 
-# Per-copy object latency, the headline of every run. The QUIC+MoQ span
-# contains the MoQ span, so the two are drawn as nested measurements rather than
-# alternatives.
-_OBJECT_SPANS = (
-    ("full_span", "MoQ"),
-    ("quic_full_span", "QUIC+MoQ"),
-)
-
-# The span measured from the decrypted packet capture, which contains the
-# QUIC+MoQ span and the kernel time around it. Only a run with a packet capture
-# has it.
+# Per-copy object latency, the headline of every run, outermost span first. The
+# wire span, measured from the decrypted packet capture, contains the QUIC+MoQ
+# span and the kernel time around it, and only a run with a packet capture has
+# it. The QUIC+MoQ span runs between socket system calls, which every stack
+# places alike, so it compares stacks. The MoQ span runs between the MoQ
+# lifecycle events, which each stack places at a different point of its
+# transport hand-off, so it describes one stack rather than ranking several.
 _WIRE_SPAN = ("wire_full_span", "Wire")
+_OBJECT_SPANS = (
+    ("quic_full_span", "QUIC+MoQ (read to send)"),
+    ("full_span", "MoQ (boundary differs by stack)"),
+)
 
 
 def _object_spans(wire: bool) -> tuple[tuple[str, str], ...]:
     """The object spans to draw, with the wire span when every run measured it."""
 
-    return (*_OBJECT_SPANS, _WIRE_SPAN) if wire else _OBJECT_SPANS
+    return (_WIRE_SPAN, *_OBJECT_SPANS) if wire else _OBJECT_SPANS
+
+
+def _copy_rows(
+    connection: duckdb.DuckDBPyConnection, metrics: Sequence[str], run_id: int | None = None
+) -> list[tuple[float, ...]]:
+    """One row of microsecond values per copy that has every one of `metrics`.
+
+    Segments that sum to a span only sum on one population, so a figure that
+    stacks them reads the copies measured by all of them.
+    """
+
+    scope = " AND run_id = ?" if run_id is not None else ""
+    columns = ", ".join(f"max(value_ns) FILTER (metric = '{metric}') / 1000.0" for metric in metrics)
+    names = ", ".join(f"'{metric}'" for metric in metrics)
+    return connection.execute(
+        f"""SELECT {columns} FROM metrics.samples
+            WHERE metric IN ({names}){scope}
+            GROUP BY process_id, rx_trace_id, tx_trace_id
+            HAVING count(DISTINCT metric) = {len(metrics)}""",
+        [run_id] if run_id is not None else [],
+    ).fetchall()

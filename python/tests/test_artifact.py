@@ -52,6 +52,10 @@ def fixture(scenario="basic"):
         trace.tearDown()
 
 
+# The copy-grain metrics a fixture without object phases or a capture produces.
+COPY_METRICS = {"full_span", "quic_forward_start", "quic_tail_gap", "quic_full_span", "read_to_moq", "moq_to_send"}
+
+
 def publish(trace, output):
     """Publish the fixture through the production analyzer entry point."""
 
@@ -155,7 +159,7 @@ class ArtifactTests(unittest.TestCase):
                 identities = trace.connection.execute("""SELECT metric, rx_trace_id, tx_trace_id,
                     packet_trace_id, span_id FROM metrics.samples ORDER BY metric""").fetchall()
                 for metric, rx, tx, packet, span in identities:
-                    if metric in {"full_span", "quic_forward_start", "quic_tail_gap", "quic_full_span"}:
+                    if metric in COPY_METRICS:
                         self.assertEqual((rx, tx, packet, span), (1, 2, None, None))
                     else:
                         self.assertIsNone(rx)
@@ -410,7 +414,7 @@ class ArtifactTests(unittest.TestCase):
                     artifact.connection.execute("""SELECT run_id, process_id, count(*)
                     FROM metrics.samples JOIN processes USING(run_id, process_id)
                     GROUP BY ALL ORDER BY run_id""").fetchall(),
-                    [(0, 0, 12), (1, 0, 12)],
+                    [(0, 0, 14), (1, 0, 14)],
                 )
                 self.assertEqual(
                     artifact.connection.execute("""SELECT run_id, value_ns FROM metrics.samples

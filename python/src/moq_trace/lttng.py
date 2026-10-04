@@ -88,6 +88,9 @@ class LttngSession:
             await self.track(pid)
         channel = ("--userspace", "--session", self.name, "--channel", "moq")
         await self._lttng("add-context", *channel, "--type", "vpid")
+        # The thread tells transport work run inside a MoQ call apart from the
+        # same work run in parallel on another thread.
+        await self._lttng("add-context", *channel, "--type", "vtid")
         await self._lttng("enable-event", *channel, "moq_trace:*")
         await self._lttng("enable-event", *channel, "quic_trace:*")
         await self._lttng("start", self.name)

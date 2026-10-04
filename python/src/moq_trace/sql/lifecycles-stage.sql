@@ -34,7 +34,7 @@ CREATE TEMP VIEW object_phase_intervals AS
 WITH paired AS (
   SELECT starts.process_id, starts.trace_id, starts.span_id, starts.phase,
          starts.ctf_timestamp_ns, starts.timestamp_ns AS start_ns,
-         finishes.timestamp_ns AS end_ns, finishes.outcome
+         finishes.timestamp_ns AS end_ns, finishes.outcome, starts.tid
   FROM moq_object_phase AS starts
   JOIN moq_object_phase AS finishes USING (process_id, trace_id, span_id, phase)
   WHERE starts.edge = 'start' AND finishes.edge = 'done'
@@ -43,14 +43,14 @@ SELECT process_id, trace_id, span_id, phase,
        row_number() OVER (
          PARTITION BY process_id, trace_id, phase ORDER BY ctf_timestamp_ns, start_ns, span_id
        ) - 1 AS occurrence,
-       start_ns, end_ns, outcome
+       start_ns, end_ns, outcome, tid
 FROM paired;
 
 CREATE TEMP VIEW packet_phase_intervals AS
 WITH paired AS (
   SELECT starts.process_id, starts.trace_id, starts.span_id, starts.phase,
          starts.ctf_timestamp_ns, starts.timestamp_ns AS start_ns,
-         finishes.timestamp_ns AS end_ns, finishes.outcome
+         finishes.timestamp_ns AS end_ns, finishes.outcome, starts.tid
   FROM quic_packet_phase AS starts
   JOIN quic_packet_phase AS finishes USING (process_id, trace_id, span_id, phase)
   WHERE starts.edge = 'start' AND finishes.edge = 'done'
@@ -59,5 +59,5 @@ SELECT process_id, trace_id, span_id, phase,
        row_number() OVER (
          PARTITION BY process_id, trace_id, phase ORDER BY ctf_timestamp_ns, start_ns, span_id
        ) - 1 AS occurrence,
-       start_ns, end_ns, outcome
+       start_ns, end_ns, outcome, tid
 FROM paired;

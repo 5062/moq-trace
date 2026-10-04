@@ -28,8 +28,8 @@ WHERE tx.process_id = copy.process_id AND tx.trace_id = copy.trace_id;
 INSERT INTO model.intervals
 SELECT process_id, 'object'::subject AS subject, trace_id, span_id, phase,
        occurrence::UINTEGER AS occurrence, start_ns, end_ns,
-       outcome::outcome AS outcome FROM object_phase_intervals
+       outcome::outcome AS outcome, tid FROM object_phase_intervals
 UNION ALL
 SELECT process_id, 'packet'::subject, trace_id, span_id, phase,
-       occurrence::UINTEGER, start_ns, end_ns, outcome::outcome
+       occurrence::UINTEGER, start_ns, end_ns, outcome::outcome, tid
 FROM packet_phase_intervals;

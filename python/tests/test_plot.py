@@ -18,9 +18,15 @@ from moq_trace.plot import (  # noqa: E402
     plot_breakdown_comparison,
     plot_latency_cdf,
     plot_latency_comparison,
+    plot_moq_work,
+    plot_moq_work_comparison,
+    plot_segments,
+    plot_segments_comparison,
     plot_stability,
 )
 from moq_trace.plot.breakdown import _row_summary  # noqa: E402
+from moq_trace.plot.common import _copy_rows  # noqa: E402
+from moq_trace.plot.segments import _segments  # noqa: E402
 
 OPTIONS = PlotOptions(None, 1, 1_024, 30, "test")
 
@@ -34,20 +40,33 @@ def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
 
     connection = duckdb.connect(":memory:")
     connection.execute("CREATE SCHEMA metrics")
-    connection.execute("CREATE TABLE metrics.samples(metric VARCHAR, elapsed_ns BIGINT, value_ns BIGINT)")
-    connection.executemany(
-        "INSERT INTO metrics.samples VALUES ('full_span', ?, ?)",
-        [(second * 1_000_000_000, 90_000 + second * 1_000) for second in range(4)],
+    connection.execute(
+        """CREATE TABLE metrics.samples(process_id UINTEGER, metric VARCHAR, rx_trace_id UBIGINT,
+        tx_trace_id UBIGINT, elapsed_ns BIGINT, value_ns BIGINT)"""
     )
-    connection.executemany(
-        "INSERT INTO metrics.samples VALUES ('quic_full_span', ?, ?)",
-        [(second * 1_000_000_000, 300_000 + second * 1_000) for second in range(4)],
-    )
+    # Four copies whose segments chain into each span, with a negative tail.
+    segments = {
+        "wire_to_read": 20_000,
+        "read_to_moq": 200_000,
+        "full_span": 90_000,
+        "moq_to_send": 10_000,
+        "send_to_wire": -5_000,
+        "moq_rx_work": 15_000,
+        "moq_tx_work": 60_000,
+        "moq_write_after_receive": -40_000,
+    }
+    rows = []
+    for second in range(4):
+        values = {metric: value + second * 1_000 for metric, value in segments.items()}
+        values["quic_full_span"] = values["read_to_moq"] + values["full_span"] + values["moq_to_send"]
+        values["wire_full_span"] = values["wire_to_read"] + values["quic_full_span"] + values["send_to_wire"]
+        rows += [(metric, second, second + 10, second * 1_000_000_000, value) for metric, value in values.items()]
+    connection.executemany("INSERT INTO metrics.samples VALUES (1, ?, ?, ?, ?, ?)", rows)
     packet_metrics = ["rx_packet_span", "tx_packet_span"]
     if packet_phases:
         packet_metrics += ["rx_scheduling", "rx_packet_processing_span"]
     connection.executemany(
-        "INSERT INTO metrics.samples VALUES (?, ?, 5000)",
+        "INSERT INTO metrics.samples VALUES (1, ?, NULL, NULL, ?, 5000)",
         [(metric, second * 1_000_000_000) for metric in packet_metrics for second in range(4)],
     )
     connection.execute(
@@ -71,7 +90,7 @@ class RunPlotTests(unittest.TestCase):
             connection = _artifact(packet_phases)
             try:
                 with tempfile.TemporaryDirectory() as directory:
-                    for plot in (plot_latency_cdf, plot_breakdown, plot_stability):
+                    for plot in (plot_latency_cdf, plot_segments, plot_breakdown, plot_moq_work, plot_stability):
                         output = pathlib.Path(directory) / f"{plot.__name__}.png"
                         plot(output, OPTIONS, connection)
                         self.assertGreater(output.stat().st_size, 0, (plot.__name__, packet_phases))
@@ -89,6 +108,32 @@ class RunPlotTests(unittest.TestCase):
         self.assertAlmostEqual(summary[2], 4.0)
         self.assertIsNone(absent)
 
+    def test_segment_rows_pair_each_copy_and_sum_to_its_span(self) -> None:
+        connection = _artifact(packet_phases=False)
+        try:
+            (total, _label, _bounds), segments = _segments(wire=True)
+            rows = _copy_rows(connection, (total, *(metric for metric, _label in segments)))
+            # A copy that lacks one segment is left out rather than half drawn.
+            connection.execute("DELETE FROM metrics.samples WHERE metric = 'wire_to_read' AND rx_trace_id = 0")
+            partial = _copy_rows(connection, (total, *(metric for metric, _label in segments)))
+        finally:
+            connection.close()
+        self.assertEqual(len(rows), 4)
+        for row in rows:
+            self.assertAlmostEqual(row[0], sum(row[1:]))
+        self.assertEqual(len(partial), 3)
+
+    def test_moq_work_is_skipped_for_a_provider_without_object_phases(self) -> None:
+        connection = _artifact(packet_phases=False)
+        try:
+            connection.execute("DELETE FROM metrics.samples WHERE metric LIKE 'moq_%'")
+            with tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory) / "moq_work.png"
+                self.assertFalse(plot_moq_work(output, OPTIONS, connection))
+                self.assertFalse(output.exists())
+        finally:
+            connection.close()
+
 
 class ComparisonPlotTests(unittest.TestCase):
     """Comparison figures overlay runs and refuse a comparison of one."""
@@ -98,7 +143,12 @@ class ComparisonPlotTests(unittest.TestCase):
         try:
             runs = tuple(ComparisonRun(f"run {index}", connection) for index, connection in enumerate(connections))
             with tempfile.TemporaryDirectory() as directory:
-                for plot in (plot_latency_comparison, plot_breakdown_comparison):
+                for plot in (
+                    plot_latency_comparison,
+                    plot_segments_comparison,
+                    plot_breakdown_comparison,
+                    plot_moq_work_comparison,
+                ):
                     output = pathlib.Path(directory) / f"{plot.__name__}.png"
                     plot(output, "title", "subtitle", runs)
                     self.assertGreater(output.stat().st_size, 0)

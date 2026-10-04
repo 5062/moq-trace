@@ -519,6 +519,8 @@ class LttngAndPacketCaptureTests(unittest.IsolatedAsyncioTestCase):
             [call[-1] for call in host.calls if call[0] == "enable-event"], ["moq_trace:*", "quic_trace:*"]
         )
         self.assertEqual([call[-1] for call in host.calls if call[0] == "track"], ["--vpid=123", "--vpid=456"])
+        # Every event names its process and thread.
+        self.assertEqual([call[-1] for call in host.calls if call[0] == "add-context"], ["vpid", "vtid"])
         self.assertEqual(host.calls[-1], ("destroy", session.name))
 
     async def test_the_provider_check_asks_lttng_for_xml_and_times_out(self) -> None:

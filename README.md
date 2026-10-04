@@ -227,19 +227,53 @@ name and leaves any others in place.
 
 | Figure | Shows |
 |---|---|
-| `latency_cdf.png` | Object latency per copy for the MoQ span and the QUIC+MoQ span, beside one CDF per processing phase |
+| `latency_cdf.png` | Object latency per copy for the wire span (with a packet capture), the QUIC+MoQ span, and the MoQ span, beside one CDF per processing phase |
+| `segments.png` | The widest span split into the segments between each layer's hand-off, as stacked means beside each segment's distribution |
 | `breakdown.png` | Each processing phase as a box of p25 to p75 with p1 to p99 whiskers, on a log time axis |
+| `moq_work.png` | MoQ RX and TX work per copy and the first write start after receipt; only when the provider emits object phases |
 | `stability.png` | Per-second p50 and p99 of object copies and of QUIC packets, on one time axis |
 | `object_timeline.png` | Every QUIC and MoQ phase of the mean, median, and p99 object, from its first RX packet |
 | `network.png` | Throughput, RTT, lost packets, and congestion window; only when a capture or qlog was taken |
-| `relays_cdf.png`, `relays_breakdown.png` | The relays of one bench, overlaid |
-| `comparison_cdf.png`, `comparison_breakdown.png` | The runs of one `compare`, overlaid |
+| `relays_cdf.png`, `relays_segments.png`, `relays_breakdown.png`, `relays_moq_work.png` | The relays of one bench, overlaid |
+| `comparison_cdf.png`, `comparison_segments.png`, `comparison_breakdown.png`, `comparison_moq_work.png` | The runs of one `compare`, overlaid |
 
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that
 recording, so process-local trace and span IDs from different processes never
 meet. `analyze` picks the only process by default and needs `--pid` when the
-recording holds more than one.
+recording holds more than one. Every row also keeps the `vtid` of the thread
+that emitted it, which tells work one call ran inside another from the same work
+run in parallel on another thread. A recording without either context is
+rejected.
+
+The MoQ `full_span` starts where a stack first hands an object to MoQ and ends
+where MoQ finishes writing the copy, and stacks place that boundary differently,
+so it does not compare relays. Three per-copy metrics describe the MoQ layer
+itself:
+
+- `moq_rx_work` and `moq_tx_work` sum the object's MoQ phases, which record
+  processing and not waiting. A stack that builds and sends packets inside its
+  write call runs transport work there, so `moq_tx_work` leaves out every TX
+  packet the writing thread started during a write, until the packet ended or
+  the write returned.
+- `moq_write_after_receive` is the copy's first write minus the end of the
+  inbound object's last payload read: negative when the relay forwards bytes
+  before the whole object arrives, positive when it waits for the object.
+
+The breakdown's TX payload write row subtracts the same transport work, so it
+too charges MoQ only for its own.
+
+Four more per-copy metrics split the end-to-end spans where the layers hand
+off. `read_to_moq` runs from the first socket read carrying the inbound object
+to the start of its MoQ lifecycle, and `moq_to_send` from the end of the copy's
+MoQ lifecycle to the send that completed it, so with `full_span` they sum to
+`quic_full_span` for every copy. With a packet capture, `wire_to_read` and
+`send_to_wire` add the kernel's share at each end, and the five sum to
+`wire_full_span`. Moving the MoQ boundary moves time between the middle
+segments without changing the total, which is why `segments.png` explains a
+difference in `full_span` between stacks. A segment is negative when its end
+comes first: `send_to_wire` usually is, because the capture point sits inside
+the send system call.
 
 Some transports call the application while they process an inbound packet;
 Google QUICHE, for one, parses and forwards MoQ objects before its packet handler

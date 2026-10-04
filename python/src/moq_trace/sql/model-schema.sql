@@ -30,6 +30,8 @@ CREATE TABLE model.objects (
     end_ctf_ns BIGINT NOT NULL,
     rx_trace_id UBIGINT,
     copy_ordinal UINTEGER,
+    -- The thread that started the lifecycle.
+    tid UBIGINT NOT NULL,
     PRIMARY KEY (process_id, trace_id)
 );
 
@@ -46,6 +48,8 @@ CREATE TABLE model.packets (
     outcome outcome NOT NULL,
     start_ctf_ns BIGINT NOT NULL,
     end_ctf_ns BIGINT NOT NULL,
+    -- The thread that started the lifecycle.
+    tid UBIGINT NOT NULL,
     PRIMARY KEY (process_id, trace_id)
 );
 
@@ -59,5 +63,7 @@ CREATE TABLE model.intervals (
     start_ns BIGINT NOT NULL,
     end_ns BIGINT NOT NULL,
     outcome outcome NOT NULL,
+    -- The thread that started the interval.
+    tid UBIGINT NOT NULL,
     PRIMARY KEY (process_id, subject, trace_id, span_id, phase)
 );

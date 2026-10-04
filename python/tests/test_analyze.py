@@ -68,6 +68,8 @@ class SqlAnalysisTests(unittest.TestCase):
 
     def insert(self, table: str, **row) -> None:
         row.setdefault("pid", 0)
+        # One thread runs every fixture event unless a test names another.
+        row.setdefault("tid", 1)
         self.connection.register("rows", pa.Table.from_pylist([row], schema=ctf.SCHEMAS[table]))
         self.connection.execute(f"INSERT INTO raw.{table} SELECT *, pid::UINTEGER AS process_id FROM rows")
         self.connection.unregister("rows")
@@ -595,6 +597,101 @@ class SqlAnalysisTests(unittest.TestCase):
             (6, 4, 310_000, 400_000),
         )
 
+    def test_segments_chain_into_the_quic_span_and_may_be_negative(self) -> None:
+        """A stack that ends a copy's MoQ lifecycle after its send has a negative last segment."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute("UPDATE raw.moq_object_end SET timestamp_ns = 315000 WHERE trace_id = 2")
+
+        full = self._quic_object_metric("quic_full_span")
+        segments = dict(self.connection.execute("SELECT metric, latency_ns FROM segment_samples").fetchall())
+        self.assertEqual(segments, {"read_to_moq": 100_000 - 90_000, "moq_to_send": 310_000 - 315_000})
+        moq = self.connection.execute("SELECT latency_ns FROM object_samples").fetchone()[0]
+        self.assertEqual(segments["read_to_moq"] + moq + segments["moq_to_send"], full)
+        _define_metrics(self.connection)
+
+    def object_phase(self, trace_id: int, span_id: int, phase: str, start: int, end: int, tid: int = 1) -> None:
+        for index, (edge, timestamp, outcome) in enumerate((("start", start, None), ("done", end, "success"))):
+            self.insert(
+                "moq_object_phase",
+                ctf_timestamp_ns=trace_id * 1_000 + span_id * 10 + index,
+                timestamp_ns=timestamp,
+                trace_id=trace_id,
+                span_id=span_id,
+                phase=phase,
+                edge=edge,
+                outcome=outcome,
+                tid=tid,
+            )
+
+    def _moq_work(self) -> dict[str, int]:
+        self.prepare_model()
+        origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        coverage.resolve(self.connection)
+        _derive_samples(self.connection, origin)
+        return dict(self.connection.execute("SELECT metric, latency_ns FROM moq_work_samples").fetchall())
+
+    def test_moq_work_excludes_transport_the_writing_thread_ran(self) -> None:
+        """A write that sends inside its call is charged only for its own work."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        # Inbound: 1 + 0.5 + 0.5 + 1 µs of work; the last read ends at 150.5 µs.
+        self.object_phase(1, 1, "header_parse", 100_000, 101_000)
+        self.object_phase(1, 2, "payload_read", 110_000, 110_500)
+        self.object_phase(1, 3, "payload_read", 150_000, 150_500)
+        self.object_phase(1, 4, "frame_commit", 151_000, 152_000)
+        # Outbound: 0.2 + 0.3 µs, a 20 µs write on thread 1 and a 2 µs write on
+        # thread 2.
+        self.object_phase(2, 1, "clone", 210_000, 210_200)
+        self.object_phase(2, 2, "header_encode", 211_000, 211_300)
+        self.object_phase(2, 3, "payload_write", 220_000, 240_000, tid=1)
+        self.object_phase(2, 4, "payload_write", 260_000, 262_000, tid=2)
+        # Packet 4 starts inside the first write on its thread and is clipped to
+        # the write's end. Packet 6 overlaps it and counts once. Packet 7 started
+        # before the second write and packet 8 on another thread, so neither is
+        # the second write's own work.
+        self.packet(6, "tx", 99)
+        self.packet(7, "tx", 99)
+        self.packet(8, "tx", 99)
+        for trace_id, start, tid in ((6, 225_000, 1), (7, 200_000, 2), (8, 261_000, 3)):
+            self.connection.execute(
+                "UPDATE raw.quic_packet_start SET timestamp_ns = ?, tid = ? WHERE trace_id = ?", [start, tid, trace_id]
+            )
+
+        self.assertEqual(
+            self._moq_work(),
+            {
+                "moq_rx_work": 3_000,
+                "moq_tx_work": 200 + 300 + 20_000 + 2_000 - 20_000,
+                "moq_write_after_receive": 220_000 - 150_500,
+            },
+        )
+        # The breakdown's payload write row is charged the same way.
+        _define_metrics(self.connection)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT total_ns FROM metrics.phase_totals WHERE trace_id = 2 AND phase = 'payload_write'"
+            ).fetchone()[0],
+            20_000 + 2_000 - 20_000,
+        )
+
+    def test_cut_through_forwarding_writes_before_the_object_has_arrived(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "payload_read", 110_000, 110_500)
+        self.object_phase(1, 2, "payload_read", 190_000, 190_500)
+        self.object_phase(2, 1, "payload_write", 150_000, 151_000)
+
+        self.assertEqual(self._moq_work()["moq_write_after_receive"], 150_000 - 190_500)
+
     def test_dropped_frames_contribute_no_coverage(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
@@ -681,7 +778,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(artifact.metadata.processes.captured_pids, (0,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM metrics.statistics").fetchone()[0],
-                    12,
+                    14,
                 )
 
     def test_generic_profile_accepts_transport_without_quinn_phases(self) -> None:
@@ -839,6 +936,7 @@ class SqlAnalysisTests(unittest.TestCase):
     def insert_rows(self, table: str, rows: list[dict]) -> None:
         for row in rows:
             row.setdefault("pid", 0)
+            row.setdefault("tid", 1)
         self.connection.register("rows", pa.Table.from_pylist(rows, schema=ctf.SCHEMAS[table]))
         self.connection.execute(f"INSERT INTO raw.{table} SELECT *, pid::UINTEGER AS process_id FROM rows")
         self.connection.unregister("rows")
@@ -1054,7 +1152,9 @@ def _sequential_coverage(start: int, end: int, frames) -> tuple:
     raise AssertionError(f"reference coverage of [{start}, {end}) is incomplete")
 
 
-def socket_start(trace_id: int = 3, *, vpid: int | None = 42, timestamp: int = 7, **overrides) -> Event:
+def socket_start(
+    trace_id: int = 3, *, vpid: int | None = 42, vtid: int | None = 43, timestamp: int = 7, **overrides
+) -> Event:
     """Build a `quic_trace:udp_socket_start` event as the LTTng provider records it."""
 
     payload = {
@@ -1065,7 +1165,7 @@ def socket_start(trace_id: int = 3, *, vpid: int | None = 42, timestamp: int = 7
         "direction": Enum("tx"),
     }
     payload.update(overrides)
-    return Event("quic_trace:udp_socket_start", payload, timestamp=timestamp, vpid=vpid)
+    return Event("quic_trace:udp_socket_start", payload, timestamp=timestamp, vpid=vpid, vtid=vtid)
 
 
 @unittest.skipIf(ctf.bt2 is None, "the Babeltrace 2 Python bindings are unavailable")
@@ -1087,6 +1187,7 @@ class CtfDecodeTests(unittest.TestCase):
                 "udp_socket_start": [
                     {
                         "pid": 42,
+                        "tid": 43,
                         "ctf_timestamp_ns": 7,
                         "timestamp_ns": 2,
                         "trace_id": 3,
@@ -1108,8 +1209,8 @@ class CtfDecodeTests(unittest.TestCase):
             "peer_address_low": 7,
             "peer_port": 50266,
         }
-        rows = self.decode([Event("quic_trace:quic_connection_path", payload, timestamp=7, vpid=42)])
-        self.assertEqual(rows["quic_connection_path"], [{"pid": 42, "ctf_timestamp_ns": 7, **payload}])
+        rows = self.decode([Event("quic_trace:quic_connection_path", payload, timestamp=7, vpid=42, vtid=43)])
+        self.assertEqual(rows["quic_connection_path"], [{"pid": 42, "tid": 43, "ctf_timestamp_ns": 7, **payload}])
 
     def test_optional_fields_respect_presence_flags(self) -> None:
         rows = self.decode([socket_start(has_connection_id=0)])
@@ -1153,6 +1254,12 @@ class CtfDecodeTests(unittest.TestCase):
     def test_rejects_events_without_a_vpid(self) -> None:
         with self.assertRaisesRegex(ctf.CtfError, "have no vpid context"):
             self.decode([socket_start(vpid=None)])
+
+    def test_rejects_events_without_a_vtid(self) -> None:
+        """Nested work is attributed by thread, so a capture must name each event's thread."""
+
+        with self.assertRaisesRegex(ctf.CtfError, "have no vtid context"):
+            self.decode([socket_start(vtid=None)])
 
     def test_rejects_events_from_an_unexpected_process(self) -> None:
         """A recording that reaches beyond the expected processes is not read silently."""

@@ -181,13 +181,30 @@ class WireTests(unittest.TestCase):
             samples = dict(
                 connection.execute(
                     "SELECT metric, value_ns FROM metrics.samples WHERE metric IN "
-                    "('wire_full_span', 'rx_wire_residual', 'tx_wire_residual')"
+                    "('wire_full_span', 'rx_wire_residual', 'tx_wire_residual', 'wire_to_read', 'read_to_moq', "
+                    "'full_span', 'moq_to_send', 'send_to_wire')"
                 ).fetchall()
             )
-        self.assertEqual(samples, {"wire_full_span": 220_000, "rx_wire_residual": 1_000, "tx_wire_residual": -1_000})
-        # The latency figure draws the wire span beside the trace spans.
+        self.assertEqual(
+            samples,
+            {
+                "wire_full_span": 220_000,
+                "rx_wire_residual": 1_000,
+                "tx_wire_residual": -1_000,
+                "wire_to_read": 1_000,
+                "read_to_moq": 10_000,
+                "full_span": 200_000,
+                "moq_to_send": 10_000,
+                "send_to_wire": -1_000,
+            },
+        )
+        # The segments chain from capture to capture.
+        segments = ("wire_to_read", "read_to_moq", "full_span", "moq_to_send", "send_to_wire")
+        self.assertEqual(sum(samples[metric] for metric in segments), samples["wire_full_span"])
+        # The latency and segment figures draw the wire span beside the trace spans.
         render(output)
-        self.assertGreater((self.directory / "plots" / "latency_cdf.png").stat().st_size, 0)
+        for figure in ("latency_cdf.png", "segments.png"):
+            self.assertGreater((self.directory / "plots" / figure).stat().st_size, 0)
 
     def test_loopback_datagrams_are_read_from_their_arriving_copy(self) -> None:
         """Some kernels record a loopback datagram once, arriving, and others twice."""

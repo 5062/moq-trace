@@ -282,7 +282,10 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
         sql.read("packet-samples-stage"),
         {"origin": origin},
     )
+    connection.execute(sql.read("segment-samples-stage"), {"origin": origin})
     connection.execute(sql.read("wire-samples-schema"))
+    connection.execute(sql.read("write-transport-stage"))
+    connection.execute(sql.read("moq-work-samples-stage"), {"origin": origin})
 
 
 def _catalog() -> list[tuple[str, str, str, str, str, int]]:
@@ -294,10 +297,17 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
 
     copy = (
         ("full_span", "object", "Full relay span"),
+        ("moq_rx_work", "object", "MoQ RX work"),
+        ("moq_tx_work", "object", "MoQ TX work (transport excluded)"),
+        ("moq_write_after_receive", "object", "MoQ write start after receive"),
         ("quic_forward_start", "quic_object", "QUIC forward start"),
         ("quic_tail_gap", "quic_object", "QUIC tail gap"),
         ("quic_full_span", "quic_object", "QUIC full span (read to send)"),
+        ("read_to_moq", "quic_object", "Read to MoQ start"),
+        ("moq_to_send", "quic_object", "MoQ end to send"),
         ("wire_full_span", "wire_object", "Wire full span"),
+        ("wire_to_read", "wire_object", "Wire to read"),
+        ("send_to_wire", "wire_object", "Send to wire"),
     )
 
     def packet_phases(direction: phases.Direction) -> list[tuple[str, str, str]]:

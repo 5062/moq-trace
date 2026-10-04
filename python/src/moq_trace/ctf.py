@@ -21,17 +21,19 @@ else:
 
 # Filled in from the event context instead of the provider payload. The decoder
 # writes them first, so every schema leads with them in this order.
-CONTEXT_FIELDS = ("pid", "ctf_timestamp_ns")
+CONTEXT_FIELDS = ("pid", "tid", "ctf_timestamp_ns")
 
 
 def _schema(**fields: pa.DataType) -> pa.Schema:
-    # `pid` comes from the LTTng `vpid` context and `ctf_timestamp_ns` from the
-    # event clock snapshot, rather than from the provider payload. Both clocks
+    # `pid` and `tid` come from the LTTng `vpid` and `vtid` contexts and
+    # `ctf_timestamp_ns` from the event clock snapshot, rather than from the
+    # provider payload. Both clocks
     # are narrowed to signed nanoseconds here, so a timestamp that does not fit
     # fails while decoding instead of while deriving spans from it.
     return pa.schema(
         (
             ("pid", pa.uint64()),
+            ("tid", pa.uint64()),
             ("ctf_timestamp_ns", pa.int64()),
             ("timestamp_ns", pa.int64()),
             *fields.items(),
@@ -215,6 +217,15 @@ class _Decoder:
         vpid_class = context_class["vpid"].field_class
         if not isinstance(vpid_class, (bt2._UnsignedIntegerFieldClassConst, bt2._SignedIntegerFieldClassConst)):
             raise CtfError(f"{self.event_name} has a vpid context that is not an integer")
+        # Work that one call runs inside another is attributed by thread, so an
+        # event that does not name its thread cannot be analyzed either.
+        if "vtid" not in context_class:
+            raise CtfError(
+                f"{self.event_name} events have no vtid context; record the trace with `lttng add-context --type vtid`"
+            )
+        vtid_class = context_class["vtid"].field_class
+        if not isinstance(vtid_class, (bt2._UnsignedIntegerFieldClassConst, bt2._SignedIntegerFieldClassConst)):
+            raise CtfError(f"{self.event_name} has a vtid context that is not an integer")
 
     @staticmethod
     def pid(event) -> int:
@@ -226,7 +237,8 @@ class _Decoder:
         """Return one event's values in its schema's column order."""
 
         payload = event.payload_field
-        values = [pid, message.default_clock_snapshot.ns_from_origin]
+        tid = int(event.common_context_field["vtid"])
+        values = [pid, tid, message.default_clock_snapshot.ns_from_origin]
         for field, presence, labels in self.fields:
             if presence is not None and not int(payload[presence]):
                 values.append(None)

@@ -329,7 +329,7 @@ CREATE TABLE metrics.definitions(
 
 | Grain | One sample per | Identity set | Metrics |
 | --- | --- | --- | --- |
-| `copy` | successful tx copy of a selected object | `rx_trace_id`, `tx_trace_id` | `full_span`, `quic_forward_start`, `quic_tail_gap`, `quic_full_span` |
+| `copy` | successful tx copy of a selected object | `rx_trace_id`, `tx_trace_id` | `full_span`, `moq_rx_work`, `moq_tx_work`, `moq_write_after_receive`, `quic_forward_start`, `quic_tail_gap`, `quic_full_span`, `read_to_moq`, `moq_to_send`, `wire_full_span`, `wire_to_read`, `send_to_wire` |
 | `packet` | selected packet | `packet_trace_id` | `rx_packet_span`, `tx_packet_span`, `rx_packet_transport_span`, `rx_packet_processing_span` |
 | `occurrence` | successful phase interval of a selected packet | `packet_trace_id`, `span_id` | `rx_<phase>`, `tx_<phase>` |
 
@@ -385,7 +385,8 @@ CREATE TABLE metrics.phase_totals(
 Rows cover the selected rx objects, their successful tx copies, and successful
 selected packet lifecycles, summing successful intervals only, as
 `plot/breakdown.py` does now. A successful interval on a failed packet does not
-contribute a packet total. The processing-phase CDFs also read this table:
+contribute a packet total. A TX object's `payload_write` total subtracts the
+transport work its writing thread ran inside its writes, as `moq_tx_work` does. The processing-phase CDFs also read this table:
 they plot per-subject phase totals, rather than individual occurrences.
 
 ### `metrics.statistics`
@@ -474,6 +475,7 @@ uses its saved data. A failed rebuild leaves the previous snapshot intact.
 | `plot/latency` phase CDFs | `metrics.phase_totals` |
 | `plot/stability` | `metrics.samples` |
 | `plot/breakdown` | `metrics.phase_totals` |
+| `plot/segments`, `plot/moq_work` | `metrics.samples` |
 | `plot/timeline` | `metrics.timeline_selections` plus `model` |
 | `plot/network` | `network.*` |
 | comparison renderers | `runs` plus copied `metrics.*` |

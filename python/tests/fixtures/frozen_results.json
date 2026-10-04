@@ -57,6 +57,12 @@
       ],
       [
         "quic_object",
+        "moq_to_send",
+        0,
+        10000
+      ],
+      [
+        "quic_object",
         "quic_forward_start",
         0,
         220000
@@ -72,6 +78,12 @@
         "quic_tail_gap",
         0,
         120000
+      ],
+      [
+        "quic_object",
+        "read_to_moq",
+        0,
+        10000
       ]
     ],
     "coverage": [
@@ -182,6 +194,12 @@
       ],
       [
         "quic_object",
+        "moq_to_send",
+        0,
+        10000
+      ],
+      [
+        "quic_object",
         "quic_forward_start",
         0,
         220000
@@ -197,6 +215,12 @@
         "quic_tail_gap",
         0,
         120000
+      ],
+      [
+        "quic_object",
+        "read_to_moq",
+        0,
+        10000
       ]
     ],
     "coverage": [
@@ -301,6 +325,12 @@
       ],
       [
         "quic_object",
+        "moq_to_send",
+        0,
+        10000
+      ],
+      [
+        "quic_object",
         "quic_forward_start",
         0,
         220000
@@ -316,6 +346,12 @@
         "quic_tail_gap",
         0,
         120000
+      ],
+      [
+        "quic_object",
+        "read_to_moq",
+        0,
+        10000
       ]
     ],
     "coverage": [

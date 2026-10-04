@@ -20,8 +20,12 @@ from .plot import (
     plot_breakdown_comparison,
     plot_latency_cdf,
     plot_latency_comparison,
+    plot_moq_work,
+    plot_moq_work_comparison,
     plot_network,
     plot_object_timelines,
+    plot_segments,
+    plot_segments_comparison,
     plot_stability,
 )
 
@@ -47,7 +51,9 @@ def _render_run(
     options = _options(metadata)
     plots = database.parent / "plots"
     plot_latency_cdf(plots / "latency_cdf.png", options, connection)
+    plot_segments(plots / "segments.png", options, connection)
     plot_breakdown(plots / "breakdown.png", options, connection)
+    plot_moq_work(plots / "moq_work.png", options, connection)
     plot_stability(plots / "stability.png", options, connection)
     network = metadata.network
     if network is not None and (network.packets or network.qlog_connections):
@@ -80,7 +86,9 @@ def _render_comparison(
         prefix, title = "comparison", f"Object latency by {dimension}"
     plots = database.parent / "plots"
     plot_latency_comparison(plots / f"{prefix}_cdf.png", title, subtitle, runs, show_tail=dimension != "relay")
+    plot_segments_comparison(plots / f"{prefix}_segments.png", f"Span segments by {dimension}", subtitle, runs)
     plot_breakdown_comparison(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
+    plot_moq_work_comparison(plots / f"{prefix}_moq_work.png", f"MoQ work by {dimension}", subtitle, runs)
 
 
 def render(path: pathlib.Path) -> None:

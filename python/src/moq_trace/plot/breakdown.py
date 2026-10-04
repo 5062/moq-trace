@@ -20,7 +20,8 @@ from .common import ComparisonRun, PlotOptions, _format_us, _plain_log, _save, d
 # something as the unit's total. Spans that contain other rows, such as the
 # end-to-end latencies, are left out; `latency_cdf` shows those. Each section
 # keeps its CDF line style beside its rows, so colors can repeat while the phase
-# curves remain distinct.
+# curves remain distinct. The TX payload write row excludes the transport work
+# a stack runs inside its write calls, which the TX QUIC rows already show.
 _SECTIONS: tuple[tuple[str, str, tuple[Phase, ...]], ...] = tuple(
     (title, style, tuple(phase for phase in phases.select(subject, direction) if phase.drawn))
     for title, style, subject, direction in (
@@ -154,7 +155,10 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
     axis.set_ylim(y - 0.4, -0.6)
     axis.set_xscale("log")
     _plain_log(axis.xaxis)
-    axis.set_xlabel("Duration (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. ")
+    axis.set_xlabel(
+        "Duration (µs, log)\nBox p25 to p75, black line p50, whiskers p1 to p99. "
+        "TX MoQ payload write excludes transport work run inside the write."
+    )
     axis.grid(axis="x", alpha=0.25)
     if single:
         axis.annotate(

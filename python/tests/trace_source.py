@@ -4,7 +4,7 @@ The decoder checks each event class's field classes before it reads any event,
 so a test needs real trace IR rather than stand-in objects that only imitate
 field values. The field classes mirror what LTTng produces: the
 payload holds unsigned integers and unsigned enumerations, and the optional
-`vpid` context is a signed integer.
+`vpid` and `vtid` contexts are signed integers.
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ class Event:
     timestamp: int = 1
     # None records the event in a stream without the `vpid` context.
     vpid: int | None = 1
+    # None records the event in a stream without the `vtid` context.
+    vtid: int | None = 1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,6 +54,12 @@ class Discarded:
     """A report that the tracer dropped this many events."""
 
     count: int
+
+
+def _context(item: Event) -> tuple[bool, bool]:
+    """Which of the `vpid` and `vtid` contexts an event's stream carries."""
+
+    return (item.vpid is not None, item.vtid is not None)
 
 
 def messages(items: list[Event | Discarded]):
@@ -93,10 +101,10 @@ if bt2 is not None:
                     first = next(iter(streams.values()))
                     built.append(self._create_discarded_events_message(first, count=item.count))
                     continue
-                has_vpid = item.vpid is not None
+                context = _context(item)
                 message = self._create_event_message(
-                    event_classes[(item.name, has_vpid)],
-                    streams[has_vpid],
+                    event_classes[(item.name, context)],
+                    streams[context],
                     default_clock_snapshot=item.timestamp,
                 )
                 payload = message.event.payload_field
@@ -107,8 +115,10 @@ if bt2 is not None:
                         payload[field] = value.value
                     else:
                         payload[field] = value
-                if has_vpid:
+                if item.vpid is not None:
                     message.event.common_context_field["vpid"] = item.vpid
+                if item.vtid is not None:
+                    message.event.common_context_field["vtid"] = item.vtid
                 built.append(message)
             built.extend(self._create_stream_end_message(stream) for stream in streams.values())
             return built
@@ -126,18 +136,20 @@ if bt2 is not None:
             stream_classes = {}
             event_classes = {}
             for item in items:
-                has_vpid = not isinstance(item, Event) or item.vpid is not None
-                if has_vpid not in stream_classes:
+                key = _context(item) if isinstance(item, Event) else (True, True)
+                if key not in stream_classes:
                     context = None
-                    if has_vpid:
+                    if any(key):
                         context = trace_class.create_structure_field_class()
-                        context.append_member("vpid", trace_class.create_signed_integer_field_class(32))
-                    stream_classes[has_vpid] = trace_class.create_stream_class(
+                        for present, name in zip(key, ("vpid", "vtid"), strict=True):
+                            if present:
+                                context.append_member(name, trace_class.create_signed_integer_field_class(32))
+                    stream_classes[key] = trace_class.create_stream_class(
                         default_clock_class=clock_class,
                         event_common_context_field_class=context,
                         supports_discarded_events=True,
                     )
-                if not isinstance(item, Event) or (item.name, has_vpid) in event_classes:
+                if not isinstance(item, Event) or (item.name, key) in event_classes:
                     continue
                 payload = trace_class.create_structure_field_class()
                 for field, value in item.payload.items():
@@ -150,9 +162,9 @@ if bt2 is not None:
                     else:
                         field_class = trace_class.create_unsigned_integer_field_class(64)
                     payload.append_member(field, field_class)
-                event_classes[(item.name, has_vpid)] = stream_classes[has_vpid].create_event_class(
+                event_classes[(item.name, key)] = stream_classes[key].create_event_class(
                     name=item.name, payload_field_class=payload
                 )
             trace = trace_class(uid="00000000-0000-0000-0000-000000000001", environment={"hostname": "test-host"})
-            streams = {has_vpid: trace.create_stream(stream_class) for has_vpid, stream_class in stream_classes.items()}
+            streams = {key: trace.create_stream(stream_class) for key, stream_class in stream_classes.items()}
             self._add_output_port("out", (streams, event_classes, labels, items))
