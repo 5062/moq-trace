@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 from .. import phases
-from .common import _OBJECT_SPANS, PlotOptions, _metrics, _plain_log, _save, describe
+from .common import _OBJECT_SPANS, _metrics, _plain_log, _save
 
 _QUEUING = next(phase for phase in phases.select("packet", "rx") if phase.name == "scheduling")
 
@@ -55,7 +55,7 @@ def _draw_windows(axis: Axes, windows: Sequence[tuple[float, float, float]], lab
 
 def plot_stability(
     path: pathlib.Path,
-    options: PlotOptions,
+    subtitle: str,
     connection: duckdb.DuckDBPyConnection,
 ) -> None:
     """Render per-second object and packet latency on one shared time axis.
@@ -96,4 +96,4 @@ def plot_stability(
     packets.set_title("QUIC packets per second: solid p50, dashed p99")
     packets.legend(loc="upper right", fontsize=8, ncols=drawn)
     packets.grid(alpha=0.25)
-    _save(fig, path, f"Latency over the run | {describe(options)}")
+    _save(fig, path, f"Latency over the run | {subtitle}")

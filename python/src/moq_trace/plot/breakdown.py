@@ -12,7 +12,7 @@ from matplotlib.patches import Patch
 
 from .. import phases
 from ..phases import Phase
-from .common import ComparisonRun, PlotOptions, _format_us, _plain_log, _save, describe
+from .common import PlotRun, _format_us, _plain_log, _quantile_box, _save
 
 # Sections in pipeline order, each drawing the known phases of one subject and
 # direction. Phase rows sum every occurrence of the phase within one unit
@@ -98,7 +98,7 @@ def _draw_phase_cdfs(axis: Axes, connection: duckdb.DuckDBPyConnection) -> None:
     axis.legend(fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5))
 
 
-def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
+def _draw_breakdown(axis: Axes, runs: Sequence[PlotRun]) -> None:
     """Draw every present row as a quantile box per run on a log time axis."""
 
     band = 0.8 / len(runs)
@@ -123,17 +123,7 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
                 low, q1, median, q3, high = quantiles
                 center = y + (index - (len(runs) - 1) / 2) * band
                 color = f"C{index}"
-                axis.hlines(center, low, high, color=color, linewidth=1.2)
-                axis.barh(
-                    center,
-                    q3 - q1,
-                    left=q1,
-                    height=band * 0.8,
-                    color=color,
-                    edgecolor=color,
-                    linewidth=1.2,
-                )
-                axis.vlines(median, center - band * 0.4, center + band * 0.4, color="black", linewidth=2)
+                _quantile_box(axis, quantiles, center, band * 0.8, color)
                 if single:
                     axis.annotate(
                         f"{_format_us(median)} / {_format_us(high)}",
@@ -171,12 +161,16 @@ def _draw_breakdown(axis: Axes, runs: Sequence[ComparisonRun]) -> None:
         )
 
 
-def _breakdown_figure(
+def plot_breakdown(
     path: pathlib.Path,
     title: str,
     subtitle: str,
-    runs: Sequence[ComparisonRun],
+    runs: Sequence[PlotRun],
 ) -> None:
+    """Render processing-phase quantiles for one or more runs."""
+
+    if not runs:
+        raise ValueError("a breakdown figure requires at least one run")
     rows = sum(len(rows) + 1 for _section, _style, rows in _SECTIONS)
     fig, axis = plt.subplots(figsize=(12, 1.8 + rows * 0.24 * max(1, len(runs) ** 0.5)))
     _draw_breakdown(axis, runs)
@@ -185,26 +179,3 @@ def _breakdown_figure(
         handles = [Patch(color=f"C{index}", label=run.label) for index, run in enumerate(runs)]
         axis.legend(handles=handles, loc="lower right", fontsize=8)
     _save(fig, path, f"{title} | {subtitle}")
-
-
-def plot_breakdown(
-    path: pathlib.Path,
-    options: PlotOptions,
-    connection: duckdb.DuckDBPyConnection,
-) -> None:
-    """Render where a copy's time goes, one quantile box per phase."""
-
-    _breakdown_figure(path, "Latency breakdown", describe(options), (ComparisonRun("", connection),))
-
-
-def plot_breakdown_comparison(
-    path: pathlib.Path,
-    title: str,
-    subtitle: str,
-    runs: Sequence[ComparisonRun],
-) -> None:
-    """Render the phase breakdown of several runs side by side."""
-
-    if len(runs) < 2:
-        raise ValueError("a breakdown comparison requires at least two runs")
-    _breakdown_figure(path, title, subtitle, runs)

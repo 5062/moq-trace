@@ -9,42 +9,18 @@ from collections.abc import Sequence
 import duckdb
 from matplotlib import pyplot as plt
 from matplotlib import ticker
+from matplotlib.axes import Axes
 from matplotlib.axis import Axis
 from matplotlib.figure import Figure
 
-from .. import labels
-
 
 @dataclasses.dataclass(frozen=True)
-class PlotOptions:
-    """Run metadata displayed in plot titles."""
-
-    relay_cpu: int | None
-    subscribers: int
-    object_size: int
-    fps: int | None
-    protocol: str | None
-
-
-@dataclasses.dataclass(frozen=True)
-class ComparisonRun:
-    """One labeled artifact in a figure that compares several runs."""
+class PlotRun:
+    """One artifact to draw, optionally labeled and scoped to a comparison run."""
 
     label: str
     connection: duckdb.DuckDBPyConnection
     run_id: int | None = None
-
-
-def describe(options: PlotOptions) -> str:
-    """Summarize a run's workload for a figure subtitle."""
-
-    affinity = "unpinned" if options.relay_cpu is None else f"pinned CPU {options.relay_cpu}"
-    values = [affinity, labels.subscribers(options.subscribers), f"{options.object_size} bytes"]
-    if options.fps is not None:
-        values.append(f"{options.fps} fps")
-    if options.protocol is not None:
-        values.append(options.protocol)
-    return " | ".join(values)
 
 
 def _format_us(value: float) -> str:
@@ -122,3 +98,21 @@ def _copy_rows(
             HAVING count(DISTINCT metric) = {len(metrics)}""",
         [run_id] if run_id is not None else [],
     ).fetchall()
+
+
+def _quantile_box(axis: Axes, quantiles: Sequence[float], position: float, width: float, color: str) -> None:
+    """Draw supplied p1, p25, p50, p75, and p99 without recomputing whiskers."""
+
+    axis.bxp(
+        [dict(zip(("whislo", "q1", "med", "q3", "whishi"), quantiles, strict=True))],
+        positions=[position],
+        widths=width,
+        orientation="horizontal",
+        patch_artist=True,
+        showcaps=False,
+        showfliers=False,
+        manage_ticks=False,
+        boxprops={"facecolor": color, "edgecolor": color, "linewidth": 1.2},
+        whiskerprops={"color": color, "linewidth": 1.2},
+        medianprops={"color": "black", "linewidth": 2},
+    )

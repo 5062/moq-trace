@@ -5,14 +5,13 @@ from __future__ import annotations
 import pathlib
 from collections.abc import Sequence
 
-import duckdb
 import numpy
 from matplotlib import pyplot as plt
 from matplotlib import ticker
 from matplotlib.axes import Axes
 from matplotlib.patches import Patch
 
-from .common import ComparisonRun, PlotOptions, _copy_rows, _format_us, _metrics, _save, describe
+from .common import PlotRun, _copy_rows, _format_us, _quantile_box, _save
 
 # The segments of the wire span in pipeline order. Their boundaries chain, from
 # the capture of an inbound object's first datagram through the socket read, the
@@ -116,9 +115,7 @@ def _draw_quantiles(
             y += 0.8
         for label, table in zip(labels, tables, strict=True):
             low, q1, median, q3, high = numpy.percentile(table[:, index + 1], _QUANTILES)
-            axis.hlines(y, low, high, color=color, linewidth=1.2)
-            axis.barh(y, q3 - q1, left=q1, height=0.6, color=color, edgecolor=color)
-            axis.vlines(median, y - 0.3, y + 0.3, color="black", linewidth=2)
+            _quantile_box(axis, (low, q1, median, q3, high), y, 0.6, color)
             if single:
                 axis.annotate(
                     f"{_format_us(median)} / {_format_us(float(table[:, index + 1].mean()))}",
@@ -156,13 +153,17 @@ def _draw_quantiles(
     axis.grid(axis="x", alpha=0.25)
 
 
-def _segments_figure(
+def plot_segments(
     path: pathlib.Path,
     title: str,
     subtitle: str,
-    runs: Sequence[ComparisonRun],
-    wire: bool,
+    runs: Sequence[PlotRun],
 ) -> None:
+    """Render span segments for one or more runs."""
+
+    if not runs:
+        raise ValueError("a segments figure requires at least one run")
+    wire = all(_copy_rows(run.connection, ("wire_full_span",), run.run_id) for run in runs)
     (total, total_label, bounds), segments = _segments(wire)
     metrics = (total, *(metric for metric, _label in segments))
     tables = []
@@ -185,28 +186,3 @@ def _segments_figure(
     _draw_quantiles(quantiles, segments, labels, tables)
     quantiles.set_title("Segment distributions")
     _save(fig, path, f"{title} | {subtitle}")
-
-
-def plot_segments(
-    path: pathlib.Path,
-    options: PlotOptions,
-    connection: duckdb.DuckDBPyConnection,
-) -> None:
-    """Render how one run's end-to-end span splits across the layers' hand-offs."""
-
-    wire = "wire_full_span" in _metrics(connection)
-    _segments_figure(path, "Span segments", describe(options), (ComparisonRun("", connection),), wire)
-
-
-def plot_segments_comparison(
-    path: pathlib.Path,
-    title: str,
-    subtitle: str,
-    runs: Sequence[ComparisonRun],
-) -> None:
-    """Render the span segments of several runs, one row each."""
-
-    if len(runs) < 2:
-        raise ValueError("a segment comparison requires at least two runs")
-    wire = all(_copy_rows(run.connection, ("wire_full_span",), run.run_id) for run in runs)
-    _segments_figure(path, title, subtitle, runs, wire)

@@ -19,28 +19,23 @@ import matplotlib
 # a submodule always runs this package first.
 matplotlib.use("Agg")
 
-from .breakdown import plot_breakdown, plot_breakdown_comparison  # noqa: E402
-from .common import ComparisonRun, PlotOptions, describe  # noqa: E402
+from .breakdown import plot_breakdown  # noqa: E402
+from .common import PlotRun  # noqa: E402
 from .latency import plot_latency_cdf, plot_latency_comparison  # noqa: E402
-from .moq_work import plot_moq_work, plot_moq_work_comparison  # noqa: E402
+from .moq_work import plot_moq_work  # noqa: E402
 from .network import plot_network  # noqa: E402
-from .segments import plot_segments, plot_segments_comparison  # noqa: E402
+from .segments import plot_segments  # noqa: E402
 from .stability import plot_stability  # noqa: E402
 from .timeline import plot_object_timelines  # noqa: E402
 
 __all__ = [
-    "ComparisonRun",
-    "PlotOptions",
-    "describe",
+    "PlotRun",
     "plot_breakdown",
-    "plot_breakdown_comparison",
     "plot_latency_cdf",
     "plot_latency_comparison",
     "plot_moq_work",
-    "plot_moq_work_comparison",
     "plot_network",
     "plot_object_timelines",
     "plot_segments",
-    "plot_segments_comparison",
     "plot_stability",
 ]

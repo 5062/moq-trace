@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import pathlib
 
 import duckdb
@@ -13,34 +12,32 @@ from .comparison import SNAPSHOT
 from .errors import TraceError
 from .metadata import ComparisonMetadata, RunMetadata
 from .plot import (
-    ComparisonRun,
-    PlotOptions,
-    describe,
+    PlotRun,
     plot_breakdown,
-    plot_breakdown_comparison,
     plot_latency_cdf,
     plot_latency_comparison,
     plot_moq_work,
-    plot_moq_work_comparison,
     plot_network,
     plot_object_timelines,
     plot_segments,
-    plot_segments_comparison,
     plot_stability,
 )
 
 
-def _options(metadata: RunMetadata) -> PlotOptions:
-    """Describe one run's context from its validated metadata."""
+def _describe(metadata: RunMetadata) -> str:
+    """Summarize validated workload metadata for a figure subtitle."""
 
-    affinity = metadata.affinity
-    return PlotOptions(
-        relay_cpu=affinity.cpu if affinity.mode == "single-core" else None,
-        subscribers=metadata.workload.subscribers,
-        object_size=metadata.workload.object_size,
-        fps=metadata.workload.fps,
-        protocol=metadata.protocol,
-    )
+    affinity, workload = metadata.affinity, metadata.workload
+    values = [
+        f"pinned CPU {affinity.cpu}" if affinity.mode == "single-core" and affinity.cpu is not None else "unpinned",
+        labels.subscribers(workload.subscribers),
+        f"{workload.object_size} bytes",
+    ]
+    if workload.fps is not None:
+        values.append(f"{workload.fps} fps")
+    if metadata.protocol is not None:
+        values.append(metadata.protocol)
+    return " | ".join(values)
 
 
 def _render_run(
@@ -48,17 +45,25 @@ def _render_run(
     connection: duckdb.DuckDBPyConnection,
     metadata: RunMetadata,
 ) -> None:
-    options = _options(metadata)
+    subtitle = _describe(metadata)
     plots = database.parent / "plots"
-    plot_latency_cdf(plots / "latency_cdf.png", options, connection)
-    plot_segments(plots / "segments.png", options, connection)
-    plot_breakdown(plots / "breakdown.png", options, connection)
-    plot_moq_work(plots / "moq_work.png", options, connection)
-    plot_stability(plots / "stability.png", options, connection)
+    plot_latency_cdf(plots / "latency_cdf.png", subtitle, connection)
+    runs = (PlotRun("", connection),)
+    plot_segments(plots / "segments.png", "Span segments", subtitle, runs)
+    plot_breakdown(plots / "breakdown.png", "Latency breakdown", subtitle, runs)
+    plot_moq_work(plots / "moq_work.png", "MoQ work", subtitle, runs)
+    plot_stability(plots / "stability.png", subtitle, connection)
     network = metadata.network
     if network is not None and (network.packets or network.qlog_connections):
-        plot_network(plots / "network.png", options, connection, network.packets, network.qlog_connections > 0)
-    plot_object_timelines(plots / "object_timeline.png", options, connection)
+        plot_network(
+            plots / "network.png",
+            subtitle,
+            connection,
+            metadata.workload,
+            network.packets,
+            network.qlog_connections > 0,
+        )
+    plot_object_timelines(plots / "object_timeline.png", subtitle, connection)
 
 
 def _render_comparison(
@@ -70,25 +75,27 @@ def _render_comparison(
     rows = connection.execute("SELECT run_id, label, metadata::VARCHAR FROM runs ORDER BY run_id").fetchall()
     if [row[0] for row in rows] != [entry.run_id for entry in metadata.runs]:
         raise TraceError("comparison run records do not match metadata")
-    runs = [ComparisonRun(label=label, connection=connection, run_id=run_id) for run_id, label, _ in rows]
+    runs = [PlotRun(label=label, connection=connection, run_id=run_id) for run_id, label, _ in rows]
     summaries = [RunMetadata.model_validate_json(encoded) for _, _, encoded in rows]
-    options = _options(summaries[0])
+    first = summaries[0]
     if dimension == "relay":
         if len({summary.protocol for summary in summaries}) > 1:
-            options = dataclasses.replace(options, protocol=None)
-        subtitle = describe(options)
+            first = first.model_copy(update={"protocol": None})
+        subtitle = _describe(first)
         prefix, title = "relays", "Object latency by relay"
     else:
         comparison = (
-            f"{options.object_size} bytes" if dimension == "subscribers" else labels.subscribers(options.subscribers)
+            f"{first.workload.object_size} bytes"
+            if dimension == "subscribers"
+            else labels.subscribers(first.workload.subscribers)
         )
-        subtitle = f"{describe(options)} | {comparison}"
+        subtitle = f"{_describe(first)} | {comparison}"
         prefix, title = "comparison", f"Object latency by {dimension}"
     plots = database.parent / "plots"
     plot_latency_comparison(plots / f"{prefix}_cdf.png", title, subtitle, runs, show_tail=dimension != "relay")
-    plot_segments_comparison(plots / f"{prefix}_segments.png", f"Span segments by {dimension}", subtitle, runs)
-    plot_breakdown_comparison(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
-    plot_moq_work_comparison(plots / f"{prefix}_moq_work.png", f"MoQ work by {dimension}", subtitle, runs)
+    plot_segments(plots / f"{prefix}_segments.png", f"Span segments by {dimension}", subtitle, runs)
+    plot_breakdown(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
+    plot_moq_work(plots / f"{prefix}_moq_work.png", f"MoQ work by {dimension}", subtitle, runs)
 
 
 def render(path: pathlib.Path) -> None:

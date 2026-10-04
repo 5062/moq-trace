@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 from .breakdown import _draw_phase_cdfs
-from .common import ComparisonRun, PlotOptions, _format_us, _metrics, _object_spans, _save, _values_us, describe
+from .common import PlotRun, _format_us, _metrics, _object_spans, _save, _values_us
 
 
 def _draw_distribution(
@@ -71,7 +71,7 @@ def _decorate_distribution(ecdf: Axes, ccdf: Axes | None, minimum_count: int) ->
 
 def plot_latency_cdf(
     path: pathlib.Path,
-    options: PlotOptions,
+    subtitle: str,
     connection: duckdb.DuckDBPyConnection,
 ) -> None:
     """Render per-copy object latency beside the distribution of each processing phase."""
@@ -87,14 +87,14 @@ def plot_latency_cdf(
     _decorate_distribution(ecdf, None, min(counts))
     ecdf.set_title("Object latency")
     _draw_phase_cdfs(phases, connection)
-    _save(fig, path, f"Latency CDF | {describe(options)}")
+    _save(fig, path, f"Latency CDF | {subtitle}")
 
 
 def plot_latency_comparison(
     path: pathlib.Path,
     title: str,
     subtitle: str,
-    runs: Sequence[ComparisonRun],
+    runs: Sequence[PlotRun],
     *,
     show_tail: bool = True,
 ) -> None:

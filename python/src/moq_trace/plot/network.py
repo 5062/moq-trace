@@ -8,7 +8,8 @@ import duckdb
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
-from .common import PlotOptions, _save, describe
+from ..metadata import Workload
+from .common import _save
 
 
 def _no_data(axis: Axes, message: str) -> None:
@@ -78,8 +79,9 @@ def _recovery_series(
 
 def plot_network(
     path: pathlib.Path,
-    options: PlotOptions,
+    subtitle: str,
     connection: duckdb.DuckDBPyConnection,
+    workload: Workload,
     packets: bool,
     qlog: bool,
 ) -> None:
@@ -94,11 +96,11 @@ def plot_network(
     fig, (throughput, rtt, loss, window) = plt.subplots(4, 1, figsize=(13, 12), sharex=True)
     if packets:
         # A trace analyzed by hand records no frame rate, so it gets no reference line.
-        payload_mbps = None if options.fps is None else options.fps * options.object_size * 8 / 1e6
+        payload_mbps = None if workload.fps is None else workload.fps * workload.object_size * 8 / 1e6
         for index, (label, direction, role_filter, fan_out) in enumerate(
             (
                 ("publisher to relay", "ingress", "role = 'publisher'", 1),
-                ("relay to subscribers", "egress", "role <> 'publisher'", options.subscribers),
+                ("relay to subscribers", "egress", "role <> 'publisher'", workload.subscribers),
             )
         ):
             # The capture stops partway through its last second, which would read
@@ -184,4 +186,4 @@ def plot_network(
             loss.legend(loc="upper right", fontsize=8)
     for axis in (throughput, rtt, loss, window):
         axis.grid(alpha=0.25)
-    _save(fig, path, f"Network during the run | {describe(options)}")
+    _save(fig, path, f"Network during the run | {subtitle}")

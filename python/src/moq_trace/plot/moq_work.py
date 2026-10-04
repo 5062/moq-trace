@@ -5,10 +5,9 @@ from __future__ import annotations
 import pathlib
 from collections.abc import Sequence
 
-import duckdb
 from matplotlib import pyplot as plt
 
-from .common import ComparisonRun, PlotOptions, _save, _values_us, describe
+from .common import PlotRun, _save, _values_us
 from .latency import _draw_distribution
 
 # The MoQ layer's own processing time, which compares stacks wherever they put
@@ -24,12 +23,16 @@ _WORK = (
 _POLICY = ("moq_write_after_receive", "First write start after last read")
 
 
-def _moq_work_figure(
+def plot_moq_work(
     path: pathlib.Path,
     title: str,
     subtitle: str,
-    runs: Sequence[ComparisonRun],
+    runs: Sequence[PlotRun],
 ) -> bool:
+    """Render MoQ processing cost and forwarding policy when any run has samples."""
+
+    if not runs:
+        raise ValueError("a moq work figure requires at least one run")
     panels = [
         (metric, label, [_values_us(run.connection, metric, run.run_id) for run in runs])
         for metric, label in (*_WORK, _POLICY)
@@ -57,33 +60,3 @@ def _moq_work_figure(
             axis.set_xlabel("µs")
     _save(fig, path, f"{title} | {subtitle}")
     return True
-
-
-def plot_moq_work(
-    path: pathlib.Path,
-    options: PlotOptions,
-    connection: duckdb.DuckDBPyConnection,
-) -> bool:
-    """Render one run's MoQ processing cost and forwarding policy.
-
-    Object phases are optional for a provider, so a run without any has nothing
-    to draw. The figure is then not written, and the result is False.
-    """
-
-    return _moq_work_figure(path, "MoQ work", describe(options), (ComparisonRun("", connection),))
-
-
-def plot_moq_work_comparison(
-    path: pathlib.Path,
-    title: str,
-    subtitle: str,
-    runs: Sequence[ComparisonRun],
-) -> bool:
-    """Overlay the MoQ processing cost and forwarding policy of several runs.
-
-    As for one run, the figure is written only when some run has samples to draw.
-    """
-
-    if len(runs) < 2:
-        raise ValueError("a MoQ work comparison requires at least two runs")
-    return _moq_work_figure(path, title, subtitle, runs)

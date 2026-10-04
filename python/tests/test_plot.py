@@ -12,23 +12,19 @@ sys.path.insert(0, str(SOURCE))
 
 from moq_trace.phases import Phase  # noqa: E402
 from moq_trace.plot import (  # noqa: E402
-    ComparisonRun,
-    PlotOptions,
+    PlotRun,
     plot_breakdown,
-    plot_breakdown_comparison,
     plot_latency_cdf,
     plot_latency_comparison,
     plot_moq_work,
-    plot_moq_work_comparison,
     plot_segments,
-    plot_segments_comparison,
     plot_stability,
 )
 from moq_trace.plot.breakdown import _row_summary  # noqa: E402
 from moq_trace.plot.common import _copy_rows  # noqa: E402
 from moq_trace.plot.segments import _segments  # noqa: E402
 
-OPTIONS = PlotOptions(None, 1, 1_024, 30, "test")
+SUBTITLE = "unpinned | 1 subscriber | 1024 bytes | 30 fps | test"
 
 
 def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
@@ -92,7 +88,10 @@ class RunPlotTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     for plot in (plot_latency_cdf, plot_segments, plot_breakdown, plot_moq_work, plot_stability):
                         output = pathlib.Path(directory) / f"{plot.__name__}.png"
-                        plot(output, OPTIONS, connection)
+                        if plot in (plot_latency_cdf, plot_stability):
+                            plot(output, SUBTITLE, connection)
+                        else:
+                            plot(output, "title", SUBTITLE, (PlotRun("", connection),))
                         self.assertGreater(output.stat().st_size, 0, (plot.__name__, packet_phases))
             finally:
                 connection.close()
@@ -129,31 +128,30 @@ class RunPlotTests(unittest.TestCase):
             connection.execute("DELETE FROM metrics.samples WHERE metric LIKE 'moq_%'")
             with tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "moq_work.png"
-                self.assertFalse(plot_moq_work(output, OPTIONS, connection))
+                self.assertFalse(plot_moq_work(output, "MoQ work", SUBTITLE, (PlotRun("", connection),)))
                 self.assertFalse(output.exists())
         finally:
             connection.close()
 
 
 class ComparisonPlotTests(unittest.TestCase):
-    """Comparison figures overlay runs and refuse a comparison of one."""
+    """Shared figures render several runs, while the latency comparison requires two."""
 
-    def test_comparisons_render_and_require_two_runs(self) -> None:
+    def test_comparisons_render_and_reject_insufficient_runs(self) -> None:
         connections = (_artifact(packet_phases=True), _artifact(packet_phases=False))
         try:
-            runs = tuple(ComparisonRun(f"run {index}", connection) for index, connection in enumerate(connections))
+            runs = tuple(PlotRun(f"run {index}", connection) for index, connection in enumerate(connections))
             with tempfile.TemporaryDirectory() as directory:
-                for plot in (
-                    plot_latency_comparison,
-                    plot_segments_comparison,
-                    plot_breakdown_comparison,
-                    plot_moq_work_comparison,
-                ):
+                for plot in (plot_latency_comparison, plot_segments, plot_breakdown, plot_moq_work):
                     output = pathlib.Path(directory) / f"{plot.__name__}.png"
                     plot(output, "title", "subtitle", runs)
                     self.assertGreater(output.stat().st_size, 0)
-                    with self.assertRaisesRegex(ValueError, "at least two runs"):
-                        plot(output, "title", "subtitle", runs[:1])
+                    if plot is plot_latency_comparison:
+                        with self.assertRaisesRegex(ValueError, "at least two runs"):
+                            plot(output, "title", "subtitle", runs[:1])
+                    else:
+                        with self.assertRaisesRegex(ValueError, "at least one run"):
+                            plot(output, "title", "subtitle", ())
         finally:
             for connection in connections:
                 connection.close()

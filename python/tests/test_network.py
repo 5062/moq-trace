@@ -16,7 +16,8 @@ sys.path.insert(0, str(SOURCE))
 
 from moq_trace import network, pcap  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
-from moq_trace.plot import PlotOptions, plot_network  # noqa: E402
+from moq_trace.metadata import Workload  # noqa: E402
+from moq_trace.plot import plot_network  # noqa: E402
 from moq_trace.plot.network import _recovery_series  # noqa: E402
 
 RELAY_PORT = 4443
@@ -263,10 +264,10 @@ class IngestTests(unittest.TestCase):
                     name: kind for name, kind, *_ in connection.execute("DESCRIBE network.recovery").fetchall()
                 }
                 output = root / "network.png"
-                plot_network(output, PlotOptions(None, 1, 1_200, 10, "test"), connection, True, True)
+                plot_network(output, "test", connection, Workload(subscribers=1, object_size=1_200, fps=10), True, True)
                 self.assertGreater(output.stat().st_size, 0)
                 # A trace analyzed by hand records no frame rate.
-                plot_network(output, PlotOptions(None, 1, 1_200, None, "test"), connection, True, True)
+                plot_network(output, "test", connection, Workload(subscribers=1, object_size=1_200), True, True)
             finally:
                 connection.close()
 

@@ -9,7 +9,6 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
 from .. import phases
-from .common import PlotOptions, describe
 
 
 def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
@@ -115,7 +114,7 @@ def _rebase(timeline: dict) -> None:
 
 def plot_object_timelines(
     path: pathlib.Path,
-    options: PlotOptions,
+    subtitle: str,
     connection: duckdb.DuckDBPyConnection,
 ) -> None:
     """Render aligned lifecycle timelines for representative objects."""
@@ -257,7 +256,7 @@ def plot_object_timelines(
         )
 
     axes[-1].set_xlabel("Elapsed from first RX QUIC packet start (µs)")
-    fig.suptitle(f"QUIC packet and MoQ object timelines | {describe(options)}", fontsize=14)
+    fig.suptitle(f"QUIC packet and MoQ object timelines | {subtitle}", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.965))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
