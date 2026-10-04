@@ -78,6 +78,15 @@ package:
     pkg-config --cflags --libs moq_trace | grep -q -- '-lmoq_trace_provider'
     pkg-config --cflags --libs moq_trace | grep -q -- '-lquic_trace_provider'
 
+# Install the C++ facade and providers into target/install, where C++ relay
+# builds such as the Google QUICHE fork find them through pkg-config. A relay
+# compiled against an older install emits an older event contract, so its
+# build runs this first.
+install:
+    cmake -S . -B target/install-build -DBUILD_TESTING=OFF
+    cmake --build target/install-build
+    cmake --install target/install-build --prefix target/install
+
 fix:
     cargo fmt --all
     ruff check --fix python

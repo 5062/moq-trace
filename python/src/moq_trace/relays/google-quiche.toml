@@ -22,6 +22,8 @@ relay_local_host = "127.0.0.1"
 # Run in the checkout on a remote relay host before each run. The traced build
 # lives in moq_trace/build.sh, which needs the checkout's devenv shell for Bazel,
 # Clang, and ICU, and the moq_trace CMake package installed under
-# ../moq-trace2/target/install; see MOQ_TRACE.md in the checkout.
-relay_build = "devenv shell -- moq_trace/build.sh"
+# ../moq-trace2/target/install; see MOQ_TRACE.md in the checkout. The toolkit is
+# installed from its checkout first, so the relay never compiles against an
+# install older than the event contract the analysis reads.
+relay_build = "(cd ../moq-trace2 && nix --extra-experimental-features 'nix-command flakes' develop --command just install) && devenv shell -- moq_trace/build.sh"
 transport_profile = "generic"
