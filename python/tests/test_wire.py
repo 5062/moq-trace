@@ -206,6 +206,59 @@ class WireTests(unittest.TestCase):
         for figure in ("latency_cdf.png", "segments.png"):
             self.assertGreater((self.directory / "plots" / figure).stat().st_size, 0)
 
+    def test_batch_boundaries_preserve_packets_frames_and_metrics(self) -> None:
+        """Flushing packet and frame buffers must preserve the published artifact."""
+
+        reference = self.analyze()
+        reference.rename(self.directory / "reference.duckdb")
+        sizes = []
+        load = wire._load
+
+        def record_load(connection, table, columns, rows):
+            if table in ("network.wire_packets", "network.wire_stream_frames"):
+                sizes.append(len(rows))
+            load(connection, table, columns, rows)
+
+        with mock.patch.object(wire, "_BATCH_ROWS", 1), mock.patch.object(wire, "_load", record_load):
+            batched = self.analyze()
+        self.assertTrue(sizes)
+        self.assertLessEqual(max(sizes), 1)
+        with (
+            open_artifact(self.directory / "reference.duckdb", "run") as before,
+            open_artifact(batched, "run") as after,
+        ):
+            tables = before.connection.execute(
+                "SELECT table_schema, table_name FROM information_schema.tables "
+                "WHERE table_schema IN ('network', 'metrics') ORDER BY ALL"
+            ).fetchall()
+            for schema, table in tables:
+                with self.subTest(table=f"{schema}.{table}"):
+                    query = f'SELECT * FROM "{schema}"."{table}" ORDER BY ALL'
+                    self.assertEqual(
+                        before.connection.execute(query).fetchall(), after.connection.execute(query).fetchall()
+                    )
+
+    def test_coverage_removes_temporary_relations_after_success_and_failure(self) -> None:
+        self.prepare()
+        connection = self.trace.connection
+
+        def assert_clean():
+            staged = connection.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_name "
+                "IN ('coverage_frame_source', 'coverage_targets', 'coverage_frames', 'coverage_completion')"
+            ).fetchall()
+            self.assertEqual(staged, [])
+
+        assert_clean()
+        # A missing frame fails inside coverage; even then its stages disappear.
+        connection.execute("DELETE FROM raw.quic_stream_frame")
+        connection.execute("DROP TABLE model.coverage")
+        connection.execute("DROP TABLE model.coverage_frames")
+        connection.execute("DROP TABLE model.coverage_packets")
+        with self.assertRaisesRegex(TraceError, "does not have complete packet coverage"):
+            coverage.resolve(connection)
+        assert_clean()
+
     def test_loopback_datagrams_are_read_from_their_arriving_copy(self) -> None:
         """Some kernels record a loopback datagram once, arriving, and others twice."""
 

@@ -13,7 +13,7 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import network  # noqa: E402
+from moq_trace import network, pcap, wire  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 from moq_trace.plot import PlotOptions, plot_network  # noqa: E402
 from moq_trace.plot.network import _recovery_series  # noqa: E402
@@ -81,6 +81,20 @@ class DatagramTests(unittest.TestCase):
                 (2_000, "egress", "[2001:db8::2]:60000", 900),
             ],
         )
+
+    def test_header_only_ipv4_and_ipv6_support_throughput_but_reject_decryption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.pcap"
+            for source, destination in (("10.0.0.2", "10.0.0.1"), ("2001:db8::2", "2001:db8::1")):
+                with self.subTest(source=source):
+                    _pcap(path, [(1000, _frame(ETHERNET, 0, source, destination, 50000, RELAY_PORT, 1200))])
+                    (datagram,) = pcap.read_datagrams(path, RELAY_PORT, ())
+                    self.assertEqual(datagram.local, (destination, RELAY_PORT))
+                    self.assertEqual(datagram.peer, (source, 50000))
+                    self.assertEqual(datagram.payload_bytes, 1200)
+                    self.assertEqual(list(network.read_datagrams(path, RELAY_PORT, ()))[0][3], 1200)
+                    with self.assertRaisesRegex(TraceError, "payload was not captured whole"):
+                        list(wire.read_capture(path, RELAY_PORT, ()))
 
     def test_pcap_timestamps_keep_nanosecond_and_microsecond_precision(self) -> None:
         frame = _frame(ETHERNET, 0, "10.0.0.2", "10.0.0.1", 50000, RELAY_PORT, 1200)

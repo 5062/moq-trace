@@ -71,6 +71,8 @@ target_include_directories(moq_trace_cpp INTERFACE
 target_compile_features(moq_trace_cpp INTERFACE cxx_std_17)
 
 if(BUILD_TESTING)
+  add_executable(facade_contract cpp/tests/facade_contract.cpp)
+  target_link_libraries(facade_contract PRIVATE moq_trace_cpp)
   add_executable(quic_trace_cpp_test cpp/tests/trace_test.cpp)
   target_link_libraries(quic_trace_cpp_test PRIVATE quic_trace_cpp)
   # The tests count clock reads at the shared C clock, which the facade calls.

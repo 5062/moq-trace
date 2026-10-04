@@ -3,45 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import dataclasses
 import logging
 import pathlib
 import re
-import shlex
 from collections.abc import Callable, Sequence
 
-from . import labels, network, tls
+from . import labels, tls
 from .analyze import run as analyze
 from .artifact import open_artifact
+from .capture import Capture, CaptureSession
 from .commands import PROTOCOL, commands
 from .comparison import write_comparison
 from .config import ComparisonConfig, ExperimentConfig
 from .errors import ExperimentError
-from .hosts import Clock, Host, Process, SshPool
-from .lttng import LttngSession
+from .hosts import Process, SshPool
 from .metadata import Affinity, Binaries, CommandSet, Window, Workload
-from .network import NetworkManifest
 from .placement import Placement
 from .render import render
-from .tcpdump import start_packet_capture
 
 _log = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass(frozen=True)
-class Capture:
-    """One CTF recording and the processes it holds.
-
-    `trace` is `None` when the run had tracing off and recorded nothing.
-    `network` is the manifest describing the packet capture and qlog taken
-    beside the trace.
-    """
-
-    trace: pathlib.Path | None
-    relay_pid: int
-    pids: tuple[int, ...]
-    network: pathlib.Path
 
 
 def _gauge(name: str, value: int) -> Callable[[str], bool]:
@@ -62,39 +42,6 @@ def _run_seconds(config: ExperimentConfig) -> float:
     return config.warmup_seconds + config.duration_seconds + config.cooldown_seconds
 
 
-def _key_log(role: str) -> str:
-    """The file a peer writes its TLS secrets to, named for its role."""
-
-    return f"{role}.keylog"
-
-
-async def _network_manifest(
-    config: ExperimentConfig, output: pathlib.Path, relay: Host, start: Clock, roles: Sequence[str]
-) -> pathlib.Path:
-    """Describe the run's network capture so analysis can place it on the trace clock.
-
-    The clocks and interfaces are the relay host's, because the capture and the
-    trace are both taken there. The offset is sampled again now that the run
-    has stopped, so analysis can reject a run whose realtime clock was stepped.
-    """
-
-    end = await relay.clock()
-    manifest = NetworkManifest(
-        relay_port=config.port,
-        realtime_offset_ns=start.offset_ns,
-        realtime_offset_end_ns=end.offset_ns,
-        realtime_offset_uncertainty_ns=max(start.uncertainty_ns, end.uncertainty_ns),
-        loopback_ifindexes=start.loopback_ifindexes,
-        pcap="relay.pcap" if config.capture_packets else None,
-        capture_log="tcpdump.log" if config.capture_packets else None,
-        key_logs=tuple(_key_log(role) for role in roles) if config.capture_packets else (),
-        qlog_dir="qlog" if config.qlog else None,
-    )
-    path = output / network.MANIFEST
-    path.write_text(manifest.model_dump_json(indent=2) + "\n")
-    return path
-
-
 async def _wait_for_workload(processes: Sequence[Process], seconds: float) -> None:
     """Keep the workload running for the full interval after readiness.
 
@@ -109,78 +56,23 @@ async def _wait_for_workload(processes: Sequence[Process], seconds: float) -> No
 
 
 async def _capture(config: ExperimentConfig, command: CommandSet, placement: Placement) -> Capture:
-    output = placement.output
-    relay_host = placement.relay
-    directory = placement.directory(relay_host)
-    async with contextlib.AsyncExitStack() as cleanup:
-        clock = await relay_host.clock()
-        directories = [directory, f"{directory}/qlog"] if config.qlog else [directory]
-        await relay_host.run(f"mkdir -p {shlex.join(directories)}")
-        for name in (tls.CERTIFICATE, tls.KEY):
-            if (output / name).exists():
-                await relay_host.put(output / name, f"{directory}/{name}")
-
-        session = None
-        if config.trace:
-            session = LttngSession(relay_host, f"{directory}/trace")
-            cleanup.push_async_callback(session.close)
-            await session.open()
-
-        tcpdump = None
-        if config.capture_packets:
-            _log.info("starting the packet capture on %s", relay_host.name)
-            capture_directory = placement.capture_directory()
-            await relay_host.run(f"mkdir -m 700 -p {shlex.quote(capture_directory)}")
-            tcpdump = await start_packet_capture(relay_host, capture_directory, config.port, output / "tcpdump.log")
-            cleanup.push_async_callback(tcpdump.close)
-
-        _log.info("starting the relay on %s", relay_host.name)
-        # A relay that supports qlog writes it here. The capture works without it.
-        relay = await relay_host.start(
-            "relay",
-            command.relay,
-            directory,
-            output / "relay.log",
-            env={network.QLOG_ENVIRONMENT: f"{directory}/qlog"} if config.qlog else None,
-        )
-        cleanup.push_async_callback(relay.close)
+    async with CaptureSession(config, placement) as capture:
+        _log.info("starting the relay on %s", placement.relay.name)
+        relay = await capture.start("relay", command.relay)
         if config.relay_ready_log:
             marker = config.relay_ready_log
             await relay.wait_for_line(lambda line: marker in line, repr(marker), 15)
         else:
             await relay.hold(config.relay_startup_seconds)
-        if session is not None:
-            _log.info("waiting for the relay's trace providers, then starting the trace")
-            await session.wait_for_provider(relay.pid)
-            await session.start([relay.pid])
-        tracked = [relay.pid]
-
-        async def start_peer(role: str) -> Process:
-            host = placement.host(role)
-            # Every connection the relay serves ends at a peer, so the peers'
-            # TLS secrets decrypt the whole capture without the relay's help.
-            env = {"SSLKEYLOGFILE": f"{placement.directory(host)}/{_key_log(role)}"} if config.capture_packets else None
-            process = await host.start(
-                role, getattr(command, role), placement.directory(host), output / f"{role}.log", env=env
-            )
-            cleanup.push_async_callback(process.close)
-            # A peer is recorded only on the relay's own host, because the session
-            # records one host and every relay metric stays on that host's clock.
-            # It is tracked on spawn rather than after readiness, so the
-            # connection setup the lifecycle metrics start from is recorded.
-            if host is relay_host:
-                if session is not None:
-                    await session.track(process.pid)
-                tracked.append(process.pid)
-            return process
+        await capture.begin(relay.pid)
 
         _log.info("starting %d subscriber(s) on %s", config.subscribers, placement.subscriber.name)
-        subscriber = await start_peer("subscriber")
+        subscriber = await capture.start("subscriber", command.subscriber)
         connected = _gauge("connections", config.subscribers)
         await subscriber.wait_for_line(connected, "subscriber connections", 20)
 
         _log.info("subscribers connected; starting the publisher on %s", placement.publisher.name)
-        publisher = await start_peer("publisher")
+        publisher = await capture.start("publisher", command.publisher)
         await publisher.wait_for_line(_gauge("connections", 1), "publisher connection", 15)
         subscribed = _gauge("subscriptions", config.subscribers)
         await subscriber.wait_for_line(
@@ -199,28 +91,7 @@ async def _capture(config: ExperimentConfig, command: CommandSet, placement: Pla
         await subscriber.stop(True)
         await publisher.stop(True)
         await relay.stop(config.relay_graceful_stop)
-        if tcpdump is not None:
-            await tcpdump.stop(True)
-        if session is not None:
-            await session.finish()
-
-        recorded = [name for name, present in (("trace", session is not None), ("qlog", config.qlog)) if present]
-        if recorded:
-            await relay_host.fetch(directory, recorded, output)
-        roles = ("subscriber", "publisher")
-        if tcpdump is not None:
-            await relay_host.fetch(capture_directory, ["relay.pcap"], output)
-            await relay_host.run(f"rm -rf {shlex.quote(capture_directory)}")
-            for role in roles:
-                host = placement.host(role)
-                await host.fetch(placement.directory(host), [_key_log(role)], output)
-        manifest = await _network_manifest(config, output, relay_host, clock, roles)
-        return Capture(
-            trace=None if session is None else output / "trace",
-            relay_pid=relay.pid,
-            pids=tuple(tracked),
-            network=manifest,
-        )
+        return await capture.finish(relay.pid)
 
 
 async def _binaries(placement: Placement) -> Binaries:

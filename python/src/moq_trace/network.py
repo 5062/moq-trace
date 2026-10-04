@@ -22,14 +22,12 @@ import json
 import pathlib
 import re
 from collections.abc import Iterator
-from decimal import Decimal
 
-import dpkt
 import duckdb
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import sql
+from . import pcap, sql
 from .errors import TraceError
 from .metadata import NetworkCapabilities
 
@@ -40,7 +38,6 @@ MANIFEST = "network.json"
 # and several other QUIC stacks read the same name.
 QLOG_ENVIRONMENT = "QLOGDIR"
 
-_PACKET_OUTGOING = 4
 _MONOTONIC_START = re.compile(r"monotonic_start_ns=(\d+)")
 # The qlog specification gives RTT in milliseconds, but some producers write
 # seconds; Quinn 0.11, for one, serializes `Duration::as_secs_f32`. A producer
@@ -84,47 +81,7 @@ def read_manifest(path: pathlib.Path) -> NetworkManifest:
         raise TraceError(f"failed to read network manifest {path}: {error}") from error
 
 
-class _CheckedPcapStream:
-    """Reject partial reads that dpkt's pcap iterator otherwise accepts.
-
-    dpkt reads one file header, then alternating record headers and record data.
-    Only an empty read for the next record header is a clean end of file.
-    """
-
-    def __init__(self, stream, path: pathlib.Path) -> None:
-        self.stream = stream
-        self.path = path
-        self.part = "file header"
-
-    def read(self, size: int) -> bytes:
-        offset = self.stream.tell()
-        data = self.stream.read(size)
-        if self.part == "record header" and not data:
-            return data
-        if len(data) != size:
-            if self.part == "file header":
-                raise TraceError(f"{self.path} is not a pcap file")
-            raise TraceError(f"{self.path} has a truncated pcap {self.part} at byte {offset}")
-        self.part = "record" if self.part == "record header" else "record header"
-        return data
-
-
-def _pcap_records(path: pathlib.Path) -> Iterator[tuple[int, bytes]]:
-    """Yield `(realtime_ns, frame)` from a checked classic pcap stream."""
-
-    with path.open("rb") as stream:
-        try:
-            reader = dpkt.pcap.Reader(_CheckedPcapStream(stream, path))
-        except ValueError as error:
-            raise TraceError(f"{path} is not a classic pcap file; capture with tcpdump -w") from error
-        if reader.datalink() & 0x0FFFFFFF != dpkt.pcap.DLT_LINUX_SLL2:
-            raise TraceError(f"{path} has link type {reader.datalink()}; capture with tcpdump -i any -y LINUX_SLL2")
-        for timestamp, frame in reader:
-            # dpkt returns Decimal for nanosecond captures and float for microsecond captures.
-            yield int(Decimal(str(timestamp)) * 1_000_000_000), frame
-
-
-def _endpoint(address: bytes, port: int) -> str:
+def _endpoint(address: str, port: int) -> str:
     """Format an address and port, bracketing IPv6 so the port stays unambiguous."""
 
     parsed = ipaddress.ip_address(address)
@@ -143,23 +100,13 @@ def read_datagrams(
     truncated to its headers still counts every byte.
     """
 
-    for realtime_ns, frame in _pcap_records(path):
-        try:
-            packet = dpkt.sll2.SLL2(frame)
-        except dpkt.UnpackError:
-            continue
-        if packet.intindex in loopback_ifindexes and packet.type == _PACKET_OUTGOING:
-            continue
-        ip = packet.data
-        if not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)) or not isinstance(ip.data, dpkt.udp.UDP):
-            continue
-        udp = ip.data
-        if udp.ulen < 8:
-            continue
-        if udp.sport == relay_port:
-            yield realtime_ns, "egress", _endpoint(ip.dst, udp.dport), udp.ulen - 8
-        elif udp.dport == relay_port:
-            yield realtime_ns, "ingress", _endpoint(ip.src, udp.sport), udp.ulen - 8
+    for datagram in pcap.read_datagrams(path, relay_port, loopback_ifindexes):
+        yield (
+            datagram.realtime_ns,
+            "ingress" if datagram.from_peer else "egress",
+            _endpoint(*datagram.peer),
+            datagram.payload_bytes,
+        )
 
 
 def _qlog_records(path: pathlib.Path) -> Iterator[dict]:

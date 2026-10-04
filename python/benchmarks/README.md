@@ -19,7 +19,9 @@ window selection, coverage (`resolve`), samples, metrics, and timelines. The tot
 analysis time also includes setup, remaining checks, metadata, and checkpointing.
 Rendering is timed separately. Peak RSS is the worker's lifetime high-water mark
 in KiB on Linux, including rendering when requested. Database size is recorded
-after the writer closes. Network sidecars are not ingested by this benchmark.
+after the writer closes. Pass `--network path/to/network.json` to include packet
+capture decryption and qlog ingestion. The manifest resolves its sidecars from
+its own directory. Network ingestion is timed separately as `_ingest_network`.
 
 Run on an otherwise idle machine, alternate before/after runs when differences
 are small, and compare the databases as unordered multisets before accepting an

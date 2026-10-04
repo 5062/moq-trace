@@ -25,19 +25,19 @@ import pathlib
 import re
 from collections.abc import Iterator
 
-import dpkt
 import duckdb
 import pyarrow as pa
 
-from . import coverage, quic, sql
+from . import coverage, pcap, quic, sql
 from .errors import TraceError
-from .network import NetworkManifest, _pcap_records
-
-_PACKET_OUTGOING = 4
+from .network import NetworkManifest
 
 # How far two samples of the realtime offset may differ, beyond their own
 # uncertainty, before the realtime clock counts as stepped.
 _CLOCK_STEP_NS = 1_000
+
+# Bound both packet and frame rows retained between Arrow inserts.
+_BATCH_ROWS = 8192
 
 _DROPPED = re.compile(r"(\d+) packets? dropped by (kernel|interface)")
 
@@ -81,32 +81,13 @@ def read_capture(
     captured whole is an error.
     """
 
-    for realtime_ns, frame in _pcap_records(path):
-        try:
-            packet = dpkt.sll2.SLL2(frame)
-        except dpkt.UnpackError:
-            continue
-        if packet.intindex in loopback_ifindexes and packet.type == _PACKET_OUTGOING:
-            continue
-        ip = packet.data
-        if not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)) or not isinstance(ip.data, dpkt.udp.UDP):
-            continue
-        udp = ip.data
-        if udp.sport == relay_port:
-            from_peer, local, peer = False, (ip.src, udp.sport), (ip.dst, udp.dport)
-        elif udp.dport == relay_port:
-            from_peer, local, peer = True, (ip.dst, udp.dport), (ip.src, udp.sport)
-        else:
-            continue
-        payload = bytes(udp.data)
-        if len(payload) != udp.ulen - 8:
-            raise TraceError(f"{path} holds a datagram whose payload was not captured whole; capture with -s 0")
+    for datagram in pcap.read_datagrams(path, relay_port, loopback_ifindexes):
         yield (
-            realtime_ns,
-            from_peer,
-            (str(ipaddress.ip_address(local[0])), local[1]),
-            (str(ipaddress.ip_address(peer[0])), peer[1]),
-            payload,
+            datagram.realtime_ns,
+            datagram.from_peer,
+            datagram.local,
+            datagram.peer,
+            datagram.complete_payload(path),
         )
 
 
@@ -210,11 +191,13 @@ def ingest(
 
     packets = []
     frames = []
+    packet_count = 0
     captured = read_capture(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes)
     for realtime_ns, from_peer, local, peer, payload in captured:
         monotonic_ns = realtime_ns - manifest.realtime_offset_ns
         for packet in decryptor.datagram(monotonic_ns, local, peer, from_peer, payload):
-            packet_id = len(packets)
+            packet_id = packet_count
+            packet_count += 1
             state = decryptor.connections[packet.connection]
             received = (packet.sender == quic.CLIENT) == state.client_is_peer
             packets.append(
@@ -231,10 +214,14 @@ def ingest(
                     packet.index,
                 )
             )
-            frames.extend(
-                (packet_id, frame.stream_id, frame.offset_start, frame.offset_end, frame.fin)
-                for frame in packet.stream_frames
-            )
+            for frame in packet.stream_frames:
+                frames.append((packet_id, frame.stream_id, frame.offset_start, frame.offset_end, frame.fin))
+                if len(frames) >= _BATCH_ROWS:
+                    _load(connection, "network.wire_stream_frames", _FRAME_COLUMNS, frames)
+                    frames.clear()
+            if len(packets) >= _BATCH_ROWS:
+                _load(connection, "network.wire_packets", _PACKET_COLUMNS, packets)
+                packets.clear()
     connections = [
         (
             state.index,
@@ -254,12 +241,11 @@ def ingest(
     _join_connections(connection, decryptor.connections)
     connection.execute(sql.read("wire-join"))
     _check(connection, manifest)
-    connection.execute(sql.read("wire-coverage-source"))
     coverage.resolve_wire(connection)
     _check_coverage(connection)
     for stage in ("wire-object-samples-stage", "wire-packet-samples-stage"):
         connection.execute(sql.read(stage), {"origin": origin_ns})
-    return len(packets)
+    return packet_count
 
 
 def _join_connections(connection: duckdb.DuckDBPyConnection, states: list[quic.Connection]) -> None:

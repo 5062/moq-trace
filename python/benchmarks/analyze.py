@@ -45,6 +45,7 @@ def measure(args: argparse.Namespace) -> dict:
         (analyze, "_select_window"),
         (coverage, "resolve"),
         (analyze, "_derive_samples"),
+        (analyze, "_ingest_network"),
         (analyze, "_define_metrics"),
         (analyze, "_define_timelines"),
     )
@@ -59,6 +60,7 @@ def measure(args: argparse.Namespace) -> dict:
             window=metadata.window,
             pid=metadata.processes.analyzed_pid,
             transport_profile=metadata.transport_profile,
+            network=args.network,
         )
     timings["analysis"] = time.perf_counter() - started
     if args.render:
@@ -77,6 +79,7 @@ def main() -> None:
     parser.add_argument("output", type=pathlib.Path)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--render", action="store_true")
+    parser.add_argument("--network", type=pathlib.Path, help="network manifest and sidecars to ingest")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.repeat < 1:
@@ -97,12 +100,15 @@ def main() -> None:
         ]
         if args.render:
             command.append("--render")
+        if args.network is not None:
+            command.extend(["--network", str(args.network.resolve())])
         result = subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True)
         runs.append(json.loads(result.stdout))
         print(json.dumps(runs[-1]), flush=True)
     summary = {
         "trace": str(args.trace.resolve()),
         "reference": str(args.reference.resolve()),
+        "network": None if args.network is None else str(args.network.resolve()),
         "versions": {"python": sys.version, "duckdb": duckdb.__version__, "pyarrow": pyarrow.__version__},
         "runs": runs,
         "median_seconds": {

@@ -322,5 +322,9 @@ kind of the artifact it was found in.
 nix develop --command just check
 ```
 
+The checks also validate provider declarations against the analyzer and compare
+real Rust and C++ captures of equivalent lifecycles, including optional metadata,
+explicit timestamps, enum values, and abandonment.
+
 For repeatable analysis timings, memory use, and artifact sizes from retained
 captures, see the [analysis benchmark](python/benchmarks/README.md).

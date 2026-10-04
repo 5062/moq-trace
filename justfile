@@ -5,9 +5,11 @@ default: check
 check: tracepoints
     cargo test -p moq-trace --all-features
     cargo test -p quic-trace --all-features
-    PYTHONPATH=python/src${PYTHONPATH:+:$PYTHONPATH} python -m unittest discover -s python/tests -v
+    cargo build --example facade_contract -p moq-trace --all-features
     cmake -S . -B target/cmake --fresh -DBUILD_TESTING=ON
     cmake --build target/cmake
+    PYTHONPATH=python/src${PYTHONPATH:+:$PYTHONPATH} python python/checks/facade_contract.py
+    PYTHONPATH=python/src${PYTHONPATH:+:$PYTHONPATH} python -m unittest discover -s python/tests -v
     ctest --test-dir target/cmake --output-on-failure
     just package
     ruff check python

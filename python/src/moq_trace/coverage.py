@@ -113,24 +113,32 @@ def _resolve_targets(connection: duckdb.DuckDBPyConnection, tables: str = "model
     # Every family shares one layout: `<tables>`, `<tables>_frames`, and `<tables>_packets`.
     for name in ("coverage-schema", "coverage-populate"):
         connection.execute(sql.read(name).replace("model.coverage", tables))
-    for table in ("coverage_completion", "coverage_frames", "coverage_targets"):
-        connection.execute(f"DROP TABLE {table}")
+
+
+def _resolve(connection: duckdb.DuckDBPyConnection, source: str, tables: str) -> None:
+    """Own the temporary source and stages for one coverage calculation."""
+
+    try:
+        connection.execute(sql.read(source))
+        connection.execute(sql.read("coverage-targets-stage"))
+        _resolve_targets(connection, tables)
+    finally:
+        for table in ("coverage_completion", "coverage_frames", "coverage_targets"):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        connection.execute("DROP VIEW IF EXISTS coverage_frame_source")
 
 
 def resolve(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize the trace's packet coverage for every selected object lifecycle."""
+    """Materialize packet coverage for the trace model's selected object lifecycles."""
 
-    connection.execute(sql.read("coverage-trace-source"))
-    connection.execute(sql.read("coverage-targets-stage"))
-    _resolve_targets(connection)
+    _resolve(connection, "coverage-trace-source", "model.coverage")
 
 
 def resolve_wire(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize the packet capture's coverage of the same objects as `network.wire_coverage`.
+    """Materialize coverage from joined wire packets for the same selected objects.
 
-    `coverage_frame_source` must already describe the decrypted STREAM frames,
-    with each frame's packet ID being its `packet_id` in `network.wire_packets`.
+    Reads the trace model and ``network.wire_packets`` and
+    ``network.wire_stream_frames``. Source adaptation and staging are internal.
     """
 
-    connection.execute(sql.read("coverage-targets-stage"))
-    _resolve_targets(connection, "network.wire_coverage")
+    _resolve(connection, "wire-coverage-source", "network.wire_coverage")

@@ -20,8 +20,8 @@ sys.path.insert(0, str(SOURCE))
 
 from support import run_metadata  # noqa: E402
 
+from moq_trace import capture, experiment, hosts, lttng, network, placement, tcpdump, tls  # noqa: E402
 from moq_trace import commands as commands_module  # noqa: E402
-from moq_trace import experiment, hosts, lttng, network, placement, tcpdump, tls  # noqa: E402
 from moq_trace.artifact import write_metadata  # noqa: E402
 from moq_trace.commands import commands  # noqa: E402
 from moq_trace.config import ComparisonConfig, ExperimentConfig, HostConfig, Hosts  # noqa: E402
@@ -576,7 +576,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((config.output / f"{role}.log").exists())
 
     async def test_a_traced_capture_tracks_local_peers(self) -> None:
-        with mock.patch.object(experiment, "LttngSession", autospec=True) as session_class:
+        with mock.patch.object(capture, "LttngSession", autospec=True) as session_class:
             _, result = await self._capture(self._config())
 
         session = session_class.return_value
@@ -584,6 +584,30 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         session.start.assert_awaited_once_with([result.relay_pid])
         self.assertEqual(session.track.await_args_list, [mock.call(result.pids[1]), mock.call(result.pids[2])])
         session.finish.assert_awaited_once()
+
+    async def test_a_failed_recording_open_closes_the_partial_session(self) -> None:
+        with mock.patch.object(capture, "LttngSession", autospec=True) as session_class:
+            session = session_class.return_value
+            session.open.side_effect = CaptureError("channel creation failed")
+            with self.assertRaisesRegex(CaptureError, "channel creation failed"):
+                await self._capture(self._config())
+            session.close.assert_awaited_once()
+            session.start.assert_not_awaited()
+
+    async def test_workload_failure_closes_recorders_without_publishing_a_manifest(self) -> None:
+        config = self._config(capture_packets=True, duration_seconds=5)
+        packet_capture = mock.Mock(stop=mock.AsyncMock(), close=mock.AsyncMock())
+        with (
+            mock.patch.object(capture, "LttngSession", autospec=True) as session_class,
+            mock.patch.object(capture, "start_packet_capture", mock.AsyncMock(return_value=packet_capture)),
+        ):
+            publisher = ("sh", "-c", "echo connections=1; sleep 0.1; exit 0")
+            with self.assertRaisesRegex(ExperimentError, "publisher exited"):
+                await self._capture(config, _command(publisher=publisher))
+            session_class.return_value.close.assert_awaited_once()
+            session_class.return_value.finish.assert_not_awaited()
+            packet_capture.close.assert_awaited_once()
+            self.assertFalse((config.output / network.MANIFEST).exists())
 
     async def test_a_remote_subscriber_is_not_recorded(self) -> None:
         config = self._config(trace=False, hosts=Hosts(subscriber=self._remote("peer")), relay_url="https://r:4443")
@@ -595,7 +619,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_remote_relay_is_traced_on_its_host_and_copied_back(self) -> None:
         config = self._config(hosts=Hosts(relay=self._remote("relay", binary="/opt/relay")), qlog=True)
-        with mock.patch.object(experiment, "LttngSession", autospec=True) as session_class:
+        with mock.patch.object(capture, "LttngSession", autospec=True) as session_class:
             relay = ("sh", "-c", "trap 'exit 0' INT; echo \"$QLOGDIR\"; echo listening; while :; do sleep 0.02; done")
             where, result = await self._capture(config, _command(relay=relay))
 
@@ -619,7 +643,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             return tcpdump_process
 
         config = self._config(trace=False, capture_packets=True)
-        with mock.patch.object(experiment, "start_packet_capture", side_effect=start) as start_capture:
+        with mock.patch.object(capture, "start_packet_capture", side_effect=start) as start_capture:
             where, _ = await self._capture(config)
 
         host, directory, port, _log = start_capture.call_args.args
@@ -646,7 +670,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         # Each peer reports where it was told to write its key log.
         subscriber = ("sh", "-c", "echo keylog=$SSLKEYLOGFILE; " + " ".join(_command().subscriber[2:]))
         publisher = ("sh", "-c", "echo keylog=$SSLKEYLOGFILE; " + " ".join(_command().publisher[2:]))
-        with mock.patch.object(experiment, "start_packet_capture", side_effect=start):
+        with mock.patch.object(capture, "start_packet_capture", side_effect=start):
             where, _ = await self._capture(config, _command(subscriber=subscriber, publisher=publisher))
 
         remote = where.directory(where.subscriber)
