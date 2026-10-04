@@ -136,6 +136,12 @@ class SqlAnalysisTests(unittest.TestCase):
             outcome="success",
             pid=pid,
         )
+        # Socket-bounded lifecycles: an RX packet starts at its read and a TX
+        # packet ends at its send, each marked by its queue phase.
+        if direction == "rx":
+            self.phase(trace_id, "read_queue", 90_000, 100_000, pid)
+        else:
+            self.phase(trace_id, "send_queue", 300_000, 310_000, pid)
 
     def phase(self, trace_id: int, phase: str, start: int, end: int, pid: int = 0) -> None:
         for index, (edge, timestamp, outcome) in enumerate((("start", start, None), ("done", end, "success"))):
@@ -144,7 +150,15 @@ class SqlAnalysisTests(unittest.TestCase):
                 ctf_timestamp_ns=trace_id * 1_000 + index,
                 timestamp_ns=timestamp,
                 trace_id=trace_id,
-                span_id=trace_id * 100 + {"routing": 1, "scheduling": 2, "frame_process": 3, "application": 4}[phase],
+                span_id=trace_id * 100
+                + {
+                    "routing": 1,
+                    "scheduling": 2,
+                    "frame_process": 3,
+                    "application": 4,
+                    "read_queue": 5,
+                    "send_queue": 6,
+                }[phase],
                 phase=phase,
                 edge=edge,
                 outcome=outcome,
@@ -333,6 +347,10 @@ class SqlAnalysisTests(unittest.TestCase):
                WHERE trace_id = 5"""
         )
         self.connection.execute("UPDATE raw.quic_packet_start SET timestamp_ns = 40000 WHERE trace_id = 5")
+        self.connection.execute(
+            "UPDATE raw.quic_packet_phase SET timestamp_ns = 40000 WHERE trace_id = 5 AND phase = 'read_queue' "
+            "AND edge = 'start'"
+        )
         self.prepare_model()
         origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
 
@@ -341,8 +359,8 @@ class SqlAnalysisTests(unittest.TestCase):
 
         self.assertEqual(
             self.connection.execute(
-                """SELECT first_start_ns, packet_ids FROM (SELECT c.object_trace_id AS trace_id, c.first_start_ns,
-                c.first_end_ns, c.complete_end_ns, list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids
+                """SELECT origin_ns, packet_ids FROM (SELECT c.object_trace_id AS trace_id, c.origin_ns,
+                c.first_ns, c.complete_ns, list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids
                 FROM model.coverage c JOIN model.coverage_packets p USING(process_id, object_trace_id) GROUP
                 BY ALL) WHERE trace_id = 1"""
             ).fetchone(),
@@ -474,12 +492,7 @@ class SqlAnalysisTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "application packet phases overlap other packet phases"):
             self.prepare_model()
 
-    def test_cut_through_forwarding_has_no_post_ingress_tail(self) -> None:
-        self.object_start(1, "rx", 1)
-        self.object_start(2, "tx", 2)
-        self.packet(3, "rx", 1)
-        self.packet(4, "tx", 2)
-        self.connection.execute("UPDATE raw.quic_packet_end SET timestamp_ns = 350000 WHERE trace_id = 3")
+    def _quic_object_metric(self, metric: str) -> int:
         self.prepare_model()
         origin = _select_window(
             self.connection,
@@ -489,13 +502,139 @@ class SqlAnalysisTests(unittest.TestCase):
             cooldown_seconds=0,
         )
         coverage.resolve(self.connection)
-
         _derive_samples(self.connection, origin)
-
-        tail = self.connection.execute(
-            "SELECT latency_ns FROM quic_object_samples WHERE metric = 'quic_tail_gap'"
+        return self.connection.execute(
+            "SELECT latency_ns FROM quic_object_samples WHERE metric = ?", [metric]
         ).fetchone()[0]
-        self.assertEqual(tail, 0)
+
+    def test_cut_through_tail_gap_starts_at_buffer_acceptance(self) -> None:
+        """A stack that sends inside inbound packet processing ends that packet after its sends.
+
+        The inbound object completes when its bytes enter the receive buffer, so
+        the tail gap stays positive although the packet itself ends later.
+        """
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute("UPDATE raw.quic_packet_end SET timestamp_ns = 350000 WHERE trace_id = 3")
+
+        self.assertEqual(self._quic_object_metric("quic_tail_gap"), 310_000 - 190_000)
+
+    def test_a_negative_tail_gap_is_rejected_rather_than_clamped(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute("UPDATE raw.quic_stream_frame SET timestamp_ns = 320000 WHERE trace_id = 3")
+
+        self.assertLess(self._quic_object_metric("quic_tail_gap"), 0)
+        with self.assertRaisesRegex(TraceError, "QUIC object metrics are negative"):
+            _define_metrics(self.connection)
+
+    def test_rx_origin_is_the_earliest_read_not_the_first_accepted(self) -> None:
+        """Packet A is read first but accepted last; the object starts at A's read."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(5, "rx", 1)
+        self.packet(4, "tx", 2)
+        # Packet 3 carries [0, 8), read at 90 µs and accepted at 200 µs; packet 5
+        # carries [8, 16), read at 95 µs and accepted at 150 µs.
+        self.connection.execute(
+            "UPDATE raw.quic_stream_frame SET offset_end = 8, timestamp_ns = 200000 WHERE trace_id = 3"
+        )
+        self.connection.execute(
+            "UPDATE raw.quic_stream_frame SET offset_start = 8, timestamp_ns = 150000 WHERE trace_id = 5"
+        )
+        self.connection.execute("UPDATE raw.quic_packet_start SET timestamp_ns = 95000 WHERE trace_id = 5")
+        self.connection.execute(
+            "UPDATE raw.quic_packet_phase SET timestamp_ns = 95000 "
+            "WHERE trace_id = 5 AND phase = 'read_queue' AND edge = 'start'"
+        )
+
+        self.assertEqual(self._quic_object_metric("quic_full_span"), 310_000 - 90_000)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT first_packet_trace_id, origin_ns, first_ns, complete_ns "
+                "FROM model.coverage WHERE object_trace_id = 1"
+            ).fetchone(),
+            (5, 90_000, 150_000, 200_000),
+        )
+
+    def test_tx_completion_follows_send_order_not_encoding_order(self) -> None:
+        """A packet encoded first but sent last completes the copy."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.packet(6, "tx", 2)
+        # Packet 4 is encoded first and carries [0, 8) but waits until 400 µs to
+        # be sent; packet 6 carries [8, 16) and is sent at 310 µs.
+        self.connection.execute(
+            "UPDATE raw.quic_stream_frame SET offset_end = 8, timestamp_ns = 230000 WHERE trace_id = 4"
+        )
+        self.connection.execute(
+            "UPDATE raw.quic_stream_frame SET offset_start = 8, timestamp_ns = 250000 WHERE trace_id = 6"
+        )
+        self.connection.execute("UPDATE raw.quic_packet_end SET timestamp_ns = 400000 WHERE trace_id = 4")
+        self.connection.execute(
+            "UPDATE raw.quic_packet_phase SET timestamp_ns = 400000 "
+            "WHERE trace_id = 4 AND phase = 'send_queue' AND edge = 'done'"
+        )
+
+        self.assertEqual(self._quic_object_metric("quic_full_span"), 400_000 - 90_000)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT first_packet_trace_id, complete_packet_trace_id, first_ns, complete_ns "
+                "FROM model.coverage WHERE object_trace_id = 2"
+            ).fetchone(),
+            (6, 4, 310_000, 400_000),
+        )
+
+    def test_dropped_frames_contribute_no_coverage(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute("UPDATE raw.quic_stream_frame SET outcome = 'dropped' WHERE trace_id = 3")
+        self.prepare_model()
+        _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+
+        with self.assertRaisesRegex(TraceError, "object trace 1 does not have complete packet coverage"):
+            coverage.resolve(self.connection)
+
+    def test_rejects_a_successful_packet_without_its_queue_phase(self) -> None:
+        for direction, trace_id, phase, defect in (
+            ("rx", 3, "read_queue", "successful RX packets without one read_queue phase"),
+            ("tx", 4, "send_queue", "successful TX packets without one send_queue phase"),
+        ):
+            with self.subTest(direction=direction):
+                self.tearDown()
+                self.setUp()
+                self.packet(trace_id, direction, 1)
+                self.connection.execute(f"DELETE FROM raw.quic_packet_phase WHERE phase = '{phase}'")
+                with self.assertRaisesRegex(TraceError, defect):
+                    self.prepare_model()
+
+    def test_rejects_queue_phases_away_from_the_socket_boundary(self) -> None:
+        for direction, trace_id, phase, edge, defect in (
+            ("rx", 3, "read_queue", "start", "successful RX packets without one read_queue phase"),
+            ("tx", 4, "send_queue", "done", "successful TX packets without one send_queue phase"),
+        ):
+            with self.subTest(direction=direction):
+                self.tearDown()
+                self.setUp()
+                self.packet(trace_id, direction, 1)
+                self.connection.execute(
+                    f"UPDATE raw.quic_packet_phase SET timestamp_ns = timestamp_ns + {1 if edge == 'start' else -1} "
+                    f"WHERE phase = '{phase}' AND edge = '{edge}'"
+                )
+                with self.assertRaisesRegex(TraceError, defect):
+                    self.prepare_model()
 
     def batches(self, input_path, expected_pids=None, batch_size=65_536):
         """Yield the fixture tables where ingest would read batches from CTF."""
@@ -534,12 +673,15 @@ class SqlAnalysisTests(unittest.TestCase):
                 self.assertEqual(artifact.metadata.counts.correlated_objects, 1)
                 self.assertEqual(artifact.metadata.window.warmup_seconds, 0)
                 self.assertEqual(artifact.metadata.transport_profile, "generic")
-                self.assertEqual(artifact.metadata.transport_capabilities.packet_phases, ("routing", "scheduling"))
+                self.assertEqual(
+                    artifact.metadata.transport_capabilities.packet_phases,
+                    ("read_queue", "routing", "scheduling", "send_queue"),
+                )
                 self.assertEqual(artifact.metadata.processes.analyzed_pid, 0)
                 self.assertEqual(artifact.metadata.processes.captured_pids, (0,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM metrics.statistics").fetchone()[0],
-                    10,
+                    12,
                 )
 
     def test_generic_profile_accepts_transport_without_quinn_phases(self) -> None:
@@ -563,7 +705,7 @@ class SqlAnalysisTests(unittest.TestCase):
 
             with open_artifact(output, "run") as artifact:
                 self.assertEqual(artifact.metadata.transport_profile, "generic")
-                self.assertEqual(artifact.metadata.transport_capabilities.packet_phases, ())
+                self.assertEqual(artifact.metadata.transport_capabilities.packet_phases, ("read_queue", "send_queue"))
                 self.assertEqual(
                     artifact.connection.execute(
                         "SELECT count(*) FROM metrics.statistics WHERE metric = 'rx_packet_span'"
@@ -624,7 +766,9 @@ class SqlAnalysisTests(unittest.TestCase):
         self.packet(14, "tx", 12)
         self.phase(13, "routing", 110_000, 120_000)
         self.phase(13, "scheduling", 120_000, 130_000)
-        for name in ctf.SCHEMAS:
+        for name, schema in ctf.SCHEMAS.items():
+            if "trace_id" not in schema.names:
+                continue
             self.connection.execute(
                 f"UPDATE raw.{name} SET timestamp_ns = timestamp_ns + 1000000000 WHERE trace_id >= 10"
             )
@@ -786,13 +930,19 @@ class SqlAnalysisTests(unittest.TestCase):
                    DEFAULT 0)"""
         )
         self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?, DEFAULT)", targets)
+        self.connection.execute(sql.read("coverage-trace-source"))
 
     def _plain_overlaps(self) -> list[tuple]:
-        """Pair targets with frames by a plain overlap join, in send order."""
+        """Pair targets with frames by a plain overlap join, in completion order.
+
+        A TX frame completes at its packet's end, the send's completion, and an
+        RX frame at its own timestamp, the receive buffer's acceptance.
+        """
 
         return self.connection.execute(
             """SELECT object.trace_id, frame.offset_start, frame.offset_end,
-                      packet.trace_id, packet.start_ns, packet.end_ns
+                      packet.trace_id, packet.start_ns,
+                      CASE packet.direction WHEN 'tx' THEN packet.end_ns ELSE frame.timestamp_ns END AS completion_ns
                FROM coverage_targets AS object
                JOIN packet_lifecycles AS packet
                  ON packet.connection_id = object.connection_id
@@ -804,7 +954,7 @@ class SqlAnalysisTests(unittest.TestCase):
                 AND frame.stream_id = object.stream_id
                 AND greatest(frame.offset_start, object.stream_offset_start)
                       < least(frame.offset_end, object.stream_offset_end)
-               ORDER BY object.trace_id, frame.timestamp_ns, packet.end_ns, packet.trace_id,
+               ORDER BY object.trace_id, completion_ns, packet.trace_id,
                         frame.offset_start, frame.offset_end"""
         ).fetchall()
 
@@ -817,7 +967,7 @@ class SqlAnalysisTests(unittest.TestCase):
         coverage._stage_frames(self.connection)
         self.assertEqual(
             self.connection.execute(
-                """SELECT trace_id, offset_start, offset_end, packet_id, packet_start_ns, packet_end_ns
+                """SELECT trace_id, offset_start, offset_end, packet_id, packet_start_ns, completion_ns
                    FROM coverage_frames ORDER BY trace_id, seq"""
             ).fetchall(),
             expected,
@@ -846,8 +996,8 @@ class SqlAnalysisTests(unittest.TestCase):
 
                 self.assertEqual(
                     self.connection.execute(
-                        """SELECT * FROM (SELECT c.object_trace_id AS trace_id, c.first_start_ns,
-                            c.first_end_ns, c.complete_end_ns,
+                        """SELECT * FROM (SELECT c.object_trace_id AS trace_id, c.origin_ns,
+                            c.first_ns, c.complete_ns,
                         list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids FROM model.coverage c JOIN
                         model.coverage_packets p USING(process_id, object_trace_id) GROUP BY ALL) ORDER BY
                         trace_id"""
@@ -865,17 +1015,24 @@ class SqlAnalysisTests(unittest.TestCase):
                       10::UBIGINT AS stream_id, 0::UBIGINT AS stream_offset_start,
                       16::UBIGINT AS stream_offset_end"""
         )
+        self.connection.execute(sql.read("coverage-trace-source"))
         with self.assertRaisesRegex(TraceError, "object trace 1 does not have complete packet coverage"):
             coverage._resolve_targets(self.connection)
 
 
 def _sequential_coverage(start: int, end: int, frames) -> tuple:
-    """Replay `frames` in order until they cover `[start, end)`, as a reference."""
+    """Replay `frames` in order until they cover `[start, end)`, as a reference.
+
+    Returns the earliest packet start among the replayed frames, the completion
+    of the first frame, the completion of the frame that closes the last gap,
+    and the packets in order of first use.
+    """
 
     gaps = [(start, end)]
     packet_ids: list[int] = []
     first = None
-    for offset_start, offset_end, packet_id, packet_start, packet_end in frames:
+    origin = None
+    for offset_start, offset_end, packet_id, packet_start, completion in frames:
         covered_start, covered_end = max(offset_start, start), min(offset_end, end)
         remaining = []
         for left, right in gaps:
@@ -890,9 +1047,10 @@ def _sequential_coverage(start: int, end: int, frames) -> tuple:
         if packet_id not in packet_ids:
             packet_ids.append(packet_id)
         if first is None:
-            first = (packet_start, packet_end)
+            first = completion
+        origin = packet_start if origin is None else min(origin, packet_start)
         if not gaps:
-            return (*first, packet_end, packet_ids)
+            return (origin, first, completion, packet_ids)
     raise AssertionError(f"reference coverage of [{start}, {end}) is incomplete")
 
 
@@ -938,6 +1096,20 @@ class CtfDecodeTests(unittest.TestCase):
                 ]
             },
         )
+
+    def test_decodes_connection_paths(self) -> None:
+        payload = {
+            "timestamp_ns": 2,
+            "connection_id": 4,
+            "local_address_high": 0,
+            "local_address_low": 0x0000_FFFF_0A00_0001,
+            "local_port": 4443,
+            "peer_address_high": 0x2001_0DB8_0000_0000,
+            "peer_address_low": 7,
+            "peer_port": 50266,
+        }
+        rows = self.decode([Event("quic_trace:quic_connection_path", payload, timestamp=7, vpid=42)])
+        self.assertEqual(rows["quic_connection_path"], [{"pid": 42, "ctf_timestamp_ns": 7, **payload}])
 
     def test_optional_fields_respect_presence_flags(self) -> None:
         rows = self.decode([socket_start(has_connection_id=0)])

@@ -329,3 +329,48 @@ built in parallel. Its runner and decryption parts work with today's trace
 contract. Only the connection path event needs the providers and stacks to
 change. Once both designs land, the acceptance check in the socket-bounded
 design runs on decrypted matching, as that design requires.
+
+## Implementation Notes
+
+The implementation differs from the text above where real captures required
+it. The text stays as the design record, and these notes take precedence.
+
+- **Loopback copies.** A capture on `any` records a loopback datagram leaving
+  and arriving on some kernels and only arriving on others. The wire packets
+  therefore use the arriving copy of every loopback datagram, as
+  `network.datagrams` does, rather than the copy nearer the relay's socket. On
+  loopback the arriving copy is made inside the sender's transmit path, so the
+  difference is small, and the TX residual characterizes it.
+- **Segment boundaries.** A GSO boundary is found from the Destination
+  Connection ID that every later segment repeats, not by searching segment
+  lengths. Each offset where the first packet's DCID recurs after a byte with
+  the form bit clear is a candidate, and a candidate is accepted only when the
+  first packet authenticates ending there. The datagram's own end is tried
+  first. A zero-length DCID falls back to trying every length.
+- **Greased fixed bit.** Quinn greases the QUIC fixed bit (RFC 9287), so a
+  short header is recognized by its form bit alone, and zero bytes after a
+  long-header packet are the only padding the decryptor skips.
+- **Clock step.** The two offset samples may differ by twice their measured
+  uncertainty plus 1 µs. The clock probe takes the tightest of 32 brackets of
+  one realtime read between two monotonic reads and reports half that bracket
+  as the uncertainty.
+- **Tables.** Wire coverage is `network.wire_coverage`,
+  `network.wire_coverage_frames`, and `network.wire_coverage_packets`, with the
+  same layout as the `model` coverage tables. Besides `wire_full_span`, the
+  analysis publishes the packet metrics `rx_wire_residual` (read completion
+  minus capture) and `tx_wire_residual` (capture minus send completion).
+- **Path events.** Quinn records the path when it installs a connection's trace
+  identity and on migration. QUICHE records it in `SendPacketToWriter` before
+  the first send and whenever the addresses it sends between change, which is
+  the single point every send passes.
+- **Untraced packets.** Quinn processes the first datagram of a server
+  connection before the connection has a trace identity, so its packets have
+  no trace packet. They precede the analysis window, so no check sees them.
+
+A local run of moq-dev-moq with both moq-bench peers on loopback (7,052
+decrypted packets, sends of up to 10 GSO segments) passed every check: every
+successful trace packet appeared on the wire, every wire packet in the window
+matched a trace packet, matched packets carried identical STREAM frames, no RX
+packet started before its capture, and the trace and the wire chose the same
+covering packets for all 156 objects. Median `rx_wire_residual` was 129 µs and
+median `tx_wire_residual` was -6 µs, negative for every packet.

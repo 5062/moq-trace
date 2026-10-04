@@ -33,6 +33,8 @@ LTTNG_UST_TRACEPOINT_ENUM(quic_trace, packet_phase,
 		lttng_ust_field_enum_value("frame_encode", QUIC_TRACE_PACKET_PHASE_FRAME_ENCODE)
 		lttng_ust_field_enum_value("packet_encrypt", QUIC_TRACE_PACKET_PHASE_PACKET_ENCRYPT)
 		lttng_ust_field_enum_value("application", QUIC_TRACE_PACKET_PHASE_APPLICATION)
+		lttng_ust_field_enum_value("read_queue", QUIC_TRACE_PACKET_PHASE_READ_QUEUE)
+		lttng_ust_field_enum_value("send_queue", QUIC_TRACE_PACKET_PHASE_SEND_QUEUE)
 	)
 )
 
@@ -110,6 +112,20 @@ LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_stream_frame,
 		lttng_ust_field_integer(uint64_t, offset_start, event->offset_start)
 		lttng_ust_field_integer(uint64_t, offset_end, event->offset_end)
 		lttng_ust_field_enum(quic_trace, packet_outcome, uint8_t, outcome, event->outcome)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_connection_path,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_quic_connection_path *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, connection_id, event->connection_id)
+		lttng_ust_field_integer(uint64_t, local_address_high, event->local_address_high)
+		lttng_ust_field_integer(uint64_t, local_address_low, event->local_address_low)
+		lttng_ust_field_integer(uint16_t, local_port, event->local_port)
+		lttng_ust_field_integer(uint64_t, peer_address_high, event->peer_address_high)
+		lttng_ust_field_integer(uint64_t, peer_address_low, event->peer_address_low)
+		lttng_ust_field_integer(uint16_t, peer_port, event->peer_port)
 	)
 )
 

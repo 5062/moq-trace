@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 from .breakdown import _draw_phase_cdfs
-from .common import _OBJECT_SPANS, ComparisonRun, PlotOptions, _format_us, _save, _values_us, describe
+from .common import ComparisonRun, PlotOptions, _format_us, _metrics, _object_spans, _save, _values_us, describe
 
 
 def _draw_distribution(
@@ -78,7 +78,7 @@ def plot_latency_cdf(
 
     fig, (ecdf, phases) = plt.subplots(1, 2, figsize=(15, 6))
     counts = []
-    for index, (metric, label) in enumerate(_OBJECT_SPANS):
+    for index, (metric, label) in enumerate(_object_spans("wire_full_span" in _metrics(connection))):
         values = _values_us(connection, metric)
         if not values:
             raise ValueError(f"cannot plot object latency without {metric} samples")
@@ -102,14 +102,15 @@ def plot_latency_comparison(
 
     if len(runs) < 2:
         raise ValueError("a latency comparison requires at least two runs")
+    spans = _object_spans(all(_values_us(run.connection, "wire_full_span", run.run_id) for run in runs))
     fig, axes = plt.subplots(
         2 if show_tail else 1,
-        len(_OBJECT_SPANS),
+        len(spans),
         figsize=(14, 9 if show_tail else 5),
         sharex="col",
         squeeze=False,
     )
-    for column, (metric, label) in enumerate(_OBJECT_SPANS):
+    for column, (metric, label) in enumerate(spans):
         ecdf = axes[0][column]
         ccdf = axes[1][column] if show_tail else None
         counts = []

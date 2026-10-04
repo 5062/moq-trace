@@ -13,9 +13,11 @@ in their MoQ and QUIC code.
 - Rust and C++ facades must emit equivalent schemas.
 - Python analysis correlates the layers by process, direction, connection ID,
   stream ID, and half-open byte ranges.
-- Transport packet phases are optional. The generic analyzer uses the phases a
-  provider emits; the Quinn profile additionally requires `routing` and
-  `scheduling`.
+- Transport packet lifecycles run from the receive system call that returned a
+  packet to the send system call that accepted one, and every provider emits
+  the `read_queue` and `send_queue` phases that mark those boundaries. Other
+  packet phases are optional. The generic analyzer uses the phases a provider
+  emits; the Quinn profile additionally requires `routing` and `scheduling`.
 - Event timestamps use the host monotonic clock. Rust and C++ implementations
   must use the same epoch when they run in one process.
 - Trace, span, and connection IDs and the clock come from the native QUIC

@@ -52,8 +52,9 @@ _CONNECT_TIMEOUT = 15.0
 # How long a signalled process gets to exit before it is signalled harder.
 _STOP_TIMEOUT = 5.0
 
-# Reports a host's clocks and loopback interfaces in one process, so the
-# realtime and monotonic readings are taken back to back.
+# Reports a host's clocks and loopback interfaces in one process. Each sample
+# brackets one realtime reading between two monotonic ones, and the tightest
+# bracket gives the offset and bounds its error by half the bracket.
 _CLOCK_PROBE = """
 import json, socket, time
 indexes = []
@@ -64,9 +65,32 @@ for index, name in socket.if_nameindex():
         flags = 0x8 if name == "lo" else 0
     if flags & 0x8:
         indexes.append(index)
-offset = time.clock_gettime_ns(time.CLOCK_REALTIME) - time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-print(json.dumps({"realtime_offset_ns": offset, "loopback_ifindexes": indexes}))
+best = None
+for _ in range(32):
+    before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    realtime = time.clock_gettime_ns(time.CLOCK_REALTIME)
+    after = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    if best is None or after - before < best[0]:
+        best = (after - before, realtime - (before + after) // 2)
+print(json.dumps({
+    "realtime_offset_ns": best[1],
+    "uncertainty_ns": (best[0] + 1) // 2,
+    "loopback_ifindexes": indexes,
+}))
 """
+
+
+@dataclasses.dataclass(frozen=True)
+class Clock:
+    """A host's realtime-minus-monotonic offset and its loopback interfaces.
+
+    `uncertainty_ns` bounds the error of `offset_ns`: half the interval between
+    the two monotonic readings that bracketed the realtime one.
+    """
+
+    offset_ns: int
+    uncertainty_ns: int
+    loopback_ifindexes: tuple[int, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -348,11 +372,15 @@ class Host(abc.ABC):
         except (CaptureError, IndexError):
             return None
 
-    async def clock(self) -> tuple[int, tuple[int, ...]]:
+    async def clock(self) -> Clock:
         """This host's realtime-minus-monotonic offset and loopback interface indexes."""
 
         report = json.loads(await self.run(f"{shlex.quote(self.python)} -c {shlex.quote(_CLOCK_PROBE)}"))
-        return int(report["realtime_offset_ns"]), tuple(int(index) for index in report["loopback_ifindexes"])
+        return Clock(
+            int(report["realtime_offset_ns"]),
+            int(report["uncertainty_ns"]),
+            tuple(int(index) for index in report["loopback_ifindexes"]),
+        )
 
 
 class _LocalChannel(Channel):

@@ -11,7 +11,7 @@ from collections.abc import Collection, Sequence
 import duckdb
 import pyarrow as pa
 
-from . import coverage, ctf, phases, sql
+from . import coverage, ctf, phases, sql, wire
 from . import network as network_capture
 from .artifact import write_metadata
 from .errors import TraceError
@@ -282,6 +282,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
         sql.read("packet-samples-stage"),
         {"origin": origin},
     )
+    connection.execute(sql.read("wire-samples-schema"))
 
 
 def _catalog() -> list[tuple[str, str, str, str, str, int]]:
@@ -295,7 +296,8 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
         ("full_span", "object", "Full relay span"),
         ("quic_forward_start", "quic_object", "QUIC forward start"),
         ("quic_tail_gap", "quic_object", "QUIC tail gap"),
-        ("quic_full_span", "quic_object", "QUIC full span"),
+        ("quic_full_span", "quic_object", "QUIC full span (read to send)"),
+        ("wire_full_span", "wire_object", "Wire full span"),
     )
 
     def packet_phases(direction: phases.Direction) -> list[tuple[str, str, str]]:
@@ -311,6 +313,8 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
         ("rx_packet_processing_span", "RX packet processing span", "packet"),
         ("tx_packet_span", "TX packet span", "packet"),
         *packet_phases("tx"),
+        ("rx_wire_residual", "RX wire residual", "packet"),
+        ("tx_wire_residual", "TX wire residual", "packet"),
     ]
     orders: dict[str, int] = {}
     catalog = []
@@ -347,6 +351,21 @@ def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
 
     connection.execute(sql.read("timeline-schema"))
     connection.execute(sql.read("timeline-populate"))
+
+
+def _ingest_network(connection: duckdb.DuckDBPyConnection, path: pathlib.Path, origin: int) -> NetworkCapabilities:
+    """Load the network capture and, when it holds a packet capture, decrypt and check it.
+
+    The decrypted capture adds wire samples, so it runs before the metrics are
+    defined.
+    """
+
+    capabilities = network_capture.ingest(connection, path, origin)
+    manifest = network_capture.read_manifest(path)
+    if manifest.pcap is None:
+        return capabilities
+    packets = wire.ingest(connection, manifest, path.parent, origin)
+    return capabilities.model_copy(update={"wire_packets": packets})
 
 
 def _verify_transport_metrics(connection: duckdb.DuckDBPyConnection, transport_profile: TransportProfile) -> None:
@@ -479,10 +498,10 @@ def run(
             _check(connection, "checks-window")
             coverage.resolve(connection)
             _derive_samples(connection, origin)
+            capabilities = None if network is None else _ingest_network(connection, network, origin)
             _define_metrics(connection)
             _verify_transport_metrics(connection, transport_profile)
             _define_timelines(connection)
-            capabilities = None if network is None else network_capture.ingest(connection, network, origin)
             _write_run_metadata(
                 connection,
                 pid=analyzed,

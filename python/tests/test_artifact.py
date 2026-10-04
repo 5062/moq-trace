@@ -144,7 +144,7 @@ class ArtifactTests(unittest.TestCase):
                 queries = {
                     "samples": """SELECT domain, metric, elapsed_ns, value_ns FROM metrics.samples
                         JOIN metrics.definitions USING(metric) ORDER BY ALL""",
-                    "coverage": """SELECT c.object_trace_id, first_start_ns, first_end_ns, complete_end_ns,
+                    "coverage": """SELECT c.object_trace_id, origin_ns, first_ns, complete_ns,
                         list(p.packet_trace_id ORDER BY ordinal) FROM model.coverage c
                         JOIN model.coverage_packets p USING(process_id, object_trace_id) GROUP BY ALL ORDER BY 1""",
                     "selections": """SELECT selection_order, statistic, target_ns, rx_trace_id, actual_ns
@@ -165,7 +165,8 @@ class ArtifactTests(unittest.TestCase):
                     trace.connection.execute("""SELECT trace_id, phase, total_ns
                     FROM metrics.phase_totals ORDER BY phase""").fetchall(),
                     ([(3, "application", 10_000)] if scenario == "application" else [])
-                    + [(3, "routing", 10_000), (3, "scheduling", 10_000)],
+                    + [(3, "read_queue", 10_000), (3, "routing", 10_000), (3, "scheduling", 10_000)]
+                    + [(4, "send_queue", 10_000)],
                 )
                 timelines = _timelines(trace.connection)
                 self.assertEqual(len(timelines), 3)
@@ -179,7 +180,7 @@ class ArtifactTests(unittest.TestCase):
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
             with open_artifact(output) as artifact:
-                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (2,))
+                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (3,))
                 self.assertEqual(artifact.connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,)
@@ -296,13 +297,13 @@ class ArtifactTests(unittest.TestCase):
             ctf._batch("udp_socket_end", [row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
-        for version in (1, 3):
+        for version in (2, 4):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "analysis.duckdb"
                 with duckdb.connect(str(output)) as connection:
                     write_metadata(connection, run_metadata())
                     connection.execute("UPDATE metadata SET schema_version = ?", [version])
-                expected = f"schema version {version}, .* reads only 2; .*new output path"
+                expected = f"schema version {version}, .* reads only 3; .*new output path"
                 with self.assertRaisesRegex(TraceError, expected):
                     with open_artifact(output):
                         pass
@@ -409,7 +410,7 @@ class ArtifactTests(unittest.TestCase):
                     artifact.connection.execute("""SELECT run_id, process_id, count(*)
                     FROM metrics.samples JOIN processes USING(run_id, process_id)
                     GROUP BY ALL ORDER BY run_id""").fetchall(),
-                    [(0, 0, 10), (1, 0, 10)],
+                    [(0, 0, 12), (1, 0, 12)],
                 )
                 self.assertEqual(
                     artifact.connection.execute("""SELECT run_id, value_ns FROM metrics.samples

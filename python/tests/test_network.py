@@ -209,6 +209,8 @@ class IngestTests(unittest.TestCase):
                 network.NetworkManifest(
                     relay_port=RELAY_PORT,
                     realtime_offset_ns=realtime_offset_ns,
+                    realtime_offset_end_ns=realtime_offset_ns,
+                    realtime_offset_uncertainty_ns=0,
                     pcap="relay.pcap",
                     qlog_dir="qlog",
                 ).model_dump_json()
@@ -263,7 +265,14 @@ class IngestTests(unittest.TestCase):
     def test_a_run_without_capture_or_qlog_loads_empty_tables(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manifest = pathlib.Path(directory) / network.MANIFEST
-            manifest.write_text(network.NetworkManifest(relay_port=RELAY_PORT, realtime_offset_ns=0).model_dump_json())
+            manifest.write_text(
+                network.NetworkManifest(
+                    relay_port=RELAY_PORT,
+                    realtime_offset_ns=0,
+                    realtime_offset_end_ns=0,
+                    realtime_offset_uncertainty_ns=0,
+                ).model_dump_json()
+            )
             connection = duckdb.connect(":memory:")
             connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
             try:

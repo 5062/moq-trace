@@ -3,25 +3,19 @@ WITH targets AS (
   SELECT *, unnest(offset_buckets(stream_offset_start, stream_offset_end, $bucket)) AS bucket
   FROM coverage_targets
 ), frames AS (
-  SELECT packet.process_id, packet.connection_id, packet.direction, frame.stream_id,
-         frame.offset_start, frame.offset_end, frame.timestamp_ns,
-         packet.trace_id, packet.start_ns, packet.end_ns,
-         unnest(offset_buckets(frame.offset_start, frame.offset_end, $bucket)) AS bucket
-  FROM quic_stream_frame AS frame
-  JOIN packet_lifecycles AS packet USING (process_id, trace_id)
-  WHERE packet.outcome = 'success' AND frame.outcome = 'success'
-    AND frame.offset_start < frame.offset_end
+  SELECT *, unnest(offset_buckets(offset_start, offset_end, $bucket)) AS bucket
+  FROM coverage_frame_source
+  WHERE offset_start < offset_end
 )
 SELECT object.process_id, object.trace_id, frame.offset_start, frame.offset_end,
        greatest(frame.offset_start, object.stream_offset_start) AS covered_start,
        least(frame.offset_end, object.stream_offset_end) AS covered_end,
        frame.trace_id AS packet_id,
        frame.start_ns AS packet_start_ns,
-       frame.end_ns AS packet_end_ns,
+       frame.completion_ns,
        row_number() OVER (
          PARTITION BY object.process_id, object.trace_id
-         ORDER BY frame.timestamp_ns, frame.end_ns, frame.trace_id,
-                  frame.offset_start, frame.offset_end
+         ORDER BY frame.completion_ns, frame.trace_id, frame.offset_start, frame.offset_end
        ) AS seq
 FROM targets AS object
 JOIN frames AS frame

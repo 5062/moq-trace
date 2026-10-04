@@ -35,6 +35,8 @@ enum quic_trace_packet_phase {
 	QUIC_TRACE_PACKET_PHASE_FRAME_ENCODE,
 	QUIC_TRACE_PACKET_PHASE_PACKET_ENCRYPT,
 	QUIC_TRACE_PACKET_PHASE_APPLICATION,
+	QUIC_TRACE_PACKET_PHASE_READ_QUEUE,
+	QUIC_TRACE_PACKET_PHASE_SEND_QUEUE,
 };
 
 enum quic_trace_packet_outcome {
@@ -98,6 +100,23 @@ struct quic_trace_quic_stream_frame {
 	uint8_t outcome;
 };
 
+/*
+ * The addresses one connection sends between, from the time of the event until
+ * the connection's next path event. Addresses are IPv6, with IPv4 written as
+ * IPv4-mapped IPv6 (::ffff:a.b.c.d), split into the high and low 64 bits of the
+ * address in network byte order. Ports are in host byte order.
+ */
+struct quic_trace_quic_connection_path {
+	uint64_t timestamp_ns;
+	uint64_t connection_id;
+	uint64_t local_address_high;
+	uint64_t local_address_low;
+	uint16_t local_port;
+	uint64_t peer_address_high;
+	uint64_t peer_address_low;
+	uint16_t peer_port;
+};
+
 struct quic_trace_udp_socket_start {
 	uint64_t timestamp_ns;
 	uint64_t trace_id;
@@ -123,6 +142,8 @@ bool quic_trace_quic_packet_phase_enabled(void);
 void quic_trace_quic_packet_phase(const struct quic_trace_quic_packet_phase *event);
 bool quic_trace_quic_stream_frame_enabled(void);
 void quic_trace_quic_stream_frame(const struct quic_trace_quic_stream_frame *event);
+bool quic_trace_quic_connection_path_enabled(void);
+void quic_trace_quic_connection_path(const struct quic_trace_quic_connection_path *event);
 bool quic_trace_udp_socket_start_enabled(void);
 void quic_trace_udp_socket_start(const struct quic_trace_udp_socket_start *event);
 bool quic_trace_udp_socket_end_enabled(void);

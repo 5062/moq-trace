@@ -1,4 +1,10 @@
-"""Resolve object byte ranges to the first complete QUIC packet prefix."""
+"""Resolve object byte ranges to the first complete QUIC packet prefix.
+
+Coverage reads STREAM frames from `coverage_frame_source`, which names each
+frame's connection, direction, stream, byte range, the instant it completed its
+bytes, and its packet's ID and start. The trace provides one source and the
+decrypted packet capture another, and both resolve with the same rule.
+"""
 
 from __future__ import annotations
 
@@ -43,8 +49,11 @@ def _stage_frames(connection: duckdb.DuckDBPyConnection) -> None:
     """Stage every successful STREAM frame overlapping a target in `coverage_frames`.
 
     Each row pairs one object with one frame, clips the frame to the object's
-    range, and numbers the object's frames by `seq` in the order they were sent
-    or received: frame time, then packet end, then packet trace ID.
+    range, and numbers the object's frames by `seq` in the order they completed
+    their bytes, then by packet trace ID and offsets. A TX frame completes when
+    the send carrying its packet completes, so TX frames follow send order even
+    when a packet encoded early is sent late. An RX frame completes when the
+    stream's receive buffer accepts it.
 
     A connection carries few streams, so matching frames to objects on the stream
     alone compares every object with every frame on it, and the work grows with
@@ -81,13 +90,14 @@ def _stage_completion(connection: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _resolve_targets(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize `object_packet_coverage` for the staged `coverage_targets`.
+def _resolve_targets(connection: duckdb.DuckDBPyConnection, tables: str = "model.coverage") -> None:
+    """Materialize coverage for the staged `coverage_targets` into the `tables` family.
 
-    Each object records the first packet carrying any of its bytes, the packet
-    that completed its byte range, and every packet up to that one in `seq`
-    order. Frames after the completing one, such as late retransmissions, do
-    not extend the object.
+    Each object records the first packet in completion order, the packet that
+    completed its byte range, and every packet up to that one in `seq` order.
+    Frames after the completing one, such as late retransmissions, do not
+    extend the object. The object's origin is the earliest packet start among
+    those packets, chosen apart from the completion order.
     """
 
     _validate_targets(connection)
@@ -100,14 +110,27 @@ def _resolve_targets(connection: duckdb.DuckDBPyConnection) -> None:
     )
     if incomplete is not None:
         raise TraceError(f"object trace {incomplete} does not have complete packet coverage")
-    connection.execute(sql.read("coverage-schema"))
-    connection.execute(sql.read("coverage-populate"))
+    # Every family shares one layout: `<tables>`, `<tables>_frames`, and `<tables>_packets`.
+    for name in ("coverage-schema", "coverage-populate"):
+        connection.execute(sql.read(name).replace("model.coverage", tables))
     for table in ("coverage_completion", "coverage_frames", "coverage_targets"):
         connection.execute(f"DROP TABLE {table}")
 
 
 def resolve(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize packet coverage for every selected object lifecycle."""
+    """Materialize the trace's packet coverage for every selected object lifecycle."""
 
+    connection.execute(sql.read("coverage-trace-source"))
     connection.execute(sql.read("coverage-targets-stage"))
     _resolve_targets(connection)
+
+
+def resolve_wire(connection: duckdb.DuckDBPyConnection) -> None:
+    """Materialize the packet capture's coverage of the same objects as `network.wire_coverage`.
+
+    `coverage_frame_source` must already describe the decrypted STREAM frames,
+    with each frame's packet ID being its `packet_id` in `network.wire_packets`.
+    """
+
+    connection.execute(sql.read("coverage-targets-stage"))
+    _resolve_targets(connection, "network.wire_coverage")

@@ -35,6 +35,7 @@ The transport provider emits:
 
 - `quic_packet_start`, `quic_packet_phase`, and `quic_packet_end`
 - `quic_stream_frame`
+- `quic_connection_path`
 - `udp_socket_start` and `udp_socket_end`
 
 Lifecycle and phase tokens record `abandoned` when destroyed without an
@@ -248,6 +249,27 @@ phases. A transport that hands data over after packet processing returns never
 records it. `rx_packet_transport_span` subtracts the phase from the packet span,
 so it measures the transport's own share of a packet the same way on both kinds
 of stack, and `rx_packet_span` keeps the full interval.
+
+Packet lifecycles are bounded by the socket. An RX packet starts when the
+receive system call that returned its datagram completes, and a TX packet ends
+when the send system call that accepted its datagram completes. Every successful
+packet records the matching wait as a phase: `read_queue` from the packet start
+until its processing begins, and `send_queue` from the end of encryption until
+the packet end. A provider reads the clock immediately after the system call
+returns, ends the `udp_socket` operation and every packet the call carried at
+that instant with `finish_at`, and records the call's own result, before any
+error policy of its stack, as the socket outcome. A packet whose send fails ends
+`dropped`. An RX `quic_stream_frame` is stamped when the stream's receive buffer
+accepts its bytes, before the application is told, and a frame the stack
+discards without buffering is `dropped`; `stream_frame_at` records it once the
+outcome is known. Object coverage completes in that order: at send completion
+for TX and at buffer acceptance for RX. The analysis rejects a successful packet
+without its queue phase.
+
+`quic_connection_path` records the local and peer addresses a connection sends
+between, when the connection is created and again whenever its path changes. It
+lets analysis join a connection's packets to a packet capture. Addresses are
+IPv6, with IPv4 as IPv4-mapped IPv6.
 
 Analysis accepts implementation-independent transport traces by default. Use
 `--transport-profile quinn` when the capture must contain the Quinn `routing`

@@ -15,6 +15,7 @@ SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
+from moq_trace.artifact import SCHEMA_VERSION  # noqa: E402
 from moq_trace.metadata import (  # noqa: E402
     Counts,
     Population,
@@ -53,4 +54,4 @@ def write_raw_metadata(connection: duckdb.DuckDBPyConnection, kind: str, encoded
     connection.execute(
         """CREATE TABLE metadata(kind VARCHAR PRIMARY KEY, schema_version INTEGER NOT NULL, value JSON NOT NULL)"""
     )
-    connection.execute("INSERT INTO metadata VALUES (?, 2, ?)", [kind, encoded])
+    connection.execute("INSERT INTO metadata VALUES (?, ?, ?)", [kind, SCHEMA_VERSION, encoded])

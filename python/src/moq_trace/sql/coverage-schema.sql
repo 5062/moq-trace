@@ -16,9 +16,15 @@ CREATE TABLE model.coverage (
     complete_seq UINTEGER NOT NULL,
     first_packet_trace_id UBIGINT NOT NULL,
     complete_packet_trace_id UBIGINT NOT NULL,
-    first_start_ns BIGINT NOT NULL,
-    first_end_ns BIGINT NOT NULL,
-    complete_end_ns BIGINT NOT NULL,
+    -- The earliest start among the packets retained through completion: for RX,
+    -- the earliest read completion of a datagram carrying the object's bytes.
+    origin_ns BIGINT NOT NULL,
+    -- When the first frame in completion order completed its bytes, and when
+    -- the frame completing the object did. A TX frame completes when the send
+    -- carrying it completes, and an RX frame when the stream's receive buffer
+    -- accepts it.
+    first_ns BIGINT NOT NULL,
+    complete_ns BIGINT NOT NULL,
     PRIMARY KEY (process_id, object_trace_id)
 );
 

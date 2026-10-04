@@ -3,6 +3,7 @@
 
 #include <quic_trace/interface.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -122,6 +123,12 @@ class PacketPhase {
 /** A scoped QUIC packet that records abandonment unless explicitly finished. */
 class Packet {
  public:
+  /**
+   * Create a disabled packet that records nothing, for work that must not
+   * start a lifecycle, such as re-serializing a packet already traced.
+   */
+  Packet() = default;
+
   /** Start a packet trace when any packet event is enabled. */
   explicit Packet(PacketContext context) : context_(context) {
     detail::initialize();
@@ -181,16 +188,41 @@ class Packet {
                     std::uint64_t offset_end,
                     quic_trace_packet_outcome outcome) const {
     if (trace_id_ == 0 || !quic_trace_quic_stream_frame_enabled()) return;
-    const struct quic_trace_quic_stream_frame event{
-        detail::now_ns(), trace_id_, stream_id, offset_start, offset_end,
-        static_cast<std::uint8_t>(outcome)};
-    quic_trace_quic_stream_frame(&event);
+    emit_stream_frame(detail::now_ns(), stream_id, offset_start, offset_end,
+                      outcome);
+  }
+
+  /**
+   * Associate a STREAM byte range with this packet at a captured timestamp.
+   *
+   * An RX frame's timestamp is the instant the stream's receive buffer accepted
+   * its bytes. A stack that learns the outcome only later stamps that instant
+   * and records the frame afterwards with this method.
+   */
+  void stream_frame_at(std::uint64_t stream_id, std::uint64_t offset_start,
+                       std::uint64_t offset_end,
+                       quic_trace_packet_outcome outcome,
+                       std::uint64_t timestamp_ns) const {
+    if (trace_id_ == 0 || !quic_trace_quic_stream_frame_enabled()) return;
+    emit_stream_frame(timestamp_ns, stream_id, offset_start, offset_end, outcome);
   }
 
   /** Finish the packet with an explicit result. */
   void finish(quic_trace_packet_outcome outcome) {
     if (trace_id_ == 0) return;
-    if (quic_trace_quic_packet_end_enabled()) emit_end(outcome);
+    if (quic_trace_quic_packet_end_enabled()) emit_end(detail::now_ns(), outcome);
+    trace_id_ = 0;
+  }
+
+  /**
+   * Finish the packet at a captured timestamp.
+   *
+   * Every packet one socket send carried ends at that send's completion, so a
+   * stack captures the completion once and ends each packet with it.
+   */
+  void finish_at(quic_trace_packet_outcome outcome, std::uint64_t timestamp_ns) {
+    if (trace_id_ == 0) return;
+    if (quic_trace_quic_packet_end_enabled()) emit_end(timestamp_ns, outcome);
     trace_id_ = 0;
   }
 
@@ -211,9 +243,18 @@ class Packet {
     quic_trace_quic_packet_start(&event);
   }
 
-  void emit_end(quic_trace_packet_outcome outcome) const {
+  void emit_stream_frame(std::uint64_t timestamp_ns, std::uint64_t stream_id,
+                         std::uint64_t offset_start, std::uint64_t offset_end,
+                         quic_trace_packet_outcome outcome) const {
+    const struct quic_trace_quic_stream_frame event{
+        timestamp_ns, trace_id_, stream_id, offset_start, offset_end,
+        static_cast<std::uint8_t>(outcome)};
+    quic_trace_quic_stream_frame(&event);
+  }
+
+  void emit_end(std::uint64_t timestamp_ns, quic_trace_packet_outcome outcome) const {
     const struct quic_trace_quic_packet_end event{
-        detail::now_ns(),
+        timestamp_ns,
         trace_id_,
         static_cast<std::uint8_t>(context_.packet_number.has_value()),
         context_.packet_number.value_or(0),
@@ -275,8 +316,26 @@ class Socket {
   /** Finish the socket operation with its result and batch measurements. */
   void finish(quic_trace_socket_outcome outcome, SocketStats stats = {}) {
     if (trace_id_ == 0) return;
+    // A disabled end event costs no clock read.
+    if (!quic_trace_udp_socket_end_enabled()) {
+      trace_id_ = 0;
+      return;
+    }
+    finish_at(outcome, stats, detail::now_ns());
+  }
+
+  /**
+   * Finish the socket operation at a captured timestamp.
+   *
+   * A provider reads the clock immediately after the system call returns and
+   * ends both this operation and the packets it carried at that instant, so the
+   * socket event and the packets agree exactly.
+   */
+  void finish_at(quic_trace_socket_outcome outcome, SocketStats stats,
+                 std::uint64_t timestamp_ns) {
+    if (trace_id_ == 0) return;
     if (quic_trace_udp_socket_end_enabled()) {
-      const struct quic_trace_udp_socket_end event{detail::now_ns(), trace_id_,
+      const struct quic_trace_udp_socket_end event{timestamp_ns, trace_id_,
           static_cast<std::uint8_t>(outcome), stats.buffers, stats.datagrams,
           stats.bytes};
       quic_trace_udp_socket_end(&event);
@@ -301,6 +360,78 @@ class Socket {
   quic_trace_direction direction_ = QUIC_TRACE_DIRECTION_RX;
   std::optional<std::uint64_t> connection_id_;
 };
+
+/**
+ * One end of a connection path.
+ *
+ * The address is IPv6 in network byte order, with IPv4 written as IPv4-mapped
+ * IPv6 (::ffff:a.b.c.d), so one form covers both families.
+ */
+struct PathEndpoint {
+  /** IPv6 address bytes in network byte order. */
+  std::array<std::uint8_t, 16> address{};
+  /** Port in host byte order. */
+  std::uint16_t port = 0;
+
+  /** Describe an IPv4 endpoint from its address bytes in network byte order. */
+  static PathEndpoint ipv4(const std::array<std::uint8_t, 4>& address,
+                           std::uint16_t port) {
+    PathEndpoint endpoint;
+    endpoint.address[10] = 0xff;
+    endpoint.address[11] = 0xff;
+    for (std::size_t i = 0; i < address.size(); ++i) endpoint.address[12 + i] = address[i];
+    endpoint.port = port;
+    return endpoint;
+  }
+
+  /** Describe an IPv6 endpoint from its address bytes in network byte order. */
+  static PathEndpoint ipv6(const std::array<std::uint8_t, 16>& address,
+                           std::uint16_t port) {
+    PathEndpoint endpoint;
+    endpoint.address = address;
+    endpoint.port = port;
+    return endpoint;
+  }
+};
+
+namespace detail {
+
+/** Read eight address bytes as one big-endian integer. */
+inline std::uint64_t address_half(const std::array<std::uint8_t, 16>& address,
+                                  std::size_t offset) {
+  std::uint64_t value = 0;
+  for (std::size_t i = 0; i < 8; ++i) value = (value << 8) | address[offset + i];
+  return value;
+}
+
+}  // namespace detail
+
+/**
+ * Record the path a connection sends on.
+ *
+ * A stack records the path when it creates a connection and again whenever the
+ * path changes, such as after a validated migration. Each event holds until the
+ * connection's next one, which lets analysis join the connection's packets to a
+ * packet capture by address. The local address may be the wildcard address
+ * when the socket is bound to it and the stack does not learn the address the
+ * kernel chose.
+ */
+inline void connection_path(std::uint64_t connection_id, const PathEndpoint& local,
+                            const PathEndpoint& peer) {
+  detail::initialize();
+  if (!quic_trace_quic_connection_path_enabled()) return;
+  const struct quic_trace_quic_connection_path event{
+      detail::now_ns(),
+      connection_id,
+      detail::address_half(local.address, 0),
+      detail::address_half(local.address, 8),
+      local.port,
+      detail::address_half(peer.address, 0),
+      detail::address_half(peer.address, 8),
+      peer.port,
+  };
+  quic_trace_quic_connection_path(&event);
+}
 
 }  // namespace quic_trace
 

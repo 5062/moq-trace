@@ -580,3 +580,44 @@ user space, and the spec is revisited for that stack.
 Because matching works per packet, the acceptance workload is not restricted
 to one object per burst. Runs with several tracks or higher object rates are
 valid acceptance runs.
+
+## Implementation Notes
+
+These notes record how the stacks implement the design and take precedence
+over the text above where they differ.
+
+**Quinn fork.**
+- `quinn-udp` traces each receive and send system call itself. `RecvMeta`
+  gains `read_ns`, and `UdpSocketState::try_send_timed` returns a send's raw
+  result with the instant its final system call returned. The runtime trait
+  `AsyncUdpSocket` gains `try_send_timed`; the tokio and async-io runtimes
+  forward to `quinn-udp`.
+- `quinn_proto::Endpoint::handle_at` takes the read time. `handle` remains for
+  callers that do not trace and reads the clock itself.
+- `PacketBuilder::finish` hands each packet and its `send_queue` phase to a
+  `quinn_proto::TransmitTrace`, which `Connection::take_moq_trace_transmit`
+  returns beside each transmit. The driver ends it with `sent` or `dropped`
+  after the send, and a transmit that is never sent drops it, recording its
+  packets as abandoned.
+- `StreamsState::received_buffered` reports whether a STREAM frame entered a
+  receive buffer, and the frame event records `dropped` when it did not.
+
+**QUICHE fork.**
+- `QuicUdpSocketApi` traces each `recvmsg`, `recvmmsg`, and `sendmsg` call and
+  stamps `ReadPacketResult::moq_trace_read_ns` and
+  `WriteResult::moq_trace_sent_ns`. `QuicPacketReader` no longer traces reads.
+- The read time travels on `QuicReceivedPacket`, which `Clone()` preserves for
+  the dispatcher's buffered packet store, and from there on
+  `ReceivedPacketInfo`. The connection already restores that structure when it
+  replays an undecryptable packet and keeps it for coalesced packets, so both
+  keep their original read without a separate queue field.
+- A `MoqTraceSend` holder travels with each packet's bytes: on
+  `SerializedPacket`, in the coalescer, and on each write-blocked
+  `BufferedPacket`. It ends its packets at the `WriteResult` of the send that
+  carried them. A writer that reports no traced send system call, which is
+  every batch writer, leaves them to record abandonment; the relay uses
+  `QuicDefaultPacketWriter`.
+- `QuicStreamSequencer::OnFrameData` reports buffer acceptance through
+  `StreamInterface::OnMoqTraceDataAccepted`, which both `QuicStream` and
+  `PendingStream` forward to the connection, so the first frames of a
+  unidirectional stream that is still pending count too.

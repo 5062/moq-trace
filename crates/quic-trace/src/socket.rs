@@ -87,16 +87,27 @@ impl SocketTrace {
     /// Finish the socket operation with its result and batch measurements.
     pub fn finish(mut self, outcome: SocketOutcome, stats: SocketStats) {
         if let Some(state) = self.state.take() {
-            state.emit_end(outcome, stats);
+            state.emit_end(outcome, stats, None);
+        }
+    }
+
+    /// Finish the socket operation at a previously captured timestamp.
+    ///
+    /// A provider reads the clock immediately after the system call returns
+    /// and ends both this operation and the packets it carried at that
+    /// instant, so the socket event and the packets agree exactly.
+    pub fn finish_at(mut self, outcome: SocketOutcome, stats: SocketStats, timestamp_ns: u64) {
+        if let Some(state) = self.state.take() {
+            state.emit_end(outcome, stats, Some(timestamp_ns));
         }
     }
 }
 
 impl SocketTraceState {
-    fn emit_end(self, outcome: SocketOutcome, stats: SocketStats) {
+    fn emit_end(self, outcome: SocketOutcome, stats: SocketStats, timestamp_ns: Option<u64>) {
         let Self { backend, trace_id } = self;
         backend.emit(Event::SocketEnd {
-            timestamp_ns: backend.now_ns(),
+            timestamp_ns: timestamp_ns.unwrap_or_else(|| backend.now_ns()),
             trace_id,
             outcome,
             stats,
@@ -107,7 +118,7 @@ impl SocketTraceState {
 impl Drop for SocketTrace {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
-            state.emit_end(SocketOutcome::Abandoned, SocketStats::default());
+            state.emit_end(SocketOutcome::Abandoned, SocketStats::default(), None);
         }
     }
 }

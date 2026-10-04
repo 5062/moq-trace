@@ -5,8 +5,8 @@
 //! `provider/interface.h`. Reordering variants changes the wire contract.
 
 use crate::{
-    Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge, SocketOutcome, SocketStats,
-    StreamFrame,
+    ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge, SocketOutcome,
+    SocketStats, StreamFrame,
 };
 use trace_core::{
     Backend as CoreBackend, Handle as CoreHandle, Schema, Tracepoint as CoreTracepoint,
@@ -27,6 +27,8 @@ pub(crate) enum Tracepoint {
     SocketStart,
     /// A UDP socket operation ended.
     SocketEnd,
+    /// A connection recorded the path it sends on.
+    ConnectionPath,
 }
 
 impl CoreTracepoint for Tracepoint {
@@ -87,6 +89,12 @@ pub(crate) enum Event {
         outcome: SocketOutcome,
         stats: SocketStats,
     },
+    /// A connection recorded the path it sends on.
+    ConnectionPath {
+        timestamp_ns: u64,
+        connection_id: u64,
+        path: ConnectionPath,
+    },
 }
 
 /// The `quic_trace:*` schema.
@@ -112,6 +120,7 @@ impl Schema for TransportSchema {
             Event::StreamFrame { .. } => Tracepoint::StreamFrame,
             Event::SocketStart { .. } => Tracepoint::SocketStart,
             Event::SocketEnd { .. } => Tracepoint::SocketEnd,
+            Event::ConnectionPath { .. } => Tracepoint::ConnectionPath,
         }
     }
 
@@ -152,6 +161,7 @@ mod platform {
                 Tracepoint::PacketEnd => ffi::quic_trace_quic_packet_end_enabled(),
                 Tracepoint::SocketStart => ffi::quic_trace_udp_socket_start_enabled(),
                 Tracepoint::SocketEnd => ffi::quic_trace_udp_socket_end_enabled(),
+                Tracepoint::ConnectionPath => ffi::quic_trace_quic_connection_path_enabled(),
             }
         }
     }
@@ -195,6 +205,11 @@ mod platform {
                 outcome,
                 stats,
             } => socket_end(timestamp_ns, trace_id, outcome, stats),
+            Event::ConnectionPath {
+                timestamp_ns,
+                connection_id,
+                path,
+            } => connection_path(timestamp_ns, connection_id, path),
         }
     }
 
@@ -306,6 +321,23 @@ mod platform {
                 buffers: to_u64(stats.buffers),
                 datagrams: to_u64(stats.datagrams),
                 bytes: to_u64(stats.bytes),
+            });
+        }
+    }
+
+    fn connection_path(timestamp_ns: u64, connection_id: u64, path: ConnectionPath) {
+        let local = crate::path::address_bits(path.local.ip());
+        let peer = crate::path::address_bits(path.peer.ip());
+        unsafe {
+            ffi::quic_trace_quic_connection_path(&ffi::quic_trace_quic_connection_path {
+                timestamp_ns,
+                connection_id,
+                local_address_high: (local >> 64) as u64,
+                local_address_low: local as u64,
+                local_port: path.local.port(),
+                peer_address_high: (peer >> 64) as u64,
+                peer_address_low: peer as u64,
+                peer_port: path.peer.port(),
             });
         }
     }

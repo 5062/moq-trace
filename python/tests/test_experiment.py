@@ -397,9 +397,11 @@ class LocalHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(log.read_text(), "compiling\n")
 
     async def test_the_clock_probe_reports_the_realtime_offset(self) -> None:
-        offset, loopbacks = await self.host.clock()
-        self.assertAlmostEqual(offset / 1e9, time.time() - time.monotonic(), delta=5)
-        self.assertIsInstance(loopbacks, tuple)
+        clock = await self.host.clock()
+        self.assertAlmostEqual(clock.offset_ns / 1e9, time.time() - time.monotonic(), delta=5)
+        # The tightest of several brackets is far below a millisecond.
+        self.assertLess(clock.uncertainty_ns, 1_000_000)
+        self.assertIsInstance(clock.loopback_ifindexes, tuple)
 
     async def test_the_workload_rejects_even_successful_early_exits(self) -> None:
         for status in (0, 7):
@@ -623,6 +625,32 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         tcpdump_process.stop.assert_awaited_once_with(True)
         self.assertEqual((config.output / "relay.pcap").read_bytes(), b"pcap")
         self.assertFalse(pathlib.Path(directory).exists())
+        manifest = network.read_manifest(config.output / network.MANIFEST)
+        self.assertEqual((manifest.pcap, manifest.capture_log), ("relay.pcap", "tcpdump.log"))
+        self.assertEqual(manifest.key_logs, ("subscriber.keylog", "publisher.keylog"))
+
+    async def test_peers_log_their_tls_secrets_beside_a_packet_capture(self) -> None:
+        tcpdump_process = mock.Mock()
+        tcpdump_process.stop = mock.AsyncMock()
+        tcpdump_process.close = mock.AsyncMock()
+
+        async def start(host, directory, port, log):
+            pathlib.Path(directory, "relay.pcap").write_bytes(b"pcap")
+            return tcpdump_process
+
+        config = self._config(
+            trace=False, capture_packets=True, hosts=Hosts(subscriber=self._remote("peer")), relay_url="https://r:4443"
+        )
+        # Each peer reports where it was told to write its key log.
+        subscriber = ("sh", "-c", "echo keylog=$SSLKEYLOGFILE; " + " ".join(_command().subscriber[2:]))
+        publisher = ("sh", "-c", "echo keylog=$SSLKEYLOGFILE; " + " ".join(_command().publisher[2:]))
+        with mock.patch.object(experiment, "start_packet_capture", side_effect=start):
+            where, _ = await self._capture(config, _command(subscriber=subscriber, publisher=publisher))
+
+        remote = where.directory(where.subscriber)
+        self.assertIn(f"keylog={remote}/subscriber.keylog", (config.output / "subscriber.log").read_text())
+        self.assertIn(f"keylog={config.output}/publisher.keylog", (config.output / "publisher.log").read_text())
+        self.assertIn((remote, ["subscriber.keylog"]), where.subscriber.fetched)
 
     async def test_a_startup_delay_replaces_the_log_marker(self) -> None:
         config = self._config(trace=False, relay_ready_log="", relay_startup_seconds=1)

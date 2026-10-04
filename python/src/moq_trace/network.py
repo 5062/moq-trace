@@ -57,12 +57,21 @@ class NetworkManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     relay_port: int = Field(gt=0, le=65_535)
-    # CLOCK_REALTIME minus CLOCK_MONOTONIC, sampled when the capture started.
+    # CLOCK_REALTIME minus CLOCK_MONOTONIC, sampled when the capture started and
+    # again when it stopped. Linux slews both clocks together, so the two differ
+    # only when the realtime clock was stepped during the run.
     realtime_offset_ns: int
+    realtime_offset_end_ns: int
+    # The largest error of either offset sample.
+    realtime_offset_uncertainty_ns: int = Field(ge=0)
     # Interfaces whose packets a capture on `any` records twice, once leaving and
     # once arriving, so only the arriving copy is kept.
     loopback_ifindexes: tuple[int, ...] = ()
     pcap: str | None = None
+    # tcpdump's own report, which counts the datagrams the kernel dropped.
+    capture_log: str | None = None
+    # The TLS key logs of the peers, which decrypt the capture.
+    key_logs: tuple[str, ...] = ()
     qlog_dir: str | None = None
 
 
@@ -385,4 +394,4 @@ def ingest(
     root = manifest_path.parent
     packets = _ingest_packets(connection, manifest, root, origin_ns)
     qlog_connections = _ingest_qlog(connection, manifest, root, origin_ns)
-    return NetworkCapabilities(packets=packets, qlog_connections=qlog_connections)
+    return NetworkCapabilities(packets=packets, wire_packets=0, qlog_connections=qlog_connections)

@@ -45,6 +45,20 @@ pub enum PacketPhase {
     /// packet's other phases, so subtracting it leaves the transport's own
     /// share of the packet lifecycle.
     Application,
+    /// Wait from the completion of the socket read that returned the packet's
+    /// datagram until the packet's processing begins.
+    ///
+    /// An RX packet starts at that read's completion, so this phase starts at
+    /// the packet start. Packets from one read wait at once, so their
+    /// intervals overlap.
+    ReadQueue,
+    /// Wait from the end of packet encryption until the socket send that
+    /// accepts the packet's datagram completes.
+    ///
+    /// A TX packet ends at that send's completion, so this phase ends at the
+    /// packet end. It includes the send system call, which every packet in
+    /// the batch shares.
+    SendQueue,
 }
 
 /// Metadata known when a packet trace begins.
@@ -239,6 +253,28 @@ impl PacketTrace {
 
     /// Record a STREAM frame carried by this packet.
     pub fn stream_frame(&self, frame: StreamFrame, outcome: PacketOutcome) {
+        self.emit_stream_frame(frame, outcome, None);
+    }
+
+    /// Record a STREAM frame at a previously captured timestamp.
+    ///
+    /// An RX frame's timestamp is the instant the stream's receive buffer
+    /// accepted its bytes. A stack that learns the outcome only later stamps
+    /// that instant and records the frame afterwards with this method.
+    pub fn stream_frame_at(&self, frame: StreamFrame, outcome: PacketOutcome, timestamp_ns: u64) {
+        self.emit_stream_frame(frame, outcome, Some(timestamp_ns));
+    }
+
+    /// Record a STREAM frame at `timestamp_ns`, or at the current time when it is absent.
+    ///
+    /// The clock is read only after enablement is checked, so a disabled frame
+    /// costs no clock read.
+    fn emit_stream_frame(
+        &self,
+        frame: StreamFrame,
+        outcome: PacketOutcome,
+        timestamp_ns: Option<u64>,
+    ) {
         let Some(state) = &self.0 else {
             return;
         };
@@ -246,7 +282,7 @@ impl PacketTrace {
             return;
         }
         state.backend.emit(Event::StreamFrame {
-            timestamp_ns: state.backend.now_ns(),
+            timestamp_ns: timestamp_ns.unwrap_or_else(|| state.backend.now_ns()),
             trace_id: state.trace_id,
             frame,
             outcome,
@@ -256,20 +292,30 @@ impl PacketTrace {
     /// Finish the packet with an explicit result.
     pub fn finish(mut self, outcome: PacketOutcome) {
         if let Some(state) = self.0.take() {
-            state.emit_end(outcome);
+            state.emit_end(outcome, None);
+        }
+    }
+
+    /// Finish the packet at a previously captured timestamp.
+    ///
+    /// Every packet one socket send carried ends at that send's completion,
+    /// so a stack captures the completion once and ends each packet with it.
+    pub fn finish_at(mut self, outcome: PacketOutcome, timestamp_ns: u64) {
+        if let Some(state) = self.0.take() {
+            state.emit_end(outcome, Some(timestamp_ns));
         }
     }
 }
 
 impl PacketTraceState {
-    fn emit_end(self, outcome: PacketOutcome) {
+    fn emit_end(self, outcome: PacketOutcome, timestamp_ns: Option<u64>) {
         let Self {
             backend,
             trace_id,
             context,
         } = self;
         backend.emit(Event::PacketEnd {
-            timestamp_ns: backend.now_ns(),
+            timestamp_ns: timestamp_ns.unwrap_or_else(|| backend.now_ns()),
             trace_id,
             context,
             outcome,
@@ -280,7 +326,7 @@ impl PacketTraceState {
 impl Drop for PacketTrace {
     fn drop(&mut self) {
         if let Some(state) = self.0.take() {
-            state.emit_end(PacketOutcome::Abandoned);
+            state.emit_end(PacketOutcome::Abandoned, None);
         }
     }
 }

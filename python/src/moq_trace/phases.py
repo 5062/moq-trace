@@ -48,6 +48,10 @@ OBJECT_PHASES = (
 )
 
 PACKET_PHASES = (
+    # An RX packet starts when the socket read that returned its datagram
+    # completes, and `read_queue` covers the wait from there until its
+    # processing begins.
+    Phase("packet", "rx", "read_queue", "Read queue", wait=True),
     Phase("packet", "rx", "header_parse", "Header parse"),
     Phase("packet", "rx", "routing", "Routing"),
     # Quinn's `scheduling` phase is the wait in the connection's queue,
@@ -59,6 +63,10 @@ PACKET_PHASES = (
     Phase("packet", "rx", "application", "Application", drawn=False),
     Phase("packet", "tx", "frame_encode", "Frame encode"),
     Phase("packet", "tx", "packet_encrypt", "Packet encrypt"),
+    # A TX packet ends when the socket send that accepted its datagram
+    # completes, and `send_queue` covers the wait from encryption until then,
+    # including the send itself.
+    Phase("packet", "tx", "send_queue", "Send queue", wait=True),
 )
 
 PHASES = OBJECT_PHASES + PACKET_PHASES

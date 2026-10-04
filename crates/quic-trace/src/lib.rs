@@ -18,6 +18,9 @@ pub use packet::{
 mod socket;
 pub use socket::{SocketOutcome, SocketStats, SocketTrace};
 
+mod path;
+pub use path::ConnectionPath;
+
 /// Event direction at the local transport interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Direction {

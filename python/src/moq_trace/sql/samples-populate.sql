@@ -3,4 +3,8 @@ SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, lat
 UNION ALL
 SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM quic_object_samples
 UNION ALL
-SELECT process_id, metric, NULL, NULL, trace_id, span_id, elapsed_ns, latency_ns FROM packet_samples;
+SELECT process_id, metric, NULL, NULL, trace_id, span_id, elapsed_ns, latency_ns FROM packet_samples
+UNION ALL
+SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM wire_object_samples
+UNION ALL
+SELECT process_id, metric, NULL, NULL, trace_id, NULL, elapsed_ns, latency_ns FROM wire_packet_samples;

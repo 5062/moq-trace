@@ -6,8 +6,9 @@ compile_error!("the lttng feature is supported only on Linux");
 use std::sync::OnceLock;
 
 pub use quic_trace::{
-    Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace, PacketSpace,
-    PacketTrace, SocketOutcome, SocketStats, SocketTrace, StreamFrame, next_connection_id,
+    ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace,
+    PacketSpace, PacketTrace, SocketOutcome, SocketStats, SocketTrace, StreamFrame,
+    next_connection_id,
 };
 pub use trace_core::now_ns;
 
@@ -68,6 +69,11 @@ impl Handle {
     /// Start a UDP socket trace through the shared transport toolkit.
     pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> SocketTrace {
         self.transport.socket(direction, connection_id)
+    }
+
+    /// Record a connection's path through the shared transport toolkit.
+    pub fn connection_path(&self, connection_id: u64, path: ConnectionPath) {
+        self.transport.connection_path(connection_id, path);
     }
 }
 

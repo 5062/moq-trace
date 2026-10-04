@@ -95,6 +95,15 @@ SCHEMAS = {
         offset_end=pa.uint64(),
         outcome=pa.string(),
     ),
+    "quic_connection_path": _schema(
+        connection_id=pa.uint64(),
+        local_address_high=pa.uint64(),
+        local_address_low=pa.uint64(),
+        local_port=pa.uint16(),
+        peer_address_high=pa.uint64(),
+        peer_address_low=pa.uint64(),
+        peer_port=pa.uint16(),
+    ),
     "udp_socket_start": _schema(
         trace_id=pa.uint64(),
         connection_id=pa.uint64(),

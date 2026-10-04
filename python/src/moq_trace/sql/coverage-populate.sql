@@ -5,17 +5,26 @@ SELECT frame.process_id, frame.trace_id AS object_trace_id, frame.seq::UINTEGER 
 FROM coverage_frames frame JOIN coverage_completion completion USING(process_id, trace_id)
 WHERE frame.seq <= completion.complete_seq;
 
+-- The origin is the earliest packet start among the frames up to completion,
+-- chosen apart from the completion order: an RX packet read first can be
+-- accepted after one read later.
 INSERT INTO model.coverage
 SELECT completion.process_id, completion.trace_id AS object_trace_id,
        completion.complete_seq::UINTEGER AS complete_seq,
        opening.packet_id AS first_packet_trace_id, closing.packet_id AS complete_packet_trace_id,
-       opening.packet_start_ns::BIGINT AS first_start_ns,
-       opening.packet_end_ns::BIGINT AS first_end_ns,
-       closing.packet_end_ns::BIGINT AS complete_end_ns
+       retained.origin_ns::BIGINT AS origin_ns,
+       opening.completion_ns::BIGINT AS first_ns,
+       closing.completion_ns::BIGINT AS complete_ns
 FROM coverage_completion completion JOIN coverage_frames opening
   ON opening.process_id = completion.process_id AND opening.trace_id = completion.trace_id AND opening.seq = 1
 JOIN coverage_frames closing ON closing.process_id = completion.process_id
-  AND closing.trace_id = completion.trace_id AND closing.seq = completion.complete_seq;
+  AND closing.trace_id = completion.trace_id AND closing.seq = completion.complete_seq
+JOIN (
+  SELECT frame.process_id, frame.trace_id, min(frame.packet_start_ns) AS origin_ns
+  FROM coverage_frames frame JOIN coverage_completion completion USING (process_id, trace_id)
+  WHERE frame.seq <= completion.complete_seq
+  GROUP BY ALL
+) AS retained ON retained.process_id = completion.process_id AND retained.trace_id = completion.trace_id;
 
 INSERT INTO model.coverage_packets
 SELECT process_id, object_trace_id, packet_trace_id, min(seq)::UINTEGER AS first_seq,

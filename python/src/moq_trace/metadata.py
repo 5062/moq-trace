@@ -130,10 +130,12 @@ class NetworkCapabilities(ArtifactModel):
     """Network measurements a run captured beside its trace.
 
     `packets` records whether a packet capture on the relay host was analyzed,
-    and `qlog_connections` how many QUIC connections the relay's qlog described.
+    `wire_packets` how many QUIC packets decrypting it yielded, and
+    `qlog_connections` how many QUIC connections the relay's qlog described.
     """
 
     packets: bool
+    wire_packets: int = Field(ge=0)
     qlog_connections: int = Field(ge=0)
 
 

@@ -1,4 +1,4 @@
-"""A header-only packet capture of the relay's UDP port."""
+"""A full packet capture of the relay's UDP port."""
 
 from __future__ import annotations
 
@@ -29,15 +29,16 @@ def take_sudo_password() -> str | None:
 
 
 def packet_capture_command(pcap: str, port: int, user: str, password: bool = False) -> list[str]:
-    """Capture the headers of every UDP datagram on `port`, on every interface.
+    """Capture every UDP datagram on `port` whole, on every interface.
 
     Capturing needs privileges, so tcpdump runs under sudo and drops them to
     `user` before writing, which keeps the file readable by the analysis. With
     `password`, sudo reads the password from standard input without prompting;
     otherwise it must not need one. `LINUX_SLL2` records the interface and
     direction of each packet, which the analysis needs to count a loopback
-    datagram once. The first 128 bytes hold every header, and the UDP header
-    carries the full length.
+    datagram once. The payloads are captured whole, because analysis decrypts
+    them with the peers' key logs, and a 64 MiB kernel buffer keeps a capture
+    of whole payloads from dropping datagrams, which analysis rejects.
     """
 
     sudo = ["sudo", "-S", "-p", ""] if password else ["sudo", "-n"]
@@ -49,7 +50,9 @@ def packet_capture_command(pcap: str, port: int, user: str, password: bool = Fal
         "-y",
         "LINUX_SLL2",
         "-s",
-        "128",
+        "0",
+        "-B",
+        "65536",
         "--time-stamp-precision",
         "nano",
         "-U",

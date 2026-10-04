@@ -89,3 +89,14 @@ _OBJECT_SPANS = (
     ("full_span", "MoQ"),
     ("quic_full_span", "QUIC+MoQ"),
 )
+
+# The span measured from the decrypted packet capture, which contains the
+# QUIC+MoQ span and the kernel time around it. Only a run with a packet capture
+# has it.
+_WIRE_SPAN = ("wire_full_span", "Wire")
+
+
+def _object_spans(wire: bool) -> tuple[tuple[str, str], ...]:
+    """The object spans to draw, with the wire span when every run measured it."""
+
+    return (*_OBJECT_SPANS, _WIRE_SPAN) if wire else _OBJECT_SPANS

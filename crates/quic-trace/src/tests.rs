@@ -24,16 +24,164 @@ fn events(handle: &Handle) -> Vec<Event> {
         .unwrap_or_default()
 }
 
-/// Return the trace identifier an event carries.
-fn trace_id(event: &Event) -> u64 {
+/// Return the trace identifier an event carries, if it belongs to a lifecycle.
+fn trace_id(event: &Event) -> Option<u64> {
     match event {
         Event::PacketStart { trace_id, .. }
         | Event::PacketEnd { trace_id, .. }
         | Event::PacketPhase { trace_id, .. }
         | Event::StreamFrame { trace_id, .. }
         | Event::SocketStart { trace_id, .. }
-        | Event::SocketEnd { trace_id, .. } => *trace_id,
+        | Event::SocketEnd { trace_id, .. } => Some(*trace_id),
+        Event::ConnectionPath { .. } => None,
     }
+}
+
+/// Return an event's timestamp.
+fn timestamp(event: &Event) -> u64 {
+    match event {
+        Event::PacketStart { timestamp_ns, .. }
+        | Event::PacketEnd { timestamp_ns, .. }
+        | Event::PacketPhase { timestamp_ns, .. }
+        | Event::StreamFrame { timestamp_ns, .. }
+        | Event::SocketStart { timestamp_ns, .. }
+        | Event::SocketEnd { timestamp_ns, .. }
+        | Event::ConnectionPath { timestamp_ns, .. } => *timestamp_ns,
+    }
+}
+
+#[test]
+fn packet_and_socket_end_at_a_captured_send_completion() {
+    let handle = trace();
+    let socket = handle.socket(Direction::Tx, None);
+    let first = handle.packet(PacketContext::new(Direction::Tx, 7));
+    let second = handle.packet(PacketContext::new(Direction::Tx, 7));
+    let completion = now_ns() + 1_000;
+    socket.finish_at(
+        SocketOutcome::Success,
+        SocketStats::new(1, 2, 2400),
+        completion,
+    );
+    first.finish_at(PacketOutcome::Success, completion);
+    second.finish_at(PacketOutcome::Dropped, completion);
+    let ends: Vec<_> = events(&handle)
+        .into_iter()
+        .filter(|event| matches!(event, Event::PacketEnd { .. } | Event::SocketEnd { .. }))
+        .collect();
+    assert_eq!(ends.len(), 3);
+    assert!(ends.iter().all(|event| timestamp(event) == completion));
+    assert!(matches!(
+        ends[2],
+        Event::PacketEnd {
+            outcome: PacketOutcome::Dropped,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn stream_frame_records_a_captured_acceptance_time() {
+    let handle = trace();
+    let packet = handle.packet(PacketContext::new(Direction::Rx, 7));
+    let accepted = now_ns();
+    packet.stream_frame_at(StreamFrame::new(4, 0, 10), PacketOutcome::Success, accepted);
+    packet.stream_frame_at(
+        StreamFrame::new(4, 10, 20),
+        PacketOutcome::Dropped,
+        accepted + 5,
+    );
+    packet.finish(PacketOutcome::Success);
+    let frames: Vec<_> = events(&handle)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::StreamFrame {
+                timestamp_ns,
+                frame,
+                outcome,
+                ..
+            } => Some((timestamp_ns, frame, outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        frames,
+        vec![
+            (accepted, StreamFrame::new(4, 0, 10), PacketOutcome::Success),
+            (
+                accepted + 5,
+                StreamFrame::new(4, 10, 20),
+                PacketOutcome::Dropped
+            ),
+        ]
+    );
+}
+
+#[test]
+fn queue_phases_bound_the_packet_lifecycle() {
+    let handle = trace();
+    let read = now_ns();
+    let packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_start_ns(read));
+    packet
+        .phase_at(PacketPhase::ReadQueue, read)
+        .finish(PacketOutcome::Success);
+    packet.finish(PacketOutcome::Success);
+    let events = events(&handle);
+    assert_eq!(timestamp(&events[0]), read);
+    assert!(matches!(
+        events[1],
+        Event::PacketPhase {
+            phase: PacketPhase::ReadQueue,
+            edge: PhaseEdge::Start,
+            timestamp_ns,
+            ..
+        } if timestamp_ns == read
+    ));
+}
+
+#[test]
+fn connection_path_encodes_addresses_as_ipv6() {
+    use std::net::SocketAddr;
+
+    let handle = trace();
+    let local: SocketAddr = "10.0.0.1:4443".parse().unwrap();
+    let peer: SocketAddr = "[2001:db8::7]:50266".parse().unwrap();
+    handle.connection_path(9, ConnectionPath::new(local, peer));
+    let events = events(&handle);
+    let [
+        Event::ConnectionPath {
+            connection_id: 9,
+            path,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("expected one connection path event, got {events:?}");
+    };
+    assert_eq!(path.local, local);
+    assert_eq!(path.peer, peer);
+    let mapped = crate::path::address_bits(local.ip());
+    assert_eq!((mapped >> 64) as u64, 0);
+    assert_eq!(mapped as u64, 0x0000_ffff_0a00_0001);
+    let v6 = crate::path::address_bits(peer.ip());
+    assert_eq!((v6 >> 64) as u64, 0x2001_0db8_0000_0000);
+    assert_eq!(v6 as u64, 7);
+}
+
+#[test]
+fn disabled_connection_path_reads_no_clock() {
+    let handle = trace();
+    let recording = recording(&handle);
+    recording.enable_only(Tracepoint::PacketStart);
+    let clock_reads = recording.clock_reads();
+    handle.connection_path(
+        1,
+        ConnectionPath::new(
+            "127.0.0.1:1".parse().unwrap(),
+            "127.0.0.1:2".parse().unwrap(),
+        ),
+    );
+    assert_eq!(recording.clock_reads(), clock_reads);
+    assert!(events(&handle).is_empty());
 }
 
 #[test]
@@ -218,6 +366,14 @@ fn packet_phase_wire_values_match_the_provider() {
         (
             PacketPhase::Application,
             ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_APPLICATION,
+        ),
+        (
+            PacketPhase::ReadQueue,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_READ_QUEUE,
+        ),
+        (
+            PacketPhase::SendQueue,
+            ffi::quic_trace_packet_phase_QUIC_TRACE_PACKET_PHASE_SEND_QUEUE,
         ),
     ];
     for (phase, wire) in phases {
