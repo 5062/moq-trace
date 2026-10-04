@@ -321,6 +321,35 @@ class SqlAnalysisTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "does not contain process 9"):
             _select_process(self.connection, 9, (0,))
 
+    def test_ingest_separates_sources_with_reused_process_and_trace_ids(self) -> None:
+        """A batch joins its capture and host as well as its PID."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(1, "tx", 2, pid=9)
+        original = list(self.batches(None, None))
+
+        def batches(*args):
+            for capture, hostname in (("a", "host-1"), ("b", "host-1"), ("a", "host-2")):
+                for name, batch in original:
+                    yield name, batch.replace_schema_metadata({"capture": capture, "hostname": hostname})
+
+        with duckdb.connect(":memory:") as connection, mock.patch.object(ctf, "batches", batches):
+            self.assertEqual(_ingest(connection, pathlib.Path("unused.ctf"), (0, 9)), (0, 9))
+            self.assertEqual(
+                connection.execute(
+                    "SELECT source.capture, source.hostname, raw.pid, raw.trace_id "
+                    "FROM raw.moq_object_start AS raw JOIN processes AS source USING (process_id) ORDER BY ALL"
+                ).fetchall(),
+                [
+                    ("a", "host-1", 0, 1),
+                    ("a", "host-1", 9, 1),
+                    ("a", "host-2", 0, 1),
+                    ("a", "host-2", 9, 1),
+                    ("b", "host-1", 0, 1),
+                    ("b", "host-1", 9, 1),
+                ],
+            )
+
     def test_ingest_reports_an_expected_process_that_recorded_nothing(self) -> None:
         """A peer built without tracing is caught here rather than silently skipped."""
 

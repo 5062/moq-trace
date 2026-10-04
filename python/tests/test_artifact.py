@@ -298,7 +298,7 @@ class ArtifactTests(unittest.TestCase):
             "success" if field.type == "string" else 2**63 if field.name == "timestamp_ns" else 0 for field in schema
         ]
         with self.assertRaisesRegex(ctf.CtfError, "udp_socket_end.timestamp_ns .* int64"):
-            ctf._batch("udp_socket_end", [row])
+            ctf._batch("udp_socket_end", [[value] for value in row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
         for version in (2, 4):

@@ -44,6 +44,9 @@ _MONOTONIC_START = re.compile(r"monotonic_start_ns=(\d+)")
 # declares that with `rtt_unit=s` beside its start instant.
 _RTT_UNIT = re.compile(r"rtt_unit=(ms|s)\b")
 
+# Bound event rows retained between Arrow inserts.
+_BATCH_ROWS = 8192
+
 
 class NetworkManifest(BaseModel):
     """What the runner captured beside a trace, and how to place it on the trace clock.
@@ -109,22 +112,40 @@ def read_datagrams(
         )
 
 
-def _qlog_records(path: pathlib.Path) -> Iterator[dict]:
-    """Yield the JSON records of a JSON-SEQ qlog file.
+def _sequence_records(path: pathlib.Path) -> Iterator[bytes]:
+    """Read JSON-SEQ incrementally, retaining at most one record and one chunk."""
 
-    A relay that is killed can leave its last record half written, so a final
-    record that does not parse is dropped. Any earlier one is an error.
+    pending = bytearray()
+    with path.open("rb") as stream:
+        while chunk := stream.read(65_536):
+            parts = chunk.split(b"\x1e")
+            pending.extend(parts[0])
+            for part in parts[1:]:
+                record = pending.strip()
+                if record:
+                    yield bytes(record)
+                pending = bytearray(part)
+        record = pending.strip()
+        if record:
+            yield bytes(record)
+
+
+def _qlog_records(path: pathlib.Path) -> Iterator[dict]:
+    """Yield JSON-SEQ records, ignoring only a malformed final nonempty record.
+
+    A relay that is killed can leave its last record half written. A malformed
+    record is retained as an error until another nonempty record proves it was
+    not the final one.
     """
 
-    records = [record.strip() for record in path.read_bytes().split(b"\x1e")]
-    records = [record for record in records if record]
-    for index, record in enumerate(records):
+    pending_error = None
+    for record in _sequence_records(path):
+        if pending_error is not None:
+            raise TraceError(f"{path} holds a record that is not JSON: {pending_error}") from pending_error
         try:
             yield json.loads(record)
         except json.JSONDecodeError as error:
-            if index == len(records) - 1:
-                return
-            raise TraceError(f"{path} holds a record that is not JSON: {error}") from error
+            pending_error = error
 
 
 def read_qlog(path: pathlib.Path) -> Iterator[tuple[int, str, str, dict]]:
@@ -245,30 +266,66 @@ def _roles(
     return roles
 
 
-def _ingest_packets(
+def _assign_roles(
+    connection: duckdb.DuckDBPyConnection,
+    tables: tuple[tuple[str, str], ...],
+    roles: dict[str, str],
+) -> None:
+    """Assign final roles after every packet has contributed to the totals."""
+
+    batch = pa.table(
+        {"key": list(roles), "role": list(roles.values())},
+        schema=pa.schema(
+            [
+                ("key", pa.string()),
+                ("role", pa.string()),
+            ]
+        ),
+    )
+    connection.register("network_roles", batch)
+    try:
+        for table, key in tables:
+            connection.execute(
+                f"UPDATE {table} AS target SET role = roles.role FROM network_roles AS roles "
+                f"WHERE target.{key} = roles.key "
+                "AND target.process_id = (SELECT process_id FROM processes WHERE analyzed)"
+            )
+    finally:
+        connection.unregister("network_roles")
+
+
+def ingest_datagrams(
     connection: duckdb.DuckDBPyConnection,
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
-) -> bool:
+) -> Iterator[pcap.Datagram]:
+    """Store throughput in bounded batches while yielding datagrams for decryption.
+
+    Exhaust the iterator to flush the last batch and assign peer roles. Totals
+    include datagrams before the origin, even though those rows are not stored.
+    """
+
     if manifest.pcap is None:
-        _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, [])
-        return False
-    datagrams = list(read_datagrams(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes))
+        return
     inbound: dict[str, int] = {}
     outbound: dict[str, int] = {}
     first_seen: dict[str, int] = {}
-    for realtime_ns, direction, peer, size in datagrams:
-        totals = inbound if direction == "ingress" else outbound
-        totals[peer] = totals.get(peer, 0) + size
-        first_seen.setdefault(peer, realtime_ns)
-    roles = _roles(inbound, outbound, first_seen, numbered=False)
-    rows = [
-        (realtime_ns - manifest.realtime_offset_ns - origin_ns, direction, peer, roles[peer], size)
-        for realtime_ns, direction, peer, size in datagrams
-    ]
-    _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, [row for row in rows if row[0] >= 0])
-    return True
+    rows = []
+    for datagram in pcap.read_datagrams(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes):
+        peer = _endpoint(*datagram.peer)
+        totals = inbound if datagram.from_peer else outbound
+        totals[peer] = totals.get(peer, 0) + datagram.payload_bytes
+        first_seen.setdefault(peer, datagram.realtime_ns)
+        elapsed_ns = datagram.realtime_ns - manifest.realtime_offset_ns - origin_ns
+        if elapsed_ns >= 0:
+            rows.append((elapsed_ns, "ingress" if datagram.from_peer else "egress", peer, None, datagram.payload_bytes))
+            if len(rows) >= _BATCH_ROWS:
+                _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, rows)
+                rows.clear()
+        yield datagram
+    _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, rows)
+    _assign_roles(connection, (("network.datagrams", "peer"),), _roles(inbound, outbound, first_seen, numbered=False))
 
 
 def _ingest_qlog(
@@ -304,21 +361,30 @@ def _ingest_qlog(
                         ),
                         data.get("congestion_window"),
                         data.get("bytes_in_flight"),
+                        None,
                     )
                 )
             elif name == "recovery:packet_lost":
                 header = data.get("header") or {}
-                losses.append((elapsed_ns, key, header.get("packet_number"), header.get("length"), data.get("trigger")))
+                if elapsed_ns >= 0:
+                    losses.append(
+                        (elapsed_ns, key, header.get("packet_number"), header.get("length"), data.get("trigger"), None)
+                    )
+            for table, columns, rows in (
+                ("network.recovery", _RECOVERY_COLUMNS, recovery),
+                ("network.losses", _LOSS_COLUMNS, losses),
+            ):
+                if len(rows) >= _BATCH_ROWS:
+                    _load(connection, table, columns, rows)
+                    rows.clear()
     roles = _roles(received, sent, first_seen, numbered=True)
     for table, columns, rows in (
         ("network.recovery", _RECOVERY_COLUMNS, recovery),
         ("network.losses", _LOSS_COLUMNS, losses),
     ):
-        # Recovery rows before the origin are kept: qlog reports a field only when
-        # it changes, and a value settled during the handshake, such as the
-        # minimum RTT, still holds inside the window.
-        kept = rows if table == "network.recovery" else [row for row in rows if row[0] >= 0]
-        _load(connection, table, columns, [(*row, roles[row[1]]) for row in kept])
+        # Recovery values settled before the origin still hold inside the window.
+        _load(connection, table, columns, rows)
+    _assign_roles(connection, (("network.recovery", "connection"), ("network.losses", "connection")), roles)
     return len(roles)
 
 
@@ -326,6 +392,8 @@ def ingest(
     connection: duckdb.DuckDBPyConnection,
     manifest_path: pathlib.Path,
     origin_ns: int,
+    *,
+    defer_datagrams: bool = False,
 ) -> NetworkCapabilities:
     """Load a run's network capture into tables on the analysis time axis.
 
@@ -333,12 +401,16 @@ def ingest(
     latency samples are measured from, so network and latency figures share one
     axis. Datagrams and losses before the origin are dropped. Recovery updates
     before it are kept at negative times, because their values hold until the
-    next update.
+    next update. With `defer_datagrams`, the caller must exhaust
+    :func:`ingest_datagrams`, allowing decryption to consume the same stream.
     """
 
     connection.execute(sql.read("network-schema"))
     manifest = read_manifest(manifest_path)
     root = manifest_path.parent
-    packets = _ingest_packets(connection, manifest, root, origin_ns)
+    if not defer_datagrams:
+        for _ in ingest_datagrams(connection, manifest, root, origin_ns):
+            pass
+    packets = manifest.pcap is not None
     qlog_connections = _ingest_qlog(connection, manifest, root, origin_ns)
     return NetworkCapabilities(packets=packets, wire_packets=0, qlog_connections=qlog_connections)

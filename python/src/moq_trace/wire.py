@@ -174,12 +174,15 @@ def ingest(
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
+    *,
+    datagrams: Iterator[pcap.Datagram] | None = None,
 ) -> int:
     """Decrypt the capture, join it to the trace, check both, and stage wire samples.
 
     Returns the number of decrypted packets. Must run after trace coverage is
     resolved and the sample stages exist, because it adds the wire coverage and
-    its samples beside them.
+    its samples beside them. `datagrams` supplies an existing packet stream so
+    throughput measurement and decryption can read the capture once.
     """
 
     if manifest.capture_log is None:
@@ -192,10 +195,14 @@ def ingest(
     packets = []
     frames = []
     packet_count = 0
-    captured = read_capture(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes)
-    for realtime_ns, from_peer, local, peer, payload in captured:
-        monotonic_ns = realtime_ns - manifest.realtime_offset_ns
-        for packet in decryptor.datagram(monotonic_ns, local, peer, from_peer, payload):
+    capture_path = root / manifest.pcap
+    if datagrams is None:
+        datagrams = pcap.read_datagrams(capture_path, manifest.relay_port, manifest.loopback_ifindexes)
+    for datagram in datagrams:
+        monotonic_ns = datagram.realtime_ns - manifest.realtime_offset_ns
+        for packet in decryptor.datagram(
+            monotonic_ns, datagram.local, datagram.peer, datagram.from_peer, datagram.complete_payload(capture_path)
+        ):
             packet_id = packet_count
             packet_count += 1
             state = decryptor.connections[packet.connection]

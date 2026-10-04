@@ -233,19 +233,21 @@ class _Decoder:
 
         return int(event.common_context_field["vpid"])
 
-    def row(self, message, event, pid: int) -> list:
-        """Return one event's values in its schema's column order."""
+    def append(self, message, event, pid: int, columns: list[list]) -> None:
+        """Append one event directly to its typed batch's column buffers."""
 
         payload = event.payload_field
         tid = int(event.common_context_field["vtid"])
-        values = [pid, tid, message.default_clock_snapshot.ns_from_origin]
-        for field, presence, labels in self.fields:
+        columns[0].append(pid)
+        columns[1].append(tid)
+        columns[2].append(message.default_clock_snapshot.ns_from_origin)
+        for index, (field, presence, labels) in enumerate(self.fields, start=3):
+            column = columns[index]
             if presence is not None and not int(payload[presence]):
-                values.append(None)
+                column.append(None)
                 continue
             value = int(payload[field])
-            values.append(value if labels is None else labels[value])
-        return values
+            column.append(value if labels is None else labels[value])
 
 
 def _decoder(event_class) -> _Decoder | None:
@@ -262,10 +264,10 @@ def _decoder(event_class) -> _Decoder | None:
     return _Decoder(event_class, name)
 
 
-def _batch(name: str, rows: list[list], metadata: dict | None = None) -> pa.RecordBatch:
+def _batch(name: str, buffers: list[list], metadata: dict | None = None) -> pa.RecordBatch:
     schema = SCHEMAS[name].with_metadata(metadata) if metadata else SCHEMAS[name]
     columns = []
-    for column, field in zip(zip(*rows), schema, strict=True):
+    for column, field in zip(buffers, schema, strict=True):
         try:
             columns.append(pa.array(column, type=field.type))
         except OverflowError as error:
@@ -313,7 +315,7 @@ def _batches(
     # Keyed by the event class address, which is stable for the whole iteration,
     # so one lookup replaces resolving the event layout on every event.
     decoders: dict[int, _Decoder | None] = {}
-    rows: dict[tuple[str, str, str], list[list]] = {}
+    buffers: dict[tuple[str, str, str], list[list]] = {}
     sources: dict[int, tuple[object, tuple[str, str]]] = {}
     metadata: dict[tuple[str, str, str], dict] = {}
     discarded_events = 0
@@ -361,17 +363,20 @@ def _batches(
                 }
             )
             metadata[key] = {"capture": capture, "hostname": hostname, "outcomes": json.dumps(outcomes)}
-        values = rows.setdefault(key, [])
-        values.append(decoder.row(message, event, pid))
+        if key not in buffers:
+            buffers[key] = [[] for _ in SCHEMAS[decoder.name]]
+        columns = buffers[key]
+        decoder.append(message, event, pid, columns)
         event_count += 1
-        if len(values) == batch_size:
-            yield decoder.name, _batch(decoder.name, values, metadata[key])
-            values.clear()
+        if len(columns[0]) == batch_size:
+            yield decoder.name, _batch(decoder.name, columns, metadata[key])
+            for column in columns:
+                column.clear()
 
     if discarded_events or discarded_packets:
         raise CtfError(f"LTTng discarded {discarded_events} events and {discarded_packets} packets")
     if event_count == 0:
         raise CtfError("CTF trace contains no MoQ or QUIC trace events")
-    for key, values in rows.items():
-        if values:
-            yield key[2], _batch(key[2], values, metadata[key])
+    for key, columns in buffers.items():
+        if columns[0]:
+            yield key[2], _batch(key[2], columns, metadata[key])

@@ -16,7 +16,7 @@ sys.path.insert(0, str(SOURCE))
 import test_analyze  # noqa: E402
 from test_quic import _Peer, _stream  # noqa: E402
 
-from moq_trace import analyze, coverage, ctf, network, quic, wire  # noqa: E402
+from moq_trace import analyze, coverage, ctf, network, pcap, quic, wire  # noqa: E402
 from moq_trace.artifact import open_artifact  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 from moq_trace.metadata import Window, Workload  # noqa: E402
@@ -219,8 +219,14 @@ class WireTests(unittest.TestCase):
                 sizes.append(len(rows))
             load(connection, table, columns, rows)
 
-        with mock.patch.object(wire, "_BATCH_ROWS", 1), mock.patch.object(wire, "_load", record_load):
+        with (
+            mock.patch.object(wire, "_BATCH_ROWS", 1),
+            mock.patch.object(network, "_BATCH_ROWS", 1),
+            mock.patch.object(wire, "_load", record_load),
+            mock.patch.object(pcap, "read_datagrams", wraps=pcap.read_datagrams) as read_datagrams,
+        ):
             batched = self.analyze()
+        read_datagrams.assert_called_once()
         self.assertTrue(sizes)
         self.assertLessEqual(max(sizes), 1)
         with (

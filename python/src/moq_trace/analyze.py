@@ -80,16 +80,18 @@ def _ingest(
             raise TraceError("CTF batch is missing its capture UUID or hostname") from error
         outcomes.update(json.loads(metadata.get(b"outcomes", b"[]")))
         if "outcome" in batch.schema.names:
-            outcomes.update(value for value in batch.column("outcome").to_pylist() if value is not None)
+            outcomes.update(value for value in batch.column("outcome").unique().to_pylist() if value is not None)
         connection.register("arrow_batch", batch)
-        for (pid,) in connection.execute("SELECT DISTINCT pid FROM arrow_batch ORDER BY pid").fetchall():
+        for pid in sorted(batch.column("pid").unique().to_pylist()):
             key = (*source, pid)
             if key not in sources:
                 sources[key] = len(sources)
                 connection.execute("INSERT INTO processes VALUES (?, ?, ?, ?, 0, 0, false)", [sources[key], *key])
-            connection.execute(
-                f"INSERT INTO raw.{name} SELECT *, ?::UINTEGER FROM arrow_batch WHERE pid = ?", [sources[key], pid]
-            )
+        connection.execute(
+            f"INSERT INTO raw.{name} SELECT batch.*, source.process_id FROM arrow_batch AS batch "
+            "JOIN processes AS source ON source.pid = batch.pid AND source.capture = ? AND source.hostname = ?",
+            source,
+        )
         connection.unregister("arrow_batch")
     union = " UNION ALL ".join(f"SELECT process_id, ctf_timestamp_ns FROM raw.{name}" for name in ctf.SCHEMAS)
     connection.execute(
@@ -370,11 +372,12 @@ def _ingest_network(connection: duckdb.DuckDBPyConnection, path: pathlib.Path, o
     defined.
     """
 
-    capabilities = network_capture.ingest(connection, path, origin)
+    capabilities = network_capture.ingest(connection, path, origin, defer_datagrams=True)
     manifest = network_capture.read_manifest(path)
     if manifest.pcap is None:
         return capabilities
-    packets = wire.ingest(connection, manifest, path.parent, origin)
+    datagrams = network_capture.ingest_datagrams(connection, manifest, path.parent, origin)
+    packets = wire.ingest(connection, manifest, path.parent, origin, datagrams=datagrams)
     return capabilities.model_copy(update={"wire_packets": packets})
 
 

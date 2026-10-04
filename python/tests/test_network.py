@@ -7,6 +7,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import duckdb
 
@@ -169,6 +170,24 @@ class QlogTests(unittest.TestCase):
 
         self.assertEqual(events[0][3], {"smoothed_rtt": 250.0, "min_rtt": 200.0, "congestion_window": 12000})
 
+    def test_json_sequence_handles_chunk_boundaries_and_empty_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.sqlog"
+            record = {"description": "é" * 70_000}
+            encoded = json.dumps(record, ensure_ascii=False).encode()
+            path.write_bytes(b"\x1e \n\x1e" + encoded + b"\x1e\x1e{}\n\x1e ")
+            self.assertEqual(list(network._qlog_records(path)), [record, {}])
+
+    def test_only_a_malformed_final_nonempty_qlog_record_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.sqlog"
+            for tail in (b"", b"\x1e \n\x1e"):
+                path.write_bytes(b'\x1e{}\x1e{"partial":' + tail)
+                self.assertEqual(list(network._qlog_records(path)), [{}])
+            path.write_bytes(b'\x1e{}\x1e{"partial":\x1e{}')
+            with self.assertRaisesRegex(TraceError, "not JSON"):
+                list(network._qlog_records(path))
+
     def test_a_qlog_without_its_start_instant_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "relay.sqlog"
@@ -258,6 +277,74 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(loss, [("subscriber 1", 1_000_000_000, 7)])
         self.assertEqual(recovery_types["min_rtt_ns"], "DOUBLE")
         self.assertEqual(recovery_types["bytes_in_flight"], "BIGINT")
+
+    def test_batches_preserve_roles_determined_by_later_and_early_packets(self) -> None:
+        """Roles use all packets, even those outside the stored time range."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            _pcap(
+                root / "relay.pcap",
+                [
+                    (9, _frame(ETHERNET, 0, "10.0.0.2", "10.0.0.1", 50000, RELAY_PORT, 100)),
+                    (10, _frame(ETHERNET, 4, "10.0.0.1", "10.0.0.2", RELAY_PORT, 50000, 1)),
+                    (11, _frame(ETHERNET, 4, "10.0.0.1", "10.0.0.3", RELAY_PORT, 60000, 1)),
+                ],
+            )
+            (root / "qlog").mkdir()
+            _qlog(
+                root / "qlog" / "a.sqlog",
+                "monotonic_start_ns=0",
+                [
+                    {"time": 0, "group_id": "pub", "name": "recovery:metrics_updated", "data": {"min_rtt": 2}},
+                    {"time": 0.000011, "group_id": "pub", "name": "recovery:packet_lost", "data": {}},
+                    {"time": 0, "group_id": "pub", "name": "recovery:packet_lost", "data": {}},
+                    {"time": 1, "group_id": "sub", "name": "recovery:metrics_updated", "data": {}},
+                ],
+            )
+            # Packet totals in a later file decide the roles of already flushed rows.
+            _qlog(
+                root / "qlog" / "b.sqlog",
+                "monotonic_start_ns=0",
+                [
+                    {"time": 2, "group_id": "pub", "name": "transport:packet_received", "data": {}},
+                    {"time": 2, "group_id": "sub", "name": "transport:packet_sent", "data": {}},
+                ],
+            )
+            manifest = root / network.MANIFEST
+            manifest.write_text(
+                network.NetworkManifest(
+                    relay_port=RELAY_PORT,
+                    realtime_offset_ns=0,
+                    realtime_offset_end_ns=0,
+                    realtime_offset_uncertainty_ns=0,
+                    pcap="relay.pcap",
+                    qlog_dir="qlog",
+                ).model_dump_json()
+            )
+            sizes = []
+            load = network._load
+
+            def record_load(connection, table, columns, rows):
+                sizes.append(len(rows))
+                load(connection, table, columns, rows)
+
+            with duckdb.connect(":memory:") as connection:
+                connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
+                with mock.patch.object(network, "_BATCH_ROWS", 1), mock.patch.object(network, "_load", record_load):
+                    network.ingest(connection, manifest, 10)
+                self.assertLessEqual(max(sizes), 1)
+                self.assertEqual(
+                    connection.execute("SELECT peer, role FROM network.datagrams ORDER BY elapsed_ns").fetchall(),
+                    [("10.0.0.2:50000", "publisher"), ("10.0.0.3:60000", "subscriber")],
+                )
+                self.assertEqual(
+                    connection.execute("SELECT elapsed_ns, role FROM network.recovery ORDER BY elapsed_ns").fetchall(),
+                    [(-10, "publisher"), (999990, "subscriber 1")],
+                )
+                self.assertEqual(
+                    connection.execute("SELECT elapsed_ns, role FROM network.losses").fetchall(), [(1, "publisher")]
+                )
 
     def test_a_value_settled_before_the_window_is_drawn_from_zero(self) -> None:
         connection = duckdb.connect(":memory:")
