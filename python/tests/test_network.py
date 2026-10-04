@@ -14,7 +14,7 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import network, pcap, wire  # noqa: E402
+from moq_trace import network, pcap  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 from moq_trace.plot import PlotOptions, plot_network  # noqa: E402
 from moq_trace.plot.network import _recovery_series  # noqa: E402
@@ -73,13 +73,13 @@ class DatagramTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "relay.pcap"
             _pcap(path, records)
-            datagrams = list(network.read_datagrams(path, RELAY_PORT, (LOOPBACK,)))
+            datagrams = list(pcap.read_datagrams(path, RELAY_PORT, (LOOPBACK,)))
 
         self.assertEqual(
-            datagrams,
+            [(d.realtime_ns, d.from_peer, d.peer, d.payload_bytes) for d in datagrams],
             [
-                (1_001, "ingress", "127.0.0.1:50000", 1200),
-                (2_000, "egress", "[2001:db8::2]:60000", 900),
+                (1_001, True, ("127.0.0.1", 50000), 1200),
+                (2_000, False, ("2001:db8::2", 60000), 900),
             ],
         )
 
@@ -93,9 +93,8 @@ class DatagramTests(unittest.TestCase):
                     self.assertEqual(datagram.local, (destination, RELAY_PORT))
                     self.assertEqual(datagram.peer, (source, 50000))
                     self.assertEqual(datagram.payload_bytes, 1200)
-                    self.assertEqual(list(network.read_datagrams(path, RELAY_PORT, ()))[0][3], 1200)
                     with self.assertRaisesRegex(TraceError, "payload was not captured whole"):
-                        list(wire.read_capture(path, RELAY_PORT, ()))
+                        datagram.complete_payload(path)
 
     def test_pcap_timestamps_keep_nanosecond_and_microsecond_precision(self) -> None:
         frame = _frame(ETHERNET, 0, "10.0.0.2", "10.0.0.1", 50000, RELAY_PORT, 1200)
@@ -107,15 +106,15 @@ class DatagramTests(unittest.TestCase):
                     header = struct.pack("<IHHiIII", magic, 2, 4, 0, 0, 128, 276)
                     record = struct.pack("<IIII", seconds, fraction, len(frame), len(frame))
                     path.write_bytes(header + record + frame)
-                    datagrams = list(network.read_datagrams(path, RELAY_PORT, ()))
-                    self.assertEqual(datagrams[0][0], seconds * 1_000_000_000 + fraction * scale)
+                    datagrams = list(pcap.read_datagrams(path, RELAY_PORT, ()))
+                    self.assertEqual(datagrams[0].realtime_ns, seconds * 1_000_000_000 + fraction * scale)
 
     def test_a_capture_without_interface_direction_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "relay.pcap"
             path.write_bytes(struct.pack("<IHHiIII", 0xA1B23C4D, 2, 4, 0, 0, 128, 1))
             with self.assertRaisesRegex(TraceError, "LINUX_SLL2"):
-                list(network.read_datagrams(path, RELAY_PORT, ()))
+                list(pcap.read_datagrams(path, RELAY_PORT, ()))
 
     def test_a_truncated_pcap_record_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -124,7 +123,7 @@ class DatagramTests(unittest.TestCase):
             with path.open("ab") as handle:
                 handle.write(struct.pack("<IIII", 1, 0, 100, 100) + b"partial")
             with self.assertRaisesRegex(TraceError, "truncated pcap record"):
-                list(network.read_datagrams(path, RELAY_PORT, ()))
+                list(pcap.read_datagrams(path, RELAY_PORT, ()))
 
     def test_a_truncated_pcap_record_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -133,7 +132,7 @@ class DatagramTests(unittest.TestCase):
             with path.open("ab") as handle:
                 handle.write(b"partial")
             with self.assertRaisesRegex(TraceError, "truncated pcap record header"):
-                list(network.read_datagrams(path, RELAY_PORT, ()))
+                list(pcap.read_datagrams(path, RELAY_PORT, ()))
 
 
 class QlogTests(unittest.TestCase):

@@ -91,27 +91,6 @@ def _endpoint(address: str, port: int) -> str:
     return f"[{parsed}]:{port}" if parsed.version == 6 else f"{parsed}:{port}"
 
 
-def read_datagrams(
-    path: pathlib.Path,
-    relay_port: int,
-    loopback_ifindexes: tuple[int, ...],
-) -> Iterator[tuple[int, str, str, int]]:
-    """Yield `(realtime_ns, direction, peer, udp_payload_bytes)` for the relay's datagrams.
-
-    `direction` is `ingress` for datagrams to the relay's port and `egress` for
-    datagrams from it. The payload length comes from the UDP header, so a capture
-    truncated to its headers still counts every byte.
-    """
-
-    for datagram in pcap.read_datagrams(path, relay_port, loopback_ifindexes):
-        yield (
-            datagram.realtime_ns,
-            "ingress" if datagram.from_peer else "egress",
-            _endpoint(*datagram.peer),
-            datagram.payload_bytes,
-        )
-
-
 def _sequence_records(path: pathlib.Path) -> Iterator[bytes]:
     """Read JSON-SEQ incrementally, retaining at most one record and one chunk."""
 
@@ -294,16 +273,15 @@ def _assign_roles(
         connection.unregister("network_roles")
 
 
-def ingest_datagrams(
+def _ingest_datagrams(
     connection: duckdb.DuckDBPyConnection,
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
-) -> Iterator[pcap.Datagram]:
-    """Store throughput in bounded batches while yielding datagrams for decryption.
+) -> None:
+    """Store throughput in bounded batches and assign peer roles.
 
-    Exhaust the iterator to flush the last batch and assign peer roles. Totals
-    include datagrams before the origin, even though those rows are not stored.
+    Totals include datagrams before the origin, even though those rows are not stored.
     """
 
     if manifest.pcap is None:
@@ -323,7 +301,6 @@ def ingest_datagrams(
             if len(rows) >= _BATCH_ROWS:
                 _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, rows)
                 rows.clear()
-        yield datagram
     _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, rows)
     _assign_roles(connection, (("network.datagrams", "peer"),), _roles(inbound, outbound, first_seen, numbered=False))
 
@@ -392,8 +369,6 @@ def ingest(
     connection: duckdb.DuckDBPyConnection,
     manifest_path: pathlib.Path,
     origin_ns: int,
-    *,
-    defer_datagrams: bool = False,
 ) -> NetworkCapabilities:
     """Load a run's network capture into tables on the analysis time axis.
 
@@ -401,16 +376,13 @@ def ingest(
     latency samples are measured from, so network and latency figures share one
     axis. Datagrams and losses before the origin are dropped. Recovery updates
     before it are kept at negative times, because their values hold until the
-    next update. With `defer_datagrams`, the caller must exhaust
-    :func:`ingest_datagrams`, allowing decryption to consume the same stream.
+    next update.
     """
 
     connection.execute(sql.read("network-schema"))
     manifest = read_manifest(manifest_path)
     root = manifest_path.parent
-    if not defer_datagrams:
-        for _ in ingest_datagrams(connection, manifest, root, origin_ns):
-            pass
+    _ingest_datagrams(connection, manifest, root, origin_ns)
     packets = manifest.pcap is not None
     qlog_connections = _ingest_qlog(connection, manifest, root, origin_ns)
     return NetworkCapabilities(packets=packets, wire_packets=0, qlog_connections=qlog_connections)

@@ -23,7 +23,6 @@ from __future__ import annotations
 import ipaddress
 import pathlib
 import re
-from collections.abc import Iterator
 
 import duckdb
 import pyarrow as pa
@@ -65,29 +64,6 @@ def check_clock(manifest: NetworkManifest) -> None:
         raise TraceError(
             f"the realtime clock moved {drift} ns against the monotonic clock during the run; "
             "capture times cannot be placed on the trace clock"
-        )
-
-
-def read_capture(
-    path: pathlib.Path, relay_port: int, loopback_ifindexes: tuple[int, ...]
-) -> Iterator[tuple[int, bool, tuple[str, int], tuple[str, int], bytes]]:
-    """Yield `(realtime_ns, from_peer, local, peer, payload)` for the relay's datagrams.
-
-    A capture on `any` can record a loopback datagram twice, leaving and
-    arriving, and depending on the kernel records only the arriving copy. The
-    arriving copy is the one every capture holds, so a loopback datagram's
-    leaving copy is skipped, as `network.read_datagrams` does. A datagram on
-    any other interface is recorded once. A datagram whose payload was not
-    captured whole is an error.
-    """
-
-    for datagram in pcap.read_datagrams(path, relay_port, loopback_ifindexes):
-        yield (
-            datagram.realtime_ns,
-            datagram.from_peer,
-            datagram.local,
-            datagram.peer,
-            datagram.complete_payload(path),
         )
 
 
@@ -174,15 +150,12 @@ def ingest(
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
-    *,
-    datagrams: Iterator[pcap.Datagram] | None = None,
 ) -> int:
     """Decrypt the capture, join it to the trace, check both, and stage wire samples.
 
     Returns the number of decrypted packets. Must run after trace coverage is
     resolved and the sample stages exist, because it adds the wire coverage and
-    its samples beside them. `datagrams` supplies an existing packet stream so
-    throughput measurement and decryption can read the capture once.
+    its samples beside them.
     """
 
     if manifest.capture_log is None:
@@ -196,9 +169,7 @@ def ingest(
     frames = []
     packet_count = 0
     capture_path = root / manifest.pcap
-    if datagrams is None:
-        datagrams = pcap.read_datagrams(capture_path, manifest.relay_port, manifest.loopback_ifindexes)
-    for datagram in datagrams:
+    for datagram in pcap.read_datagrams(capture_path, manifest.relay_port, manifest.loopback_ifindexes):
         monotonic_ns = datagram.realtime_ns - manifest.realtime_offset_ns
         for packet in decryptor.datagram(
             monotonic_ns, datagram.local, datagram.peer, datagram.from_peer, datagram.complete_payload(capture_path)

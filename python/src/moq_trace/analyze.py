@@ -372,12 +372,11 @@ def _ingest_network(connection: duckdb.DuckDBPyConnection, path: pathlib.Path, o
     defined.
     """
 
-    capabilities = network_capture.ingest(connection, path, origin, defer_datagrams=True)
+    capabilities = network_capture.ingest(connection, path, origin)
     manifest = network_capture.read_manifest(path)
     if manifest.pcap is None:
         return capabilities
-    datagrams = network_capture.ingest_datagrams(connection, manifest, path.parent, origin)
-    packets = wire.ingest(connection, manifest, path.parent, origin, datagrams=datagrams)
+    packets = wire.ingest(connection, manifest, path.parent, origin)
     return capabilities.model_copy(update={"wire_packets": packets})
 
 

@@ -223,10 +223,8 @@ class WireTests(unittest.TestCase):
             mock.patch.object(wire, "_BATCH_ROWS", 1),
             mock.patch.object(network, "_BATCH_ROWS", 1),
             mock.patch.object(wire, "_load", record_load),
-            mock.patch.object(pcap, "read_datagrams", wraps=pcap.read_datagrams) as read_datagrams,
         ):
             batched = self.analyze()
-        read_datagrams.assert_called_once()
         self.assertTrue(sizes)
         self.assertLessEqual(max(sizes), 1)
         with (
@@ -276,8 +274,8 @@ class WireTests(unittest.TestCase):
         ]
         loopback = [(time, frame[:4] + struct.pack(">I", LOOPBACK) + frame[8:]) for time, frame in frames]
         _pcap(self.directory / "loopback.pcap", loopback)
-        datagrams = list(wire.read_capture(self.directory / "loopback.pcap", RELAY[1], (LOOPBACK,)))
-        self.assertEqual([(time, from_peer) for time, from_peer, *_ in datagrams], [(2, False), (3, True)])
+        datagrams = list(pcap.read_datagrams(self.directory / "loopback.pcap", RELAY[1], (LOOPBACK,)))
+        self.assertEqual([(d.realtime_ns, d.from_peer) for d in datagrams], [(2, False), (3, True)])
 
     def test_a_trace_packet_missing_from_the_wire_is_rejected(self) -> None:
         self.records.pop()
