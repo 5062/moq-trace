@@ -18,19 +18,34 @@ enum moq_trace_edge {
 	MOQ_TRACE_EDGE_DONE,
 };
 
+/*
+ * Declaration order is the wire encoding, so new phases are appended rather
+ * than placed in pipeline order. Every phase measures work except
+ * DELIVERY_WAIT and WRITE_BLOCKED, which measure waits; any other time an
+ * object spends waiting belongs to no phase.
+ */
 enum moq_trace_object_phase {
 	MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE,
 	MOQ_TRACE_OBJECT_PHASE_CREATE,
 	/* The transport handing received payload bytes to the relay. Waiting for
-	 * them to arrive and copying them into the relay model are excluded. Every
-	 * phase excludes time spent waiting on I/O. */
+	 * them to arrive and copying them into the relay model are excluded. */
 	MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ,
 	/* Write payload bytes into the relay model and mark the object complete,
-	 * so the bytes become visible to relay consumers. */
+	 * so the bytes become visible to relay consumers. Waking those consumers
+	 * belongs to NOTIFY when the relay performs it as a separate step. */
 	MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT,
 	MOQ_TRACE_OBJECT_PHASE_CLONE,
 	MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE,
 	MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE,
+	/* RX: wake or enumerate the consumers of a newly readable object. This is
+	 * the fan-out work shared by every copy, recorded on the inbound object. */
+	MOQ_TRACE_OBJECT_PHASE_NOTIFY,
+	/* TX wait: from the instant the relay made the object readable until this
+	 * copy's CLONE starts. It can start before the copy's lifecycle does. */
+	MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT,
+	/* TX wait: from a write that could not proceed until the relay resumes
+	 * writing, for flow control, backpressure, or an asynchronous lock. */
+	MOQ_TRACE_OBJECT_PHASE_WRITE_BLOCKED,
 };
 
 enum moq_trace_object_outcome {

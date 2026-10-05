@@ -712,6 +712,76 @@ class SqlAnalysisTests(unittest.TestCase):
             20_000 + 2_000 - 20_000,
         )
 
+    def test_waits_are_reported_apart_from_moq_work(self) -> None:
+        """Notify is shared RX work; delivery and blocked writes are TX waits, not work."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "frame_commit", 150_000, 151_000)
+        self.object_phase(1, 2, "notify", 151_000, 151_400)
+        # The copy waits from the commit until its clone, and its write blocks
+        # twice between three polls.
+        self.object_phase(2, 1, "delivery_wait", 151_000, 210_000)
+        self.object_phase(2, 2, "clone", 210_000, 210_200)
+        # The writes start after the fixture's TX packet does, so none of their
+        # time is transport work.
+        self.object_phase(2, 3, "payload_write", 221_000, 222_000)
+        self.object_phase(2, 4, "write_blocked", 222_000, 230_000)
+        self.object_phase(2, 5, "payload_write", 230_000, 231_000)
+        self.object_phase(2, 6, "write_blocked", 231_000, 235_000)
+        self.object_phase(2, 7, "payload_write", 235_000, 236_000)
+
+        work = self._moq_work()
+        self.assertEqual(work["moq_rx_work"], 1_000 + 400)
+        self.assertEqual(work["moq_tx_work"], 200 + 3 * 1_000)
+        self.assertEqual(work["moq_delivery_wait"], 210_000 - 151_000)
+        self.assertEqual(work["moq_write_blocked"], 8_000 + 4_000)
+
+    def test_a_copy_that_never_blocked_waits_zero_once_the_relay_measures_it(self) -> None:
+        """An unmeasured wait has no sample; a measured one that did not occur is zero."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "frame_commit", 150_000, 151_000)
+        self.object_phase(2, 1, "delivery_wait", 151_000, 210_000)
+        self.object_phase(2, 2, "payload_write", 220_000, 221_000)
+
+        work = self._moq_work()
+        self.assertEqual(work["moq_delivery_wait"], 59_000)
+        self.assertNotIn("moq_write_blocked", work)
+        # A wait in another copy of the same process makes this one's zero real.
+        self.tearDown()
+        self.setUp()
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "frame_commit", 150_000, 151_000)
+        self.object_phase(2, 1, "payload_write", 220_000, 221_000)
+        self.insert(
+            "moq_object_start",
+            ctf_timestamp_ns=9_000,
+            timestamp_ns=400_000,
+            trace_id=9,
+            logical_group=99,
+            logical_frame=0,
+            session_id=9,
+            connection_id=2,
+            direction="tx",
+            track_alias=1,
+            group_id=9,
+            object_id=0,
+            stream_id=90,
+            stream_offset_start=0,
+        )
+        self.object_phase(9, 1, "write_blocked", 400_000, 401_000)
+
+        self.assertEqual(self._moq_work()["moq_write_blocked"], 0)
+
     def test_cut_through_forwarding_writes_before_the_object_has_arrived(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)

@@ -42,9 +42,17 @@ OBJECT_PHASES = (
     Phase("object", "rx", "create", "Create"),
     Phase("object", "rx", "payload_read", "Payload read"),
     Phase("object", "rx", "frame_commit", "Frame commit"),
+    # The fan-out work every copy shares, so it is charged once, to the inbound
+    # object. A relay that wakes consumers inside its commit call emits none.
+    Phase("object", "rx", "notify", "Notify"),
+    # From the instant the relay made the object readable until this copy's
+    # clone starts: waking the consumer and the scheduler delay before it runs.
+    Phase("object", "tx", "delivery_wait", "Delivery wait", wait=True),
     Phase("object", "tx", "clone", "Clone"),
     Phase("object", "tx", "header_encode", "Header encode"),
     Phase("object", "tx", "payload_write", "Payload write"),
+    # A write that could not proceed, until the relay resumed writing.
+    Phase("object", "tx", "write_blocked", "Write blocked", wait=True),
 )
 
 PACKET_PHASES = (
@@ -82,9 +90,10 @@ def register(connection: duckdb.DuckDBPyConnection) -> None:
     """Publish the table as `phase_catalog` for the analysis SQL to join against."""
 
     connection.execute(
-        "CREATE OR REPLACE TEMP TABLE phase_catalog(subject VARCHAR, direction VARCHAR, phase VARCHAR, label VARCHAR)"
+        "CREATE OR REPLACE TEMP TABLE phase_catalog("
+        "subject VARCHAR, direction VARCHAR, phase VARCHAR, label VARCHAR, wait BOOLEAN)"
     )
     connection.executemany(
-        "INSERT INTO phase_catalog VALUES (?, ?, ?, ?)",
-        [(phase.subject, phase.direction, phase.name, phase.label) for phase in PHASES],
+        "INSERT INTO phase_catalog VALUES (?, ?, ?, ?, ?)",
+        [(phase.subject, phase.direction, phase.name, phase.label, phase.wait) for phase in PHASES],
     )

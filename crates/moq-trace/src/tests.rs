@@ -296,6 +296,108 @@ fn measure_without_phase_tracing_only_runs_the_future() {
     object.finish(ObjectOutcome::Success);
 }
 
+/// Return each phase occurrence as `(phase, start_ns, done_ns)`, in start order.
+fn named_occurrences(events: &[Event]) -> Vec<(ObjectPhase, u64, u64)> {
+    let mut occurrences: Vec<(u64, ObjectPhase, u64, u64)> = Vec::new();
+    for event in events {
+        let Event::Phase {
+            timestamp_ns,
+            span_id,
+            phase,
+            edge,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        match edge {
+            PhaseEdge::Start => occurrences.push((*span_id, *phase, *timestamp_ns, 0)),
+            PhaseEdge::Done => {
+                let occurrence = occurrences
+                    .iter_mut()
+                    .find(|occurrence| occurrence.0 == *span_id)
+                    .expect("a done edge follows its start edge");
+                occurrence.3 = *timestamp_ns;
+            }
+        }
+    }
+    occurrences.sort_by_key(|occurrence| occurrence.2);
+    occurrences
+        .into_iter()
+        .map(|(_, phase, start_ns, done_ns)| (phase, start_ns, done_ns))
+        .collect()
+}
+
+#[test]
+fn measure_waiting_records_the_wait_between_polls() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result: Result<u32, ()> = drive(object.measure_waiting(
+        ObjectPhase::PayloadWrite,
+        ObjectPhase::WriteBlocked,
+        pending_once(Ok(7)),
+    ));
+    assert_eq!(result, Ok(7));
+    object.finish(ObjectOutcome::Success);
+
+    let occurrences = named_occurrences(&events(&handle));
+    let phases: Vec<_> = occurrences.iter().map(|occurrence| occurrence.0).collect();
+    assert_eq!(
+        phases,
+        [
+            ObjectPhase::PayloadWrite,
+            ObjectPhase::WriteBlocked,
+            ObjectPhase::PayloadWrite
+        ]
+    );
+    // The wait runs exactly from the pending poll's return to the next poll.
+    assert_eq!(occurrences[1].1, occurrences[0].2);
+    assert_eq!(occurrences[1].2, occurrences[2].1);
+}
+
+#[test]
+fn measure_records_no_wait_for_a_future_that_never_pends() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result: Result<u32, ()> = drive(object.measure_waiting(
+        ObjectPhase::PayloadWrite,
+        ObjectPhase::WriteBlocked,
+        std::future::ready(Ok(1)),
+    ));
+    assert_eq!(result, Ok(1));
+    object.finish(ObjectOutcome::Success);
+
+    let phases: Vec<_> = named_occurrences(&events(&handle))
+        .into_iter()
+        .map(|occurrence| occurrence.0)
+        .collect();
+    assert_eq!(phases, [ObjectPhase::PayloadWrite]);
+}
+
+#[test]
+fn records_phases_follows_the_phase_tracepoint() {
+    let handle = trace();
+    assert!(handle.object(context()).records_phases());
+    recording(&handle).enable_only(Tracepoint::Start);
+    assert!(!handle.object(context()).records_phases());
+    assert!(!ObjectTrace::disabled().records_phases());
+}
+
+#[test]
+fn phase_at_records_the_captured_boundaries() {
+    let handle = trace();
+    let mut object = handle.object(context().with_start_ns(10));
+    object
+        .phase_at(ObjectPhase::DeliveryWait, 5)
+        .finish_at(ObjectOutcome::Success, 20);
+    object.finish(ObjectOutcome::Success);
+
+    assert_eq!(
+        named_occurrences(&events(&handle)),
+        [(ObjectPhase::DeliveryWait, 5, 20)]
+    );
+}
+
 #[test]
 fn connection_ids_are_never_reused() {
     let first = next_connection_id();

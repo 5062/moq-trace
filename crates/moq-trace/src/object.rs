@@ -38,11 +38,16 @@ impl std::fmt::Display for LogicalId {
 
 /// A measured step in the moq-transport object lifecycle.
 ///
-/// Phases measure processing. Time a phase spends waiting on I/O, such as bytes
-/// that have not arrived or flow control that blocks a write, belongs to no
-/// phase. A phase that awaits I/O should run through [`ObjectTrace::measure`],
-/// which records only the polls that do work. Such a phase can therefore appear
-/// several times for one object, so a per-object figure sums the occurrences.
+/// Phases measure processing, except [`ObjectPhase::DeliveryWait`] and
+/// [`ObjectPhase::WriteBlocked`], which name the two waits on the forwarding
+/// path. Any other waiting, such as for bytes that have not arrived, belongs to
+/// no phase. A phase that awaits I/O should run through [`ObjectTrace::measure`]
+/// or [`ObjectTrace::measure_waiting`], which record only the polls that do
+/// work. Such a phase can therefore appear several times for one object, so a
+/// per-object figure sums the occurrences.
+///
+/// Declaration order is the wire encoding shared with the C provider, so new
+/// variants are appended rather than placed in pipeline order.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum ObjectPhase {
@@ -60,9 +65,10 @@ pub enum ObjectPhase {
     /// Make received payload bytes visible to relay consumers.
     ///
     /// The phase covers writing payload bytes into the relay model and the step
-    /// that marks the object complete, whichever of those wakes a waiting
-    /// consumer. A relay may record one phase per chunk, and the completion step
-    /// belongs to the last one or to a final phase of its own.
+    /// that marks the object complete. A relay may record one phase per chunk,
+    /// and the completion step belongs to the last one or to a final phase of
+    /// its own. Waking consumers belongs to [`ObjectPhase::Notify`] when the
+    /// relay performs it as a step of its own, and to this phase otherwise.
     FrameCommit,
     /// Clone or select an outbound object from the relay model.
     Clone,
@@ -70,6 +76,32 @@ pub enum ObjectPhase {
     HeaderEncode,
     /// Write an outbound object payload.
     PayloadWrite,
+    /// Wake or enumerate the consumers of a newly readable inbound object.
+    ///
+    /// This is the fan-out work every copy shares, so it is recorded once on
+    /// the inbound object rather than on each copy. A relay whose model wakes
+    /// consumers inside the call that commits the bytes cannot separate the
+    /// two, so it records that call as [`ObjectPhase::FrameCommit`] and emits
+    /// no `Notify`. A relay that wakes consumers per chunk may record one
+    /// occurrence per chunk.
+    Notify,
+    /// Wait from the instant the relay made the object readable until this
+    /// copy's [`ObjectPhase::Clone`] starts.
+    ///
+    /// The wait covers waking the consumer and the scheduler delay before it
+    /// runs. The relay captures the readable instant with [`crate::now_ns`]
+    /// where it publishes the object, keeps it in its model, and the consumer
+    /// passes it to [`ObjectTrace::phase_at`] on the outbound copy. The wait can
+    /// therefore start before the copy's lifecycle does.
+    DeliveryWait,
+    /// Wait from a write that could not proceed until the relay resumes it.
+    ///
+    /// Stream or connection flow control, transport backpressure, and an
+    /// asynchronous lock held by another task all block a write this way. The
+    /// wait ends when the writer runs again, so it includes the delay between
+    /// the wake and the next poll. A synchronous lock contended inside a write
+    /// call blocks inside the call, so that time stays in the write phase.
+    WriteBlocked,
 }
 
 /// Result of an object lifecycle or phase.
@@ -200,6 +232,17 @@ impl ObjectTrace {
         }
     }
 
+    /// Return whether this object records phase events.
+    ///
+    /// A hook that times a phase from clock readings of its own, such as one
+    /// that splits a call into several phases with [`ObjectTrace::phase_at`],
+    /// checks this first so it reads no clock when nothing would be recorded.
+    pub fn records_phases(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|state| state.backend.enabled(Tracepoint::Phase))
+    }
+
     /// Start a measured object lifecycle phase.
     pub fn phase(&mut self, phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
         let state = self.0.as_ref().and_then(|state| {
@@ -208,6 +251,26 @@ impl ObjectTrace {
             }
             let span_id = state.backend.next_span_id();
             state.emit_phase(span_id, phase, PhaseEdge::Start, None);
+            Some((span_id, phase))
+        });
+        ObjectPhaseTrace {
+            object: self,
+            state,
+        }
+    }
+
+    /// Start an object phase at a timestamp captured earlier.
+    ///
+    /// Take `start_ns` from [`crate::now_ns`], so it shares the clock of every
+    /// other event. A wait that began elsewhere, such as
+    /// [`ObjectPhase::DeliveryWait`], starts this way.
+    pub fn phase_at(&mut self, phase: ObjectPhase, start_ns: u64) -> ObjectPhaseTrace<'_> {
+        let state = self.0.as_ref().and_then(|state| {
+            if !state.backend.enabled(Tracepoint::Phase) {
+                return None;
+            }
+            let span_id = state.backend.next_span_id();
+            state.emit_phase_at(span_id, phase, PhaseEdge::Start, None, start_ns);
             Some((span_id, phase))
         });
         ObjectPhaseTrace {
@@ -229,7 +292,42 @@ impl ObjectTrace {
     where
         F: Future<Output = Result<T, E>>,
     {
+        self.measure_polls(phase, None, future).await
+    }
+
+    /// Run a phase that awaits I/O, recording its polls and the waits between them.
+    ///
+    /// Each poll of `future` becomes one occurrence of `phase`, as in
+    /// [`ObjectTrace::measure`]. Each stretch from a poll that returned pending
+    /// to the next poll becomes one occurrence of `wait`, normally
+    /// [`ObjectPhase::WriteBlocked`]. A wait is emitted after the poll that ends
+    /// it returns, so its provider calls fall outside every measured interval. A
+    /// future dropped while pending records no final wait, because nothing
+    /// resumed it.
+    pub async fn measure_waiting<F, T, E>(
+        &mut self,
+        phase: ObjectPhase,
+        wait: ObjectPhase,
+        future: F,
+    ) -> Result<T, E>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
+        self.measure_polls(phase, Some(wait), future).await
+    }
+
+    async fn measure_polls<F, T, E>(
+        &mut self,
+        phase: ObjectPhase,
+        wait: Option<ObjectPhase>,
+        future: F,
+    ) -> Result<T, E>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
         let mut future = std::pin::pin!(future);
+        // When the last poll returned pending, the instant it did.
+        let mut pending_since = None;
         std::future::poll_fn(|cx| {
             let Some(state) = self
                 .0
@@ -241,6 +339,12 @@ impl ObjectTrace {
             let start_ns = state.backend.now_ns();
             let poll = future.as_mut().poll(cx);
             let end_ns = state.backend.now_ns();
+            if let (Some(wait), Some(wait_start_ns)) = (wait, pending_since.take()) {
+                let span_id = state.backend.next_span_id();
+                state.emit_phase_at(span_id, wait, PhaseEdge::Start, None, wait_start_ns);
+                let outcome = Some(ObjectOutcome::Success);
+                state.emit_phase_at(span_id, wait, PhaseEdge::Done, outcome, start_ns);
+            }
             let outcome = match &poll {
                 Poll::Ready(Err(_)) => ObjectOutcome::Failed,
                 _ => ObjectOutcome::Success,
@@ -248,6 +352,9 @@ impl ObjectTrace {
             let span_id = state.backend.next_span_id();
             state.emit_phase_at(span_id, phase, PhaseEdge::Start, None, start_ns);
             state.emit_phase_at(span_id, phase, PhaseEdge::Done, Some(outcome), end_ns);
+            if poll.is_pending() {
+                pending_since = Some(end_ns);
+            }
             poll
         })
         .await
@@ -329,20 +436,29 @@ impl ObjectPhaseTrace<'_> {
 
     /// Finish the phase with an explicit result.
     pub fn finish(mut self, outcome: ObjectOutcome) {
-        self.emit_done(outcome);
+        self.emit_done(outcome, None);
+    }
+
+    /// Finish the phase at a timestamp captured at the measured boundary.
+    ///
+    /// Take `timestamp_ns` from [`crate::now_ns`], so it shares the clock of
+    /// every other event.
+    pub fn finish_at(mut self, outcome: ObjectOutcome, timestamp_ns: u64) {
+        self.emit_done(outcome, Some(timestamp_ns));
     }
 
     /// Emit the completing edge once; a phase only has state while its object does.
-    fn emit_done(&mut self, outcome: ObjectOutcome) {
+    fn emit_done(&mut self, outcome: ObjectOutcome, timestamp_ns: Option<u64>) {
         if let (Some((span_id, phase)), Some(object)) = (self.state.take(), &self.object.0) {
-            object.emit_phase(span_id, phase, PhaseEdge::Done, Some(outcome));
+            let timestamp_ns = timestamp_ns.unwrap_or_else(|| object.backend.now_ns());
+            object.emit_phase_at(span_id, phase, PhaseEdge::Done, Some(outcome), timestamp_ns);
         }
     }
 }
 
 impl Drop for ObjectPhaseTrace<'_> {
     fn drop(&mut self) {
-        self.emit_done(ObjectOutcome::Abandoned);
+        self.emit_done(ObjectOutcome::Abandoned, None);
     }
 }
 

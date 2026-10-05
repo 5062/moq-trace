@@ -40,9 +40,15 @@ fn main() {
             ObjectPhase::Clone,
             ObjectPhase::HeaderEncode,
             ObjectPhase::PayloadWrite,
+            ObjectPhase::Notify,
+            ObjectPhase::DeliveryWait,
+            ObjectPhase::WriteBlocked,
         ] {
             object.phase(phase).finish(ObjectOutcome::Success);
         }
+        object
+            .phase_at(ObjectPhase::DeliveryWait, 50)
+            .finish_at(ObjectOutcome::Success, 150);
         object.set_payload_bytes(1024);
         object.set_stream_offset_end(1032);
         object.finish(ObjectOutcome::Success);

@@ -1,4 +1,4 @@
-"""What the MoQ layer spends on each copy, and when it starts forwarding."""
+"""What the MoQ layer spends on each copy, what it waits on, and when it starts forwarding."""
 
 from __future__ import annotations
 
@@ -22,6 +22,13 @@ _WORK = (
 # rather than a cost: negative is cut-through, positive is store and forward.
 _POLICY = ("moq_write_after_receive", "First write start after last read")
 
+# The waits on the forwarding path, which the work panels leave out. A run whose
+# relay does not emit a wait phase has no samples, and its panel is omitted.
+_WAITS = (
+    ("moq_delivery_wait", "Delivery wait per copy"),
+    ("moq_write_blocked", "Write blocked per copy"),
+)
+
 
 def plot_moq_work(
     path: pathlib.Path,
@@ -35,7 +42,7 @@ def plot_moq_work(
         raise ValueError("a moq work figure requires at least one run")
     panels = [
         (metric, label, [_values_us(run.connection, metric, run.run_id) for run in runs])
-        for metric, label in (*_WORK, _POLICY)
+        for metric, label in (*_WORK, *_WAITS, _POLICY)
     ]
     panels = [panel for panel in panels if any(panel[2])]
     if not panels:

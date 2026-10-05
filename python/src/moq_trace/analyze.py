@@ -302,6 +302,8 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
         ("moq_rx_work", "object", "MoQ RX work"),
         ("moq_tx_work", "object", "MoQ TX work (transport excluded)"),
         ("moq_write_after_receive", "object", "MoQ write start after receive"),
+        ("moq_delivery_wait", "object", "MoQ delivery wait"),
+        ("moq_write_blocked", "object", "MoQ write blocked"),
         ("quic_forward_start", "quic_object", "QUIC forward start"),
         ("quic_tail_gap", "quic_object", "QUIC tail gap"),
         ("quic_full_span", "quic_object", "QUIC full span (read to send)"),

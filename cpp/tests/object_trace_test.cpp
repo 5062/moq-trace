@@ -34,6 +34,9 @@ int main() {
   context.start_ns = 9;
 
   moq_trace::Object object(context);
+  assert(object.records_phases() == moq_trace_moq_object_phase_enabled());
+  assert(!moq_trace::Object(moq_trace::ObjectContext{}).records_phases() ||
+         moq_trace_moq_object_phase_enabled());
   const auto before_phase = clock_reads;
   auto phase = object.phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ);
   phase.finish(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS);

@@ -191,6 +191,16 @@ class Object {
     stream_offset_end_ = value;
   }
 
+  /**
+   * Return whether this object records phase events.
+   *
+   * A hook that times a phase from clock readings of its own checks this first
+   * so it reads no clock when nothing would be recorded.
+   */
+  bool records_phases() const {
+    return trace_id_ != 0 && moq_trace_moq_object_phase_enabled();
+  }
+
   /** Start a measured object phase. */
   ObjectPhase phase(moq_trace_object_phase value) const {
     if (trace_id_ == 0 || !moq_trace_moq_object_phase_enabled()) return {};
