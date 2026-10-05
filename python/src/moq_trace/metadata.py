@@ -95,6 +95,9 @@ class Counts(ArtifactModel):
     selected_packets: int = Field(ge=0)
     correlated_objects: int = Field(ge=0)
     correlated_object_copies: int = Field(ge=0)
+    # Every outbound copy of a selected object, by how it ended. Copies the relay
+    # deliberately did not deliver are counted here, since no metric samples them.
+    copy_outcomes: dict[str, int]
 
 
 class Processes(ArtifactModel):

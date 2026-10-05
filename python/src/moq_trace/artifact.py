@@ -16,7 +16,7 @@ from .metadata import ComparisonMetadata, RunMetadata
 
 # The on-disk schema version this tool writes and reads. An artifact of any other
 # version is rebuilt rather than migrated.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # The metadata schema each artifact kind must satisfy. A kind is an on-disk
 # identity rather than an internal detail, so metadata is validated when it is

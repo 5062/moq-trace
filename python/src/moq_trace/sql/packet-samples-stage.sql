@@ -45,4 +45,30 @@ JOIN (
   GROUP BY process_id, trace_id
 ) AS schedule USING (process_id, trace_id)
 WHERE packet.direction = 'rx' AND packet.outcome = 'success'
-  AND packet.end_ns >= schedule.end_ns;
+  AND packet.end_ns >= schedule.end_ns
+UNION ALL
+-- A TX packet's `send_queue` covers both waiting to be batched into a send and the
+-- send system call itself. A packet ends at exactly the completion its send
+-- reported, so the successful TX socket operation that ended at that instant on
+-- the packet's connection is the send that carried it. The split is left out
+-- when no send, or more than one, ended at that instant.
+SELECT packet.process_id, sample.metric, packet.direction, packet.connection_id,
+       packet.trace_id, queue.span_id, 0, elapsed_ns(queue.start_ns, $origin), sample.value
+FROM selected_packets AS packet
+JOIN packet_phase_intervals AS queue
+  ON queue.process_id = packet.process_id AND queue.trace_id = packet.trace_id
+ AND queue.phase = 'send_queue' AND queue.outcome = 'success'
+JOIN (
+  SELECT start.process_id, start.connection_id, start.timestamp_ns AS start_ns, finish.timestamp_ns AS end_ns
+  FROM udp_socket_start AS start
+  JOIN udp_socket_end AS finish USING (process_id, trace_id)
+  WHERE start.direction = 'tx' AND finish.outcome = 'success'
+) AS send
+  ON send.process_id = packet.process_id AND send.end_ns = packet.end_ns
+ AND (send.connection_id IS NULL OR send.connection_id = packet.connection_id)
+CROSS JOIN LATERAL (VALUES
+  ('tx_send_batching', span_ns(queue.start_ns, send.start_ns)),
+  ('tx_send_syscall', span_ns(send.start_ns, send.end_ns))
+) AS sample(metric, value)
+WHERE packet.direction = 'tx' AND packet.outcome = 'success'
+QUALIFY count(*) OVER (PARTITION BY packet.process_id, packet.trace_id, sample.metric) = 1;

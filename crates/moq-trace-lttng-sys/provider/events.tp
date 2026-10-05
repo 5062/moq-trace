@@ -34,6 +34,9 @@ LTTNG_UST_TRACEPOINT_ENUM(moq_trace, object_outcome,
 		lttng_ust_field_enum_value("success", MOQ_TRACE_OBJECT_OUTCOME_SUCCESS)
 		lttng_ust_field_enum_value("failed", MOQ_TRACE_OBJECT_OUTCOME_FAILED)
 		lttng_ust_field_enum_value("abandoned", MOQ_TRACE_OBJECT_OUTCOME_ABANDONED)
+		lttng_ust_field_enum_value("expired", MOQ_TRACE_OBJECT_OUTCOME_EXPIRED)
+		lttng_ust_field_enum_value("dropped", MOQ_TRACE_OBJECT_OUTCOME_DROPPED)
+		lttng_ust_field_enum_value("reset", MOQ_TRACE_OBJECT_OUTCOME_RESET)
 	)
 )
 

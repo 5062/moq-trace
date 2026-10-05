@@ -472,6 +472,42 @@ fn a_nested_transport_call_is_counted_once() {
 }
 
 #[test]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn object_outcome_wire_values_match_the_provider() {
+    // The provider receives each outcome as its declaration index.
+    use moq_trace_lttng_sys as ffi;
+    let outcomes = [
+        (
+            ObjectOutcome::Success,
+            ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_SUCCESS,
+        ),
+        (
+            ObjectOutcome::Failed,
+            ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_FAILED,
+        ),
+        (
+            ObjectOutcome::Abandoned,
+            ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_ABANDONED,
+        ),
+        (
+            ObjectOutcome::Expired,
+            ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_EXPIRED,
+        ),
+        (
+            ObjectOutcome::Dropped,
+            ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_DROPPED,
+        ),
+        (
+            ObjectOutcome::Reset,
+            ffi::moq_trace_object_outcome_MOQ_TRACE_OBJECT_OUTCOME_RESET,
+        ),
+    ];
+    for (outcome, wire) in outcomes {
+        assert_eq!(outcome as u32, wire, "{outcome:?}");
+    }
+}
+
+#[test]
 fn connection_ids_are_never_reused() {
     let first = next_connection_id();
     let second = next_connection_id();

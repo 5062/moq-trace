@@ -37,9 +37,12 @@ int main() {
       moq_trace::Object abandoned(empty);
       abandoned.phase(MOQ_TRACE_OBJECT_PHASE_CREATE);
     }
-    moq_trace::Object failed(empty);
-    failed.phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE).finish(MOQ_TRACE_OBJECT_OUTCOME_FAILED);
-    failed.finish(MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+    for (const auto outcome : {MOQ_TRACE_OBJECT_OUTCOME_FAILED, MOQ_TRACE_OBJECT_OUTCOME_EXPIRED,
+         MOQ_TRACE_OBJECT_OUTCOME_DROPPED, MOQ_TRACE_OBJECT_OUTCOME_RESET}) {
+      moq_trace::Object ended(empty);
+      ended.phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE).finish(outcome);
+      ended.finish(outcome);
+    }
     for (const auto space : {QUIC_TRACE_PACKET_SPACE_INITIAL, QUIC_TRACE_PACKET_SPACE_HANDSHAKE,
          QUIC_TRACE_PACKET_SPACE_ZERO_RTT, QUIC_TRACE_PACKET_SPACE_DATA}) {
       quic_trace::PacketContext packet_context;

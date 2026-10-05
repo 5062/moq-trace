@@ -41,7 +41,14 @@ def run_metadata(**overrides) -> RunMetadata:
             packet="selected_object_packets",
             timeline="slowest_copy_per_selected_object",
         ),
-        "counts": Counts(groups=1, packets=1, selected_packets=1, correlated_objects=1, correlated_object_copies=1),
+        "counts": Counts(
+            groups=1,
+            packets=1,
+            selected_packets=1,
+            correlated_objects=1,
+            correlated_object_copies=1,
+            copy_outcomes={"success": 1},
+        ),
         "processes": Processes(process_id=0, analyzed_pid=0, captured_pids=(0,)),
     }
     fields.update(overrides)

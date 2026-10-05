@@ -702,6 +702,60 @@ class SqlAnalysisTests(unittest.TestCase):
         self.assertEqual(totals["payload_write"], 22_000 - 19_000 - 1_500)
         self.assertEqual(totals["transport_call"], 19_000 + 1_500)
 
+    def send(self, trace_id: int, start: int, end: int, connection_id: int | None = 2) -> None:
+        self.insert(
+            "udp_socket_start",
+            ctf_timestamp_ns=trace_id * 1_000,
+            timestamp_ns=start,
+            trace_id=trace_id,
+            connection_id=connection_id,
+            direction="tx",
+        )
+        self.insert(
+            "udp_socket_end",
+            ctf_timestamp_ns=trace_id * 1_000 + 1,
+            timestamp_ns=end,
+            trace_id=trace_id,
+            outcome="success",
+            buffers=1,
+            datagrams=1,
+            bytes=1200,
+        )
+
+    def _send_split(self) -> dict[str, int]:
+        self.prepare_model()
+        origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        coverage.resolve(self.connection)
+        _derive_samples(self.connection, origin)
+        return dict(
+            self.connection.execute(
+                "SELECT metric, latency_ns FROM packet_samples WHERE metric IN ('tx_send_batching', 'tx_send_syscall')"
+            ).fetchall()
+        )
+
+    def test_send_queue_splits_into_batching_and_the_send_call(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        # The TX packet waits in send_queue from 300 µs; the send that carried it
+        # ran from 306 µs until the packet's end at 310 µs. A send on another
+        # connection ending then does not match.
+        self.send(90, 306_000, 310_000)
+        self.send(91, 309_000, 310_000, connection_id=7)
+        self.assertEqual(self._send_split(), {"tx_send_batching": 6_000, "tx_send_syscall": 4_000})
+        # The samples carry the identity their grain declares.
+        _define_metrics(self.connection)
+
+    def test_an_ambiguous_send_leaves_the_queue_unsplit(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.send(90, 306_000, 310_000)
+        self.send(91, 308_000, 310_000, connection_id=None)
+        self.assertEqual(self._send_split(), {})
+
     def test_rejects_a_transport_call_outside_any_work_phase(self) -> None:
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
@@ -990,6 +1044,43 @@ class SqlAnalysisTests(unittest.TestCase):
                     "SELECT count(*) FROM metrics.position_statistics WHERE metric LIKE 'rx_packet%'"
                 ).fetchone()[0]
                 self.assertEqual(packets, 0)
+
+    def _two_copies(self, second_outcome: str) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.object_start(5, "tx", 3)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.connection.execute("UPDATE raw.moq_object_end SET outcome = ? WHERE trace_id = 5", [second_outcome])
+
+    def _run_two_subscribers(self, output: pathlib.Path) -> None:
+        with mock.patch.object(ctf, "batches", self.batches):
+            run(
+                pathlib.Path("unused.ctf"),
+                output,
+                workload=Workload(object_size=16, subscribers=2),
+                window=Window(warmup_seconds=0, cooldown_seconds=0),
+            )
+
+    def test_a_copy_the_relay_chose_not_to_deliver_still_accounts_for_its_subscriber(self) -> None:
+        """A dropped copy is relay policy rather than a trace defect, and it carries no latency."""
+
+        self._two_copies("dropped")
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "analysis.duckdb"
+            self._run_two_subscribers(output)
+            with open_artifact(output, "run") as artifact:
+                self.assertEqual(artifact.metadata.counts.copy_outcomes, {"dropped": 1, "success": 1})
+                spans = artifact.connection.execute(
+                    "SELECT count(*) FROM metrics.samples WHERE metric = 'full_span'"
+                ).fetchone()[0]
+                self.assertEqual(spans, 1)
+
+    def test_a_failed_copy_is_still_a_defect(self) -> None:
+        self._two_copies("failed")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TraceError, "object copied to all 2 subscribers"):
+                self._run_two_subscribers(pathlib.Path(directory) / "analysis.duckdb")
 
     def test_generic_profile_accepts_transport_without_quinn_phases(self) -> None:
         """A quiche provider can omit phases that only Quinn exposes."""

@@ -54,10 +54,24 @@ enum moq_trace_object_phase {
 	MOQ_TRACE_OBJECT_PHASE_TRANSPORT_CALL,
 };
 
+/*
+ * How an object lifecycle or phase ended. FAILED is an error in processing, and
+ * ABANDONED a trace that ended without a recorded outcome. EXPIRED, DROPPED,
+ * and RESET mean the relay or its peer deliberately stopped the object, so it
+ * was not delivered but nothing went wrong. Declaration order is the wire
+ * encoding, so new outcomes are appended.
+ */
 enum moq_trace_object_outcome {
 	MOQ_TRACE_OBJECT_OUTCOME_SUCCESS,
 	MOQ_TRACE_OBJECT_OUTCOME_FAILED,
 	MOQ_TRACE_OBJECT_OUTCOME_ABANDONED,
+	/* A delivery deadline passed before the object was delivered. */
+	MOQ_TRACE_OBJECT_OUTCOME_EXPIRED,
+	/* Relay policy discarded the object: it fell outside a subscription's
+	 * window, or the cache evicted it before a reader got to it. */
+	MOQ_TRACE_OBJECT_OUTCOME_DROPPED,
+	/* The stream carrying the object was reset or stopped before it finished. */
+	MOQ_TRACE_OBJECT_OUTCOME_RESET,
 };
 
 struct moq_trace_moq_object_start {

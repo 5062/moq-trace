@@ -117,6 +117,14 @@ pub enum ObjectPhase {
 }
 
 /// Result of an object lifecycle or phase.
+///
+/// [`ObjectOutcome::Failed`] is an error in processing, and
+/// [`ObjectOutcome::Abandoned`] a trace that ended without a recorded outcome.
+/// The other outcomes besides success mean the relay or its peer deliberately
+/// stopped the object: it was not delivered, but nothing went wrong.
+///
+/// Declaration order is the wire encoding shared with the C provider, so new
+/// variants are appended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ObjectOutcome {
@@ -126,6 +134,13 @@ pub enum ObjectOutcome {
     Failed,
     /// The phase token was dropped before an outcome was recorded.
     Abandoned,
+    /// A delivery deadline passed before the object was delivered.
+    Expired,
+    /// Relay policy discarded the object: it fell outside a subscription's
+    /// window, or the cache evicted it before a reader got to it.
+    Dropped,
+    /// The stream carrying the object was reset or stopped before it finished.
+    Reset,
 }
 
 /// Stable identity of one moq-transport object.

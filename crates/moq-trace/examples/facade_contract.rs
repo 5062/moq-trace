@@ -60,15 +60,20 @@ fn main() {
         ));
         drop(abandoned.phase(ObjectPhase::Create));
         drop(abandoned);
-        let mut failed = handle.object(ObjectContext::new(
-            direction,
-            ObjectIdentity::new(0, 0, 0),
-            LogicalId::new(0, 0),
-        ));
-        failed
-            .phase(ObjectPhase::PayloadWrite)
-            .finish(ObjectOutcome::Failed);
-        failed.finish(ObjectOutcome::Failed);
+        for outcome in [
+            ObjectOutcome::Failed,
+            ObjectOutcome::Expired,
+            ObjectOutcome::Dropped,
+            ObjectOutcome::Reset,
+        ] {
+            let mut ended = handle.object(ObjectContext::new(
+                direction,
+                ObjectIdentity::new(0, 0, 0),
+                LogicalId::new(0, 0),
+            ));
+            ended.phase(ObjectPhase::PayloadWrite).finish(outcome);
+            ended.finish(outcome);
+        }
         for space in [
             PacketSpace::Initial,
             PacketSpace::Handshake,

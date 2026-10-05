@@ -34,6 +34,11 @@ from .metadata import (
 # metric depends on.
 _QUINN_PHASES = ("routing", "scheduling")
 
+# Outcomes of a copy the relay or its peer deliberately did not deliver. Such a
+# copy still accounts for its subscriber: it carries no latency, but unlike a
+# failed or abandoned copy it is not a defect in the trace.
+_UNDELIVERED = ("expired", "dropped", "reset")
+
 
 def _count(connection: duckdb.DuckDBPyConnection, query: str, parameters=()) -> int:
     return int(connection.execute(query, parameters).fetchone()[0])
@@ -212,16 +217,20 @@ def _select_window(
         raise TraceError(f"trace has no completed {object_size}-byte inbound objects")
     origin, last = map(int, bounds)
 
+    # A subscriber whose copy the relay deliberately did not deliver was attached
+    # all the same, so it counts toward the steady state.
     steady = connection.execute(
         """SELECT min(start_ns) FROM (
              SELECT rx.start_ns
              FROM object_lifecycles AS rx
-             JOIN object_copies AS tx ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
+             JOIN object_lifecycles AS tx
+               ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id AND tx.direction = 'tx'
              WHERE rx.direction = 'rx' AND rx.outcome = 'success' AND rx.payload_bytes = ?
+               AND (tx.outcome::VARCHAR = 'success' OR list_contains(?, tx.outcome::VARCHAR))
              GROUP BY rx.process_id, rx.trace_id, rx.start_ns
              HAVING count(*) = ?
            )""",
-        [object_size, subscribers],
+        [object_size, list(_UNDELIVERED), subscribers],
     ).fetchone()[0]
     if steady is None:
         raise TraceError(f"trace has no {object_size}-byte inbound object copied to all {subscribers} subscribers")
@@ -237,18 +246,27 @@ def _select_window(
     )
     if _count(connection, "SELECT count(*) FROM selected_rx") == 0:
         raise TraceError("steady-state window contains no complete objects")
+    # A copy counts once it was delivered or deliberately not delivered. Only the
+    # delivered ones carry latency samples.
     bad = _count(
         connection,
         """SELECT count(*) FROM (
-             SELECT rx.process_id, rx.trace_id, count(tx.trace_id) AS copies
+             SELECT rx.process_id, rx.trace_id,
+                    count(tx.trace_id) FILTER (
+                      tx.outcome::VARCHAR = 'success' OR list_contains(?, tx.outcome::VARCHAR)
+                    ) AS copies
              FROM selected_rx AS rx
-             LEFT JOIN object_copies AS tx ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
+             LEFT JOIN object_lifecycles AS tx
+               ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id AND tx.direction = 'tx'
              GROUP BY rx.process_id, rx.trace_id HAVING copies <> ?
            )""",
-        [subscribers],
+        [list(_UNDELIVERED), subscribers],
     )
     if bad:
-        raise TraceError(f"{bad} steady-state objects do not have exactly {subscribers} outbound copies")
+        raise TraceError(
+            f"{bad} steady-state objects do not have exactly {subscribers} outbound copies "
+            f"that were delivered or ended {', '.join(_UNDELIVERED)}"
+        )
     connection.execute(sql.read("window-schema"))
     connection.execute(
         "INSERT INTO model.window SELECT process_id, ?, ?, ? FROM processes WHERE analyzed", [origin, start, end]
@@ -337,6 +355,9 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
         ("rx_packet_processing_span", "RX packet processing span", "packet"),
         ("tx_packet_span", "TX packet span", "packet"),
         *packet_phases("tx"),
+        # Each splits one `send_queue` occurrence, so its grain is the occurrence.
+        ("tx_send_batching", "TX send batching (encrypted to send call)", "occurrence"),
+        ("tx_send_syscall", "TX send system call", "occurrence"),
         ("rx_wire_residual", "RX wire residual", "packet"),
         ("tx_wire_residual", "TX wire residual", "packet"),
     ]
@@ -451,6 +472,15 @@ def _write_run_metadata(
                 correlated_object_copies=_count(
                     connection,
                     "SELECT count(*) FROM metrics.samples WHERE metric = 'quic_full_span'",
+                ),
+                copy_outcomes=dict(
+                    connection.execute(
+                        """SELECT tx.outcome::VARCHAR, count(*)::INTEGER
+                           FROM model.selected_objects AS rx
+                           JOIN model.objects AS tx
+                             ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
+                           WHERE tx.direction = 'tx' GROUP BY ALL ORDER BY ALL"""
+                    ).fetchall()
                 ),
             ),
             processes=Processes(
