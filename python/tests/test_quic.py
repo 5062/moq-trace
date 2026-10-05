@@ -241,6 +241,29 @@ class DecryptorTests(unittest.TestCase):
         self.decryptor = quic.Decryptor(self.peer.key_log())
         self.handshake = _decrypt(self.decryptor, self.peer.handshake_datagrams())
 
+    def test_four_connections_share_one_udp_address_pair(self) -> None:
+        peers = [_Peer(seed=i, client_cid=bytes([i]) * 8, server_cid=bytes([i + 4]) * 8) for i in range(1, 5)]
+        decryptor = quic.Decryptor(quic.merge_key_logs(peer.key_log() for peer in peers))
+        for stage in range(3):
+            for index, peer in enumerate(peers):
+                packets = _decrypt(decryptor, [peer.handshake_datagrams()[stage]])
+                self.assertTrue(all(packet.connection == index for packet in packets))
+        for index, peer in enumerate(peers):
+            for sender in (quic.CLIENT, quic.SERVER):
+                packets = _decrypt(decryptor, [(sender == quic.CLIENT, peer.short(sender, 1, _stream(4, 0, b"data")))])
+                self.assertEqual(packets[0].connection, index)
+        self.assertEqual(len(decryptor.connections), 4)
+        for index, peer in enumerate(peers):
+            cid = bytes([index + 10]) * 8
+            frame = b"\x18\x00\x00\x08" + cid + b"\x00" * 16
+            (packet,) = _decrypt(decryptor, [(False, peer.short(quic.SERVER, 2, frame))])
+            self.assertEqual(packet.connection, index)
+            peer.server_cid = cid
+        # One socket can batch segments from different connections to the same peer.
+        payload = b"".join(peer.short(quic.CLIENT, 2, _stream(4, 4, b"next"), size=1200) for peer in peers)
+        packets = decryptor.datagram(10, LOCAL, PEER, True, payload)
+        self.assertEqual([(packet.connection, packet.segment) for packet in packets], list(enumerate(range(4))))
+
     def test_handshake_coalesces_and_keys_every_space(self) -> None:
         self.assertEqual(
             [

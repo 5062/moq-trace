@@ -306,6 +306,8 @@ class Connection:
     # The connection ID length of each endpoint, which is the DCID length of
     # short-header packets sent to it.
     cid_length: dict[str, int] = dataclasses.field(default_factory=dict)
+    # IDs issued by each endpoint, including replacements advertised in frames.
+    cids: dict[str, set[bytes]] = dataclasses.field(default_factory=dict)
     largest: dict[tuple[str, str], int] = dataclasses.field(default_factory=dict)
     # CRYPTO bytes from offset 0 of each sender's Initial space, kept only until
     # the ClientHello random and ServerHello cipher suite are read.
@@ -329,8 +331,8 @@ class _Decrypted:
     new_connection: bool
     # The 1-RTT generation the packet used, which becomes current on commit.
     generation: int | None
-    # Connection ID lengths learned from the long header, applied on commit.
-    cid_lengths: tuple[tuple[str, int], ...]
+    # Connection IDs learned from the long header, applied on commit.
+    cids: tuple[tuple[str, bytes], ...]
 
 
 class Decryptor:
@@ -339,8 +341,8 @@ class Decryptor:
     def __init__(self, secrets: Mapping[bytes, Mapping[str, bytes]]) -> None:
         self.secrets = secrets
         self.connections: list[Connection] = []
-        # The current connection on each `(local, peer)` address pair.
-        self._current: dict[tuple[tuple[str, int], tuple[str, int]], Connection] = {}
+        # Several connections can share a UDP socket and therefore an address pair.
+        self._current: dict[tuple[tuple[str, int], tuple[str, int]], list[Connection]] = {}
         self._datagrams = 0
 
     def datagram(
@@ -388,7 +390,7 @@ class Decryptor:
                     continue
                 decrypted = self._long(timestamp_ns, local, peer, from_peer, payload, position)
             else:
-                connection = self._connection(local, peer, datagram)
+                connection = self._connection(local, peer, datagram, from_peer, payload, position)
                 if segment_size is None:
                     decrypted = self._first_short(connection, from_peer, payload, position, datagram)
                     if decrypted.end < length:
@@ -406,21 +408,42 @@ class Decryptor:
             position = decrypted.end
         return packets
 
-    def _connection(self, local, peer, datagram: int) -> Connection:
-        connection = self._current.get((local, peer))
-        if connection is None:
+    def _connection(self, local, peer, datagram: int, from_peer: bool, data: bytes, position: int) -> Connection:
+        connections = self._current.get((local, peer), [])
+        if not connections:
             raise TraceError(f"datagram {datagram} from {peer} has a short header before any Initial packet")
-        return connection
+        candidates = []
+        for connection in connections:
+            receiver = SERVER if connection.sender(from_peer) == CLIENT else CLIENT
+            if any(data[position + 1 : position + 1 + len(cid)] == cid for cid in connection.cids.get(receiver, ())):
+                candidates.append(connection)
+        if len(candidates) != 1:
+            raise TraceError(
+                f"datagram {datagram} from {peer} has a short header matching {len(candidates)} connections"
+            )
+        return candidates[0]
+
+    def _long_connection(self, local, peer, from_peer: bool, dcid: bytes, scid: bytes) -> Connection | None:
+        candidates = []
+        for connection in self._current.get((local, peer), []):
+            sender = connection.sender(from_peer)
+            receiver = SERVER if sender == CLIENT else CLIENT
+            if dcid in connection.cids.get(receiver, ()) or scid in connection.cids.get(sender, ()):
+                candidates.append(connection)
+        if len(candidates) > 1:
+            raise TraceError(f"a long-header packet from {peer} matches more than one connection")
+        return candidates[0] if candidates else None
 
     def _retry(self, local, peer, data: bytes, from_peer: bool, timestamp_ns: int) -> None:
         """Rekey a connection's Initial packets after a Retry (RFC 9001 section 5.2)."""
 
-        connection = self._current.get((local, peer))
+        reader = _Reader(data, 5)
+        destination = reader.bytes(reader.byte())
+        source = reader.bytes(reader.byte())
+        connection = self._long_connection(local, peer, from_peer, destination, source)
         if connection is None or connection.sender(from_peer) != SERVER:
             raise TraceError(f"a Retry from {peer} does not belong to a connection")
-        reader = _Reader(data, 5)
-        reader.bytes(reader.byte())
-        source = reader.bytes(reader.byte())
+        connection.cids.setdefault(SERVER, set()).add(source)
         # The client's next Initial is sent to the Retry's source connection ID,
         # which therefore keys the rest of the Initial space.
         connection.initial = initial_keys(source)
@@ -441,11 +464,9 @@ class Decryptor:
         if end > len(data):
             raise TraceError(f"a long-header packet from {peer} extends past its datagram")
 
-        connection = self._current.get((local, peer))
+        connection = self._long_connection(local, peer, from_peer, dcid, scid)
         new_connection = False
-        if space == INITIAL and (
-            connection is None or (connection.sender(from_peer) == CLIENT and scid != connection.client_scid)
-        ):
+        if space == INITIAL and connection is None:
             # A client Initial from a new source connection ID starts a new
             # connection on the address pair.
             connection = Connection(
@@ -455,6 +476,7 @@ class Decryptor:
                 client_is_peer=from_peer,
                 client_scid=scid,
                 initial=initial_keys(dcid),
+                cids={SERVER: {dcid}},
                 first_ns=timestamp_ns,
                 last_ns=timestamp_ns,
             )
@@ -478,7 +500,7 @@ class Decryptor:
             connection,
             new_connection,
             None,
-            ((sender, len(scid)),),
+            ((sender, scid),),
         )
 
     def _long_keys(self, connection: Connection, space: str, sender: str, peer) -> Keys:
@@ -500,9 +522,9 @@ class Decryptor:
         """Decrypt a short-header packet whose segment end is unknown.
 
         The datagram's end is tried first. A GSO send instead holds later
-        segments that start with a packet of the same connection, so each
-        offset that repeats the packet's first byte form and Destination
-        Connection ID is a candidate end, and authentication decides.
+        segments that can belong to different connections on one address pair.
+        Each offset with a short-header form and a known Destination Connection
+        ID is a candidate end, and authentication decides.
         """
 
         sender = connection.sender(from_peer)
@@ -510,21 +532,27 @@ class Decryptor:
         dcid_length = connection.cid_length.get(receiver)
         if dcid_length is None:
             raise TraceError(f"connection {connection.index} sent a short header before its connection IDs were known")
-        dcid = data[position + 1 : position + 1 + dcid_length]
         length = len(data)
         candidates = [length]
-        if dcid:
-            found = data.find(dcid, position + 2)
-            while found >= 0:
-                boundary = found - 1
-                # A short header's form bit is clear; its fixed bit may be greased.
-                if not data[boundary] & 0x80:
-                    candidates.append(boundary)
-                found = data.find(dcid, found + 1)
-        else:
-            # A zero-length connection ID gives no anchor, so every boundary at
-            # which a packet could end is tried.
-            candidates.extend(range(position + 21, length))
+        # A socket can batch packets from several connections to the same
+        # address pair. Any destination ID can mark the next GSO segment.
+        cids = {
+            cid
+            for candidate in self._current[(connection.local, connection.peer)]
+            for cid in candidate.cids.get(SERVER if candidate.sender(from_peer) == CLIENT else CLIENT, ())
+        }
+        for cid in cids:
+            if cid:
+                found = data.find(cid, position + 2)
+                while found >= 0:
+                    boundary = found - 1
+                    # A short header's form bit is clear; its fixed bit may be greased.
+                    if not data[boundary] & 0x80:
+                        candidates.append(boundary)
+                    found = data.find(cid, found + 1)
+            else:
+                # A zero-length ID gives no anchor, so try every possible end.
+                candidates.extend(range(position + 21, length))
         for end in sorted(set(candidates), key=lambda value: (value != length, value)):
             try:
                 return self._short(connection, from_peer, data, position, end)
@@ -605,9 +633,11 @@ class Decryptor:
         connection = decrypted.connection
         if decrypted.new_connection:
             self.connections.append(connection)
-            self._current[(connection.local, connection.peer)] = connection
+            self._current.setdefault((connection.local, connection.peer), []).append(connection)
         connection.last_ns = timestamp_ns
-        for endpoint, length in decrypted.cid_lengths:
+        for endpoint, cid in decrypted.cids:
+            connection.cids.setdefault(endpoint, set()).add(cid)
+            length = len(cid)
             known = connection.cid_length.setdefault(endpoint, length)
             if known != length:
                 raise TraceError(f"connection {connection.index} uses connection IDs of more than one length")
@@ -758,8 +788,9 @@ def _frames(payload: bytes, connection: Connection, sender: str, space: str) -> 
             reader.varint()
             reader.varint()
             length = reader.byte()
-            reader.bytes(length)
+            cid = reader.bytes(length)
             reader.bytes(16)
+            connection.cids.setdefault(sender, set()).add(cid)
             # The connection ID belongs to the frame's sender: packets sent to
             # it carry this length.
             known = connection.cid_length.get(sender)

@@ -350,6 +350,16 @@ it. The text stays as the design record, and these notes take precedence.
   the form bit clear is a candidate, and a candidate is accepted only when the
   first packet authenticates ending there. The datagram's own end is tried
   first. A zero-length DCID falls back to trying every length.
+- **Shared UDP sockets.** Several subscriber connections can share one address
+  pair. The decryptor routes long and short headers by connection IDs, retaining
+  IDs advertised in NEW_CONNECTION_ID frames. A GSO datagram can mix connections,
+  so segment boundary candidates include every known destination ID on the
+  address pair; authentication still decides the boundary. When several trace
+  connections share a path, the join uses TX packets with matching number spaces
+  and packet numbers whose capture times fall within exactly one candidate's
+  packet lifecycle, allowing the capture clock uncertainty. All such unique
+  observations must identify the same connection, or analysis fails. Packet and
+  STREAM frame validation still runs on the resulting join.
 - **Greased fixed bit.** Quinn greases the QUIC fixed bit (RFC 9287), so a
   short header is recognized by its form bit alone, and zero bytes after a
   long-header packet are the only padding the decryptor skips.

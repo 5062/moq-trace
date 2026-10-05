@@ -319,6 +319,60 @@ class WireTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "RX packets that start before their datagram was captured: 1"):
             self.ingest()
 
+    def test_connections_sharing_an_address_pair_join_by_send_lifetimes(self) -> None:
+        self.path(3, SUBSCRIBER, 20_600)
+        self.trace.packet(5, "tx", 3)
+        # Both connections send packet 1 with identical stream ranges. Only
+        # their send lifetimes distinguish the wire observations.
+        self.trace.connection.execute("UPDATE raw.quic_stream_frame SET stream_id = 20 WHERE trace_id = 5")
+        for table in ("quic_packet_start", "quic_packet_end", "quic_packet_phase", "quic_stream_frame"):
+            self.trace.connection.execute(
+                f"UPDATE raw.{table} SET timestamp_ns = timestamp_ns + 100000 WHERE trace_id = 5"
+            )
+        self.prepare()
+        self.trace.connection.execute(wire.sql.read("wire-schema"))
+        states = [
+            quic.Connection(
+                index=i,
+                local=RELAY,
+                peer=SUBSCRIBER,
+                client_is_peer=True,
+                client_scid=b"",
+                initial={},
+                first_ns=20000,
+                last_ns=500000,
+            )
+            for i in range(2)
+        ]
+        wire._load(
+            self.trace.connection,
+            "network.wire_connections",
+            wire._CONNECTION_COLUMNS,
+            [(i, *RELAY, *SUBSCRIBER, True, 20000, 500000) for i in range(2)],
+        )
+        wire._load(
+            self.trace.connection,
+            "network.wire_packets",
+            wire._PACKET_COLUMNS,
+            [(i, i, "tx", timestamp, "data", 1, 1200, i, 0, 0) for i, timestamp in enumerate((309000, 409000))],
+        )
+        wire._join_connections(self.trace.connection, states)
+        self.assertEqual(
+            self.trace.connection.execute(
+                "SELECT connection, trace_connection_id FROM network.wire_connections ORDER BY connection"
+            ).fetchall(),
+            [(0, 2), (1, 3)],
+        )
+        # Conflicting unique observations must not pick either candidate.
+        wire._load(
+            self.trace.connection,
+            "network.wire_packets",
+            wire._PACKET_COLUMNS,
+            [(2, 0, "tx", 409000, "data", 1, 1200, 2, 0, 0)],
+        )
+        with self.assertRaisesRegex(TraceError, r"wire connection 0 .* matches 2 traced connections"):
+            wire._join_connections(self.trace.connection, states)
+
     def test_a_connection_without_a_path_event_is_rejected(self) -> None:
         self.trace.connection.execute("DELETE FROM raw.quic_connection_path WHERE connection_id = 2")
         self.prepare()

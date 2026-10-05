@@ -216,7 +216,7 @@ def ingest(
     _load(connection, "network.wire_connections", _CONNECTION_COLUMNS, connections)
     _load(connection, "network.wire_packets", _PACKET_COLUMNS, packets)
     _load(connection, "network.wire_stream_frames", _FRAME_COLUMNS, frames)
-    _join_connections(connection, decryptor.connections)
+    _join_connections(connection, decryptor.connections, manifest.realtime_offset_uncertainty_ns + _CLOCK_STEP_NS)
     connection.execute(sql.read("wire-join"))
     _check(connection, manifest)
     coverage.resolve_wire(connection)
@@ -226,14 +226,19 @@ def ingest(
     return packet_count
 
 
-def _join_connections(connection: duckdb.DuckDBPyConnection, states: list[quic.Connection]) -> None:
+def _join_connections(
+    connection: duckdb.DuckDBPyConnection, states: list[quic.Connection], tolerance_ns: int = 0
+) -> None:
     """Name the trace connection of every wire connection.
 
     A trace connection records its addresses in `quic_connection_path` events.
     The trace connection of a wire connection is the one with a path event on
     the same addresses, the same relay port, and a time within the wire
     connection's lifetime. A local address the trace recorded as the wildcard
-    matches any. Anything other than exactly one candidate is an error.
+    matches any. When connections share addresses, a transmitted wire packet
+    with the same space and number captured inside exactly one candidate's
+    packet lifecycle identifies that candidate. All such unique observations
+    must agree. Anything other than exactly one candidate is an error.
     """
 
     paths = connection.execute(
@@ -256,11 +261,31 @@ def _join_connections(connection: duckdb.DuckDBPyConnection, states: list[quic.C
             and (int(path_local) in wildcards or int(path_local) == local)
             and state.first_ns <= timestamp_ns <= state.last_ns
         }
+        if len(candidates) > 1:
+            candidates = {
+                row[0]
+                for row in connection.execute(
+                    """WITH matches AS (
+                         SELECT wire.packet_id, min(trace.connection_id) AS connection_id
+                         FROM network.wire_packets AS wire
+                         JOIN packet_lifecycles AS trace
+                           ON trace.process_id = wire.process_id
+                          AND trace.direction = 'tx' AND trace.outcome = 'success'
+                          AND trace.packet_space = wire.packet_space
+                          AND trace.packet_number = wire.packet_number
+                          AND wire.timestamp_ns BETWEEN trace.start_ns - $tolerance AND trace.end_ns + $tolerance
+                         WHERE wire.connection = $wire_connection AND wire.direction = 'tx'
+                           AND trace.connection_id IN (SELECT unnest($candidates))
+                         GROUP BY wire.packet_id HAVING count(DISTINCT trace.connection_id) = 1
+                       ) SELECT DISTINCT connection_id FROM matches""",
+                    {"tolerance": tolerance_ns, "wire_connection": state.index, "candidates": sorted(candidates)},
+                ).fetchall()
+            }
         if len(candidates) != 1:
             raise TraceError(
                 f"wire connection {state.index} between {state.local} and {state.peer} matches "
                 f"{len(candidates)} traced connections; each needs exactly one quic_connection_path event "
-                "on its addresses during its lifetime"
+                "on its addresses during its lifetime and unambiguous send lifetimes when addresses are shared"
             )
         connection.execute(
             "UPDATE network.wire_connections SET trace_connection_id = ? WHERE connection = ?",
