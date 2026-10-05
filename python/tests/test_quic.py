@@ -299,6 +299,39 @@ class DecryptorTests(unittest.TestCase):
         )
         self.assertEqual([packet.byte_length for packet in packets[:3]], [len(segments[0])] * 3)
 
+    def test_gso_boundary_is_chosen_by_authentication_not_by_a_repeated_connection_id(self) -> None:
+        # A decoder that cuts at the first repeat of the destination connection
+        # ID splits this valid send at the wrong place, because the first
+        # segment carries that ID inside its own STREAM data. Wireshark's
+        # heuristic does this and still exits successfully, so only a decoder
+        # that lets authentication pick the boundary recovers both packets.
+        cid = self.peer.client_cid
+        size = 1200
+        header_size = 1 + len(cid) + 2
+        plain = _stream(4, 0, b"x" * 1100)
+        plain += b"\x00" * (size - header_size - 16 - len(plain))
+        ordinary = self.peer.short(quic.SERVER, 0, plain, size=size)
+        # AES-GCM ciphertext is the plaintext XOR a keystream fixed by the key and
+        # packet number, so choosing the plaintext chooses the ciphertext. The
+        # packet is then sealed normally and authenticates.
+        false_boundary = 100
+        forged = b"\x40" + cid
+        changed = bytearray(plain)
+        for offset, value in enumerate(forged, start=false_boundary):
+            changed[offset - header_size] ^= ordinary[offset] ^ value
+        collision = self.peer.short(quic.SERVER, 0, bytes(changed), size=size)
+        self.assertEqual(len(collision), size)
+        self.assertEqual(collision[false_boundary : false_boundary + len(forged)], forged)
+        second = self.peer.short(quic.SERVER, 1, _stream(4, 1100, b"y" * 1100), size=size)
+
+        packets = self.decryptor.datagram(10, LOCAL, PEER, False, collision + second)
+        self.assertEqual([(packet.segment, packet.packet_number) for packet in packets], [(0, 0), (1, 1)])
+        self.assertEqual([packet.byte_length for packet in packets], [size, size])
+        self.assertEqual(
+            [frame for packet in packets for frame in packet.stream_frames],
+            [quic.StreamFrame(4, 0, 1100, False), quic.StreamFrame(4, 1100, 2200, False)],
+        )
+
     def test_greased_fixed_bits_still_split_and_decrypt(self) -> None:
         segments = [
             self.peer.short(quic.SERVER, number, _stream(4, number * 1100, b"x" * 1100), size=1200, grease=True)
