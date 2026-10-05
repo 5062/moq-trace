@@ -30,9 +30,9 @@ class Phase:
     #: phase is the MoQ work of a stack that runs MoQ inside packet processing,
     #: which the object phases already show.
     drawn: bool = True
-    #: Whether the phase is a wait rather than work. Many packets wait in one
-    #: queue at once, so a timeline of one object's work leaves waits out: their
-    #: overlapping intervals would sum to more than the object's whole span.
+    #: Whether the phase is a wait rather than work. Work totals leave waits
+    #: out. Many packets wait in one queue at once, so the object timeline leaves
+    #: packet waits out too, and draws an object's own waits apart from its work.
     wait: bool = False
 
 

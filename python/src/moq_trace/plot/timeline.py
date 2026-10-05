@@ -112,6 +112,22 @@ def _rebase(timeline: dict) -> None:
         interval["end_us"] -= origin
 
 
+def _rows(subject: str, direction: str, prefix: str, title: str) -> tuple[tuple[str, str, str, bool], ...]:
+    """The drawn rows of one subject and direction, each flagged when it is a wait.
+
+    Object waits are drawn: a copy's own waits never overlap each other, and they
+    explain the gaps between its work, such as the time before its clone. Packet
+    waits are left out, because the many packets carrying one object wait in a
+    queue at once and their bars would bury the work rows.
+    """
+
+    return tuple(
+        (direction, f"{prefix}{phase.name}", f"{direction.upper()} {title}{phase.label.title()}", phase.wait)
+        for phase in phases.select(subject, direction)
+        if phase.drawn and (subject == "object" or not phase.wait)
+    )
+
+
 def plot_object_timelines(
     path: pathlib.Path,
     subtitle: str,
@@ -127,25 +143,21 @@ def plot_object_timelines(
 
     # QUIC rows carry the `quic_` prefix the interval query gives packet phases.
     # The application phase is left out, as in the breakdown: it is the MoQ work
-    # drawn in the rows below. Waits are left out too, since the rows show work.
-    def rows(subject: str, direction: str, prefix: str, title: str) -> tuple[tuple[str, str, str], ...]:
-        return tuple(
-            (direction, f"{prefix}{phase.name}", f"{direction.upper()} {title}{phase.label.title()}")
-            for phase in phases.select(subject, direction)
-            if phase.drawn and not phase.wait
-        )
-
-    rx_quic_rows = rows("packet", "rx", "quic_", "QUIC ")
-    moq_rows = rows("object", "rx", "", "") + rows("object", "tx", "", "")
-    tx_quic_rows = rows("packet", "tx", "quic_", "QUIC ")
+    # drawn in the rows below.
+    rx_quic_rows = _rows("packet", "rx", "quic_", "QUIC ")
+    moq_rows = _rows("object", "rx", "", "") + _rows("object", "tx", "", "")
+    tx_quic_rows = _rows("packet", "tx", "quic_", "QUIC ")
     present = {
         (interval["direction"], interval["phase"]) for timeline in timelines for interval in timeline["intervals"]
     }
     rx_quic_rows = tuple(row for row in rx_quic_rows if row[:2] in present)
     tx_quic_rows = tuple(row for row in tx_quic_rows if row[:2] in present)
+    # Work rows stay put so stacks line up; a wait row appears only when waited.
+    moq_rows = tuple(row for row in moq_rows if not row[3] or row[:2] in present)
     phase_rows = rx_quic_rows + moq_rows + tx_quic_rows
-    positions = {(direction, phase): index for index, (direction, phase, _label) in enumerate(phase_rows)}
-    labels = [label for _direction, _phase, label in phase_rows]
+    positions = {(direction, phase): index for index, (direction, phase, _label, _wait) in enumerate(phase_rows)}
+    waits = {(direction, phase) for direction, phase, _label, wait in phase_rows if wait}
+    labels = [label for _direction, _phase, label, _wait in phase_rows]
 
     figure_height = max(11.0, len(timelines) * len(phase_rows) * 0.28 + 2.5)
     fig, axes = plt.subplots(len(timelines), 1, figsize=(15, figure_height), sharex=True, squeeze=False)
@@ -194,11 +206,15 @@ def plot_object_timelines(
             if interval["direction"] == "tx":
                 y += tx_offsets[interval["session_id"]]
                 height = lane_height * 0.82
+            # A wait is an unfilled, hatched bar in the copy's color, so it reads as
+            # time spent waiting rather than as work.
+            wait = key in waits
             axis.broken_barh(
                 [(interval["start_us"], interval["end_us"] - interval["start_us"])],
                 (y - height / 2, height),
-                facecolors=color,
-                edgecolors="#334155",
+                facecolors="none" if wait else color,
+                edgecolors=color if wait else "#334155",
+                hatch="////" if wait else None,
                 linewidth=0.7,
                 alpha=0.88,
             )

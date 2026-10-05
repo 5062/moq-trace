@@ -19,6 +19,7 @@ from moq_trace.plot import (  # noqa: E402
     plot_moq_work,
     plot_segments,
     plot_stability,
+    timeline,  # noqa: E402
 )
 from moq_trace.plot.breakdown import _row_summary  # noqa: E402
 from moq_trace.plot.common import _copy_rows  # noqa: E402
@@ -95,6 +96,15 @@ class RunPlotTests(unittest.TestCase):
                         self.assertGreater(output.stat().st_size, 0, (plot.__name__, packet_phases))
             finally:
                 connection.close()
+
+    def test_timeline_draws_object_waits_and_leaves_packet_waits_out(self) -> None:
+        tx = {row[1]: row[3] for row in timeline._rows("object", "tx", "", "")}
+        self.assertTrue(tx["delivery_wait"])
+        self.assertTrue(tx["write_blocked"])
+        self.assertFalse(tx["clone"])
+        rx_packets = [row[1] for row in timeline._rows("packet", "rx", "quic_", "QUIC ")]
+        self.assertNotIn("quic_read_queue", rx_packets)
+        self.assertNotIn("quic_scheduling", rx_packets)
 
     def test_breakdown_sums_repeated_phases_within_a_unit(self) -> None:
         connection = _artifact(packet_phases=True)
