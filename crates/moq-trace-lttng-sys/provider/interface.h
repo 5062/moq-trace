@@ -22,7 +22,8 @@ enum moq_trace_edge {
  * Declaration order is the wire encoding, so new phases are appended rather
  * than placed in pipeline order. Every phase measures work except
  * DELIVERY_WAIT and WRITE_BLOCKED, which measure waits; any other time an
- * object spends waiting belongs to no phase.
+ * object spends waiting belongs to no phase. TRANSPORT_CALL nests inside
+ * another work phase rather than following it.
  */
 enum moq_trace_object_phase {
 	MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE,
@@ -46,6 +47,11 @@ enum moq_trace_object_phase {
 	/* TX wait: from a write that could not proceed until the relay resumes
 	 * writing, for flow control, backpressure, or an asynchronous lock. */
 	MOQ_TRACE_OBJECT_PHASE_WRITE_BLOCKED,
+	/* Nested: time inside a call into the transport API made by another phase
+	 * of this object, such as the stream write inside PAYLOAD_WRITE. It covers
+	 * whatever the transport runs in the call, including packet building,
+	 * sends, and its locks, and is never MoQ work. */
+	MOQ_TRACE_OBJECT_PHASE_TRANSPORT_CALL,
 };
 
 enum moq_trace_object_outcome {

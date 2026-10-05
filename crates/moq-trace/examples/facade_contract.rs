@@ -5,8 +5,8 @@
 
 use moq_trace::{
     ConnectionPath, Direction, LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome,
-    ObjectPhase, PacketContext, PacketOutcome, PacketPhase, PacketSpace, SocketOutcome,
-    SocketStats, StreamFrame,
+    ObjectPhase, PacketContext, PacketOutcome, PacketPhase, PacketSpace, SendBlockedReason,
+    SocketOutcome, SocketStats, StreamFrame,
 };
 
 fn main() {
@@ -43,6 +43,7 @@ fn main() {
             ObjectPhase::Notify,
             ObjectPhase::DeliveryWait,
             ObjectPhase::WriteBlocked,
+            ObjectPhase::TransportCall,
         ] {
             object.phase(phase).finish(ObjectOutcome::Success);
         }
@@ -97,6 +98,12 @@ fn main() {
                 packet.phase(phase).finish(PacketOutcome::Success);
             }
             packet.stream_frame(StreamFrame::new(7, 8, 1032), PacketOutcome::Success);
+            for retransmission in [false, true] {
+                packet.stream_frame(
+                    StreamFrame::new(7, 8, 1032).with_retransmission(retransmission),
+                    PacketOutcome::Success,
+                );
+            }
             packet.finish(PacketOutcome::Success);
         }
         let mut completed =
@@ -139,5 +146,16 @@ fn main() {
                 .finish(outcome, SocketStats::new(1, 2, 1200));
         }
         drop(handle.socket(direction, None));
+    }
+    for reason in [
+        SendBlockedReason::CongestionWindow,
+        SendBlockedReason::Pacing,
+        SendBlockedReason::Amplification,
+        SendBlockedReason::ConnectionFlowControl,
+        SendBlockedReason::StreamFlowControl,
+        SendBlockedReason::SendBuffer,
+    ] {
+        handle.send_blocked(connection, reason, None).finish();
+        drop(handle.send_blocked(connection, reason, Some(7)));
     }
 }

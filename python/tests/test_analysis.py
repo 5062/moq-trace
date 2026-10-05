@@ -24,6 +24,7 @@ class PhaseTableTests(unittest.TestCase):
         """The Python phase table names exactly the phases each provider declares.
 
         The enum order is the wire encoding and the table order is the pipeline, so only the names are compared.
+        A phase both directions record appears once per direction in the table.
         """
 
         crates = pathlib.Path(__file__).resolve().parents[2] / "crates"
@@ -34,7 +35,7 @@ class PhaseTableTests(unittest.TestCase):
             with self.subTest(subject=subject):
                 source = (crates / header / "provider/interface.h").read_text()
                 declared = [name.lower() for name in re.findall(rf"\b{prefix}(\w+),", source)]
-                table = [phase.name for phase in phases.PHASES if phase.subject == subject]
+                table = {phase.name for phase in phases.PHASES if phase.subject == subject}
                 self.assertCountEqual(table, declared)
 
 

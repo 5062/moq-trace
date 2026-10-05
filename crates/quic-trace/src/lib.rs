@@ -18,6 +18,9 @@ pub use packet::{
 mod socket;
 pub use socket::{SocketOutcome, SocketStats, SocketTrace};
 
+mod blocked;
+pub use blocked::{SendBlockedReason, SendBlockedTrace};
+
 mod path;
 pub use path::ConnectionPath;
 

@@ -1,6 +1,7 @@
 -- The trace's successful STREAM frames, as coverage reads them. A frame
 -- completes its bytes when the send that carried it completes (TX) or when the
--- stream's receive buffer accepted it (RX).
+-- stream's receive buffer accepted it (RX). A TX retransmission repairs bytes an
+-- earlier packet already carried, so coverage counts first transmissions only.
 CREATE OR REPLACE TEMP VIEW coverage_frame_source AS
 SELECT packet.process_id, packet.connection_id, packet.direction, frame.stream_id,
        frame.offset_start, frame.offset_end,
@@ -8,4 +9,5 @@ SELECT packet.process_id, packet.connection_id, packet.direction, frame.stream_i
        packet.trace_id, packet.start_ns
 FROM quic_stream_frame AS frame
 JOIN packet_lifecycles AS packet USING (process_id, trace_id)
-WHERE packet.outcome = 'success' AND frame.outcome = 'success';
+WHERE packet.outcome = 'success' AND frame.outcome = 'success'
+  AND frame.retransmission IS DISTINCT FROM 1;

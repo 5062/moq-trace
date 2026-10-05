@@ -117,6 +117,7 @@ pub struct StreamFrame {
     pub(crate) stream_id: u64,
     pub(crate) offset_start: u64,
     pub(crate) offset_end: u64,
+    pub(crate) retransmission: Option<bool>,
 }
 
 impl StreamFrame {
@@ -126,7 +127,17 @@ impl StreamFrame {
             stream_id,
             offset_start,
             offset_end,
+            retransmission: None,
         }
+    }
+
+    /// Mark whether a TX frame resends bytes an earlier packet carried.
+    ///
+    /// A sender knows this when it builds the frame. A receiver cannot tell a
+    /// repair from a first transmission, so an RX frame leaves it unset.
+    pub fn with_retransmission(mut self, retransmission: bool) -> Self {
+        self.retransmission = Some(retransmission);
+        self
     }
 }
 

@@ -286,8 +286,8 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     )
     connection.execute(sql.read("segment-samples-stage"), {"origin": origin})
     connection.execute(sql.read("wire-samples-schema"))
-    connection.execute(sql.read("write-transport-stage"))
     connection.execute(sql.read("moq-work-samples-stage"), {"origin": origin})
+    connection.execute(sql.read("transport-wait-samples-stage"), {"origin": origin})
 
 
 def _catalog() -> list[tuple[str, str, str, str, str, int]]:
@@ -304,6 +304,16 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
         ("moq_write_after_receive", "object", "MoQ write start after receive"),
         ("moq_delivery_wait", "object", "MoQ delivery wait"),
         ("moq_write_blocked", "object", "MoQ write blocked"),
+        ("moq_rx_transport", "object", "MoQ RX transport calls"),
+        ("moq_tx_transport", "object", "MoQ TX transport calls"),
+        ("send_wait", "quic_object", "Send wait (write to packet)"),
+        ("blocked_congestion_window", "quic_object", "Blocked by congestion window"),
+        ("blocked_pacing", "quic_object", "Blocked by pacing"),
+        ("blocked_amplification", "quic_object", "Blocked by amplification limit"),
+        ("blocked_connection_flow_control", "quic_object", "Blocked by connection flow control"),
+        ("blocked_stream_flow_control", "quic_object", "Blocked by stream flow control"),
+        ("blocked_send_buffer", "quic_object", "Blocked by send buffer"),
+        ("tx_repair", "quic_object", "TX repair after first transmission"),
         ("quic_forward_start", "quic_object", "QUIC forward start"),
         ("quic_tail_gap", "quic_object", "QUIC tail gap"),
         ("quic_full_span", "quic_object", "QUIC full span (read to send)"),

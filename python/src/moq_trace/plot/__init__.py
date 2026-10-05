@@ -3,8 +3,9 @@
 Each figure answers one question. `latency_cdf` shows how long an object copy
 takes, with its tail on a log scale. `segments` splits that span where each
 layer hands off, and `breakdown` shows where the time goes phase by phase.
-`moq_work` shows what the MoQ layer itself spends and when it starts
-forwarding. `stability` shows whether latency drifts or stalls over the run,
+`moq_work` shows what the MoQ layer itself spends, what it waits on, and when it
+starts forwarding, and `transport_waits` how long the transport then held each
+copy's bytes and why. `stability` shows whether latency drifts or stalls over the run,
 and lines packet stalls up under object stalls. `network` shows what the network
 did meanwhile. `object_timeline` drills into single objects. The comparison
 figures repeat the first four across runs.
@@ -27,6 +28,7 @@ from .network import plot_network  # noqa: E402
 from .segments import plot_segments  # noqa: E402
 from .stability import plot_stability  # noqa: E402
 from .timeline import plot_object_timelines  # noqa: E402
+from .transport_waits import plot_transport_waits  # noqa: E402
 
 __all__ = [
     "PlotRun",
@@ -38,4 +40,5 @@ __all__ = [
     "plot_object_timelines",
     "plot_segments",
     "plot_stability",
+    "plot_transport_waits",
 ]

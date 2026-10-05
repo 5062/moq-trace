@@ -183,13 +183,18 @@ class Packet {
     return PacketPhase(trace_id_, value, timestamp_ns);
   }
 
-  /** Associate a half-open STREAM byte range with this packet. */
+  /**
+   * Associate a half-open STREAM byte range with this packet.
+   *
+   * A sender passes `retransmission` to say whether the frame resends bytes an
+   * earlier packet carried. A receiver cannot tell, so it leaves it unset.
+   */
   void stream_frame(std::uint64_t stream_id, std::uint64_t offset_start,
-                    std::uint64_t offset_end,
-                    quic_trace_packet_outcome outcome) const {
+                    std::uint64_t offset_end, quic_trace_packet_outcome outcome,
+                    std::optional<bool> retransmission = std::nullopt) const {
     if (trace_id_ == 0 || !quic_trace_quic_stream_frame_enabled()) return;
     emit_stream_frame(detail::now_ns(), stream_id, offset_start, offset_end,
-                      outcome);
+                      outcome, retransmission);
   }
 
   /**
@@ -202,9 +207,11 @@ class Packet {
   void stream_frame_at(std::uint64_t stream_id, std::uint64_t offset_start,
                        std::uint64_t offset_end,
                        quic_trace_packet_outcome outcome,
-                       std::uint64_t timestamp_ns) const {
+                       std::uint64_t timestamp_ns,
+                       std::optional<bool> retransmission = std::nullopt) const {
     if (trace_id_ == 0 || !quic_trace_quic_stream_frame_enabled()) return;
-    emit_stream_frame(timestamp_ns, stream_id, offset_start, offset_end, outcome);
+    emit_stream_frame(timestamp_ns, stream_id, offset_start, offset_end, outcome,
+                      retransmission);
   }
 
   /** Finish the packet with an explicit result. */
@@ -245,10 +252,18 @@ class Packet {
 
   void emit_stream_frame(std::uint64_t timestamp_ns, std::uint64_t stream_id,
                          std::uint64_t offset_start, std::uint64_t offset_end,
-                         quic_trace_packet_outcome outcome) const {
+                         quic_trace_packet_outcome outcome,
+                         std::optional<bool> retransmission) const {
     const struct quic_trace_quic_stream_frame event{
-        timestamp_ns, trace_id_, stream_id, offset_start, offset_end,
-        static_cast<std::uint8_t>(outcome)};
+        timestamp_ns,
+        trace_id_,
+        stream_id,
+        offset_start,
+        offset_end,
+        static_cast<std::uint8_t>(outcome),
+        static_cast<std::uint8_t>(retransmission.has_value()),
+        static_cast<std::uint8_t>(retransmission.value_or(false)),
+    };
     quic_trace_quic_stream_frame(&event);
   }
 
@@ -283,6 +298,84 @@ struct SocketStats {
   std::uint64_t datagrams = 0;
   /** Total bytes represented by those buffers. */
   std::uint64_t bytes = 0;
+};
+
+/**
+ * An interval in which a connection cannot send, ended by `finish()` or scope.
+ *
+ * A stack keeps one per reason while the condition holds: per connection for
+ * the transmit reasons, and per stream for a blocked write. Destroying it, for
+ * example when the connection closes, ends the interval at that instant.
+ */
+class SendBlocked {
+ public:
+  /** Create an object that records nothing. */
+  SendBlocked() = default;
+
+  /**
+   * Start an interval in which `connection_id` cannot send for `reason`.
+   *
+   * Pass the stream a blocked write targets, or nothing when the connection as
+   * a whole cannot transmit.
+   */
+  SendBlocked(std::uint64_t connection_id, quic_trace_send_blocked_reason reason,
+              std::optional<std::uint64_t> stream_id = std::nullopt)
+      : connection_id_(connection_id), stream_id_(stream_id), reason_(reason) {
+    detail::initialize();
+    if (!quic_trace_quic_send_blocked_enabled()) return;
+    span_id_ = quic_trace_next_span_id();
+    emit(QUIC_TRACE_EDGE_START);
+  }
+
+  SendBlocked(const SendBlocked&) = delete;
+  SendBlocked& operator=(const SendBlocked&) = delete;
+
+  /** Transfer ownership of an interval. */
+  SendBlocked(SendBlocked&& other) noexcept { *this = std::move(other); }
+
+  /** Transfer ownership after ending any currently held interval. */
+  SendBlocked& operator=(SendBlocked&& other) noexcept {
+    if (this != &other) {
+      finish();
+      span_id_ = std::exchange(other.span_id_, 0);
+      connection_id_ = other.connection_id_;
+      stream_id_ = other.stream_id_;
+      reason_ = other.reason_;
+    }
+    return *this;
+  }
+
+  /** End the interval when the object leaves scope. */
+  ~SendBlocked() { finish(); }
+
+  /** Return whether this object records an open interval. */
+  bool active() const { return span_id_ != 0; }
+
+  /** End the interval now, when the connection can send again. */
+  void finish() {
+    if (span_id_ == 0) return;
+    emit(QUIC_TRACE_EDGE_DONE);
+    span_id_ = 0;
+  }
+
+ private:
+  void emit(quic_trace_edge edge) const {
+    const struct quic_trace_quic_send_blocked event{
+        detail::now_ns(),
+        span_id_,
+        connection_id_,
+        static_cast<std::uint8_t>(stream_id_.has_value()),
+        stream_id_.value_or(0),
+        static_cast<std::uint8_t>(reason_),
+        static_cast<std::uint8_t>(edge),
+    };
+    quic_trace_quic_send_blocked(&event);
+  }
+
+  std::uint64_t span_id_ = 0;
+  std::uint64_t connection_id_ = 0;
+  std::optional<std::uint64_t> stream_id_;
+  quic_trace_send_blocked_reason reason_ = QUIC_TRACE_SEND_BLOCKED_REASON_CONGESTION_WINDOW;
 };
 
 /** A scoped UDP socket operation. */

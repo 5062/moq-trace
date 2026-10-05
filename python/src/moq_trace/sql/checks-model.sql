@@ -58,4 +58,19 @@ LEFT JOIN (
   FROM packet_phase_intervals WHERE phase = 'send_queue' GROUP BY ALL
 ) AS queue USING (process_id, trace_id)
 WHERE packet.direction = 'tx' AND packet.outcome = 'success'
-  AND (queue.phases IS DISTINCT FROM 1 OR queue.successes <> 1 OR queue.end_ns <> packet.end_ns);
+  AND (queue.phases IS DISTINCT FROM 1 OR queue.successes <> 1 OR queue.end_ns <> packet.end_ns)
+UNION ALL
+-- A nested phase is subtracted from the work phase around it, which is only
+-- sound when one successful work occurrence of the same object contains it.
+SELECT 'nested object phases outside a work phase of their object', count(*)
+FROM object_phase_intervals AS inner_phase
+SEMI JOIN phase_catalog AS kind
+  ON kind.subject = 'object' AND kind.phase = inner_phase.phase AND kind.nested
+ANTI JOIN (
+  SELECT outer_phase.* FROM object_phase_intervals AS outer_phase
+  SEMI JOIN phase_catalog AS kind
+    ON kind.subject = 'object' AND kind.phase = outer_phase.phase AND NOT kind.wait AND NOT kind.nested
+) AS outer_phase
+  ON outer_phase.process_id = inner_phase.process_id AND outer_phase.trace_id = inner_phase.trace_id
+ AND outer_phase.start_ns <= inner_phase.start_ns AND inner_phase.end_ns <= outer_phase.end_ns
+WHERE inner_phase.outcome = 'success';

@@ -33,3 +33,6 @@ UNION ALL
 SELECT process_id, 'packet'::subject, trace_id, span_id, phase,
        occurrence::UINTEGER, start_ns, end_ns, outcome::outcome, tid
 FROM packet_phase_intervals;
+
+INSERT INTO model.send_blocked
+SELECT process_id, span_id, connection_id, stream_id, reason, start_ns, end_ns FROM send_blocked_intervals;

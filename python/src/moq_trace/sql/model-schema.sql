@@ -67,3 +67,16 @@ CREATE TABLE model.intervals (
     tid UBIGINT NOT NULL,
     PRIMARY KEY (process_id, subject, trace_id, span_id, phase)
 );
+
+-- Intervals in which a connection could not send, and why. A blocked write
+-- names its stream; a connection that could not transmit at all does not.
+CREATE TABLE model.send_blocked (
+    process_id UINTEGER NOT NULL,
+    span_id UBIGINT NOT NULL,
+    connection_id UBIGINT NOT NULL,
+    stream_id UBIGINT,
+    reason VARCHAR NOT NULL,
+    start_ns BIGINT NOT NULL,
+    end_ns BIGINT NOT NULL,
+    PRIMARY KEY (process_id, span_id)
+);

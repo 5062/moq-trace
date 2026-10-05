@@ -1,4 +1,7 @@
-use std::task::Poll;
+use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use crate::backend::{Event, Tracepoint};
 use crate::{Direction, Handle, PhaseEdge};
@@ -102,6 +105,15 @@ pub enum ObjectPhase {
     /// the wake and the next poll. A synchronous lock contended inside a write
     /// call blocks inside the call, so that time stays in the write phase.
     WriteBlocked,
+    /// Time inside a call into the transport API made by another phase.
+    ///
+    /// The phase nests inside the work phase that made the call, such as the
+    /// stream write inside [`ObjectPhase::PayloadWrite`], and covers whatever
+    /// the transport runs in it: packet building and sends for a stack that
+    /// transmits synchronously, and the transport's own locks. It is never MoQ
+    /// work, so analysis subtracts it from the phase around it. A Rust hook
+    /// records it by wrapping the transport future in [`transport_call`].
+    TransportCall,
 }
 
 /// Result of an object lifecycle or phase.
@@ -337,7 +349,9 @@ impl ObjectTrace {
                 return future.as_mut().poll(cx);
             };
             let start_ns = state.backend.now_ns();
+            let scope = CallScope::enter(&state.backend);
             let poll = future.as_mut().poll(cx);
+            let calls = scope.exit();
             let end_ns = state.backend.now_ns();
             if let (Some(wait), Some(wait_start_ns)) = (wait, pending_since.take()) {
                 let span_id = state.backend.next_span_id();
@@ -352,6 +366,13 @@ impl ObjectTrace {
             let span_id = state.backend.next_span_id();
             state.emit_phase_at(span_id, phase, PhaseEdge::Start, None, start_ns);
             state.emit_phase_at(span_id, phase, PhaseEdge::Done, Some(outcome), end_ns);
+            for &(call_start, call_end) in calls.intervals() {
+                let span_id = state.backend.next_span_id();
+                let call = ObjectPhase::TransportCall;
+                state.emit_phase_at(span_id, call, PhaseEdge::Start, None, call_start);
+                let outcome = Some(ObjectOutcome::Success);
+                state.emit_phase_at(span_id, call, PhaseEdge::Done, outcome, call_end);
+            }
             if poll.is_pending() {
                 pending_since = Some(end_ns);
             }
@@ -366,6 +387,142 @@ impl ObjectTrace {
             return;
         };
         state.emit_end(outcome);
+    }
+}
+
+/// Transport call intervals one measured poll holds before merging later ones
+/// into its last.
+const CALL_CAPACITY: usize = 8;
+
+/// The transport calls recorded while one measured poll ran.
+///
+/// Calls beyond the capacity extend the last interval to the end of the latest
+/// one, so the intervals cover every call and never overlap, at the cost of
+/// also covering the MoQ work between the merged calls.
+#[derive(Default)]
+struct Calls {
+    intervals: [(u64, u64); CALL_CAPACITY],
+    len: usize,
+}
+
+impl Calls {
+    fn intervals(&self) -> &[(u64, u64)] {
+        &self.intervals[..self.len]
+    }
+
+    fn push(&mut self, start_ns: u64, end_ns: u64) {
+        if self.len < CALL_CAPACITY {
+            self.intervals[self.len] = (start_ns, end_ns);
+            self.len += 1;
+        } else {
+            self.intervals[CALL_CAPACITY - 1].1 = end_ns;
+        }
+    }
+}
+
+/// The measured poll running on this thread, which transport calls record into.
+struct ActivePoll {
+    backend: crate::backend::Handle,
+    calls: Calls,
+    /// Whether a transport call is already running, so a nested one is not
+    /// counted twice.
+    in_call: bool,
+}
+
+thread_local! {
+    static ACTIVE_POLL: RefCell<Option<ActivePoll>> = const { RefCell::new(None) };
+}
+
+/// Makes a measured poll the target of transport calls on this thread.
+///
+/// The scope is thread-local because a poll runs on one thread, and it lives in
+/// the Rust facade because only Rust transports are polled from MoQ phases. A
+/// C++ hook times a transport call with an explicit nested phase instead.
+struct CallScope {
+    previous: Option<Option<ActivePoll>>,
+}
+
+impl CallScope {
+    fn enter(backend: &crate::backend::Handle) -> Self {
+        let active = ActivePoll {
+            backend: backend.clone(),
+            calls: Calls::default(),
+            in_call: false,
+        };
+        let previous = ACTIVE_POLL.with(|cell| cell.replace(Some(active)));
+        Self {
+            previous: Some(previous),
+        }
+    }
+
+    /// Restore the enclosing scope and return the calls this one recorded.
+    fn exit(mut self) -> Calls {
+        let previous = self.previous.take().expect("a scope exits once");
+        ACTIVE_POLL
+            .with(|cell| cell.replace(previous))
+            .map(|active| active.calls)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for CallScope {
+    /// Restore the enclosing scope when a poll unwinds before exiting.
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            ACTIVE_POLL.with(|cell| *cell.borrow_mut() = previous);
+        }
+    }
+}
+
+/// A transport future whose polls are timed as [`ObjectPhase::TransportCall`].
+///
+/// Created by [`transport_call`]. Outside a poll measured by
+/// [`ObjectTrace::measure`] or [`ObjectTrace::measure_waiting`] it reads no
+/// clock and only forwards the poll, and a build without the `lttng` feature
+/// forwards every poll without looking for one.
+#[must_use = "futures do nothing unless polled"]
+pub struct TransportCall<F> {
+    future: F,
+}
+
+/// Time each poll of a transport future as a call into the transport API.
+///
+/// Wrap the future a MoQ phase awaits from the transport, such as a stream
+/// write or read, so the time spent inside the transport is recorded on the
+/// object whose phase is being measured on this thread. Analysis subtracts that
+/// time from the phase, which leaves the MoQ layer's own work.
+pub fn transport_call<F: Future>(future: F) -> TransportCall<F> {
+    TransportCall { future }
+}
+
+impl<F: Future> Future for TransportCall<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        // SAFETY: `future` is structurally pinned. It is never moved out of the
+        // wrapper, and the wrapper has no `Drop` impl or `Unpin` override.
+        let future = unsafe { self.map_unchecked_mut(|call| &mut call.future) };
+        // A build that cannot emit never opens a scope, so it skips the lookup.
+        if !crate::backend::available() {
+            return future.poll(cx);
+        }
+        let start_ns = ACTIVE_POLL.with(|cell| {
+            let mut active = cell.borrow_mut();
+            let active = active.as_mut().filter(|active| !active.in_call)?;
+            active.in_call = true;
+            Some(active.backend.now_ns())
+        });
+        let poll = future.poll(cx);
+        if let Some(start_ns) = start_ns {
+            ACTIVE_POLL.with(|cell| {
+                if let Some(active) = cell.borrow_mut().as_mut() {
+                    let end_ns = active.backend.now_ns();
+                    active.calls.push(start_ns, end_ns);
+                    active.in_call = false;
+                }
+            });
+        }
+        poll
     }
 }
 

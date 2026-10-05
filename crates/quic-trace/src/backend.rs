@@ -5,8 +5,8 @@
 //! `provider/interface.h`. Reordering variants changes the wire contract.
 
 use crate::{
-    ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge, SocketOutcome,
-    SocketStats, StreamFrame,
+    ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge,
+    SendBlockedReason, SocketOutcome, SocketStats, StreamFrame,
 };
 use trace_core::{
     Backend as CoreBackend, Handle as CoreHandle, Schema, Tracepoint as CoreTracepoint,
@@ -29,6 +29,8 @@ pub(crate) enum Tracepoint {
     SocketEnd,
     /// A connection recorded the path it sends on.
     ConnectionPath,
+    /// A connection could not send, or could again.
+    SendBlocked,
 }
 
 impl CoreTracepoint for Tracepoint {
@@ -95,6 +97,15 @@ pub(crate) enum Event {
         connection_id: u64,
         path: ConnectionPath,
     },
+    /// One edge of an interval in which a connection could not send.
+    SendBlocked {
+        timestamp_ns: u64,
+        span_id: u64,
+        connection_id: u64,
+        stream_id: Option<u64>,
+        reason: SendBlockedReason,
+        edge: PhaseEdge,
+    },
 }
 
 /// The `quic_trace:*` schema.
@@ -121,6 +132,7 @@ impl Schema for TransportSchema {
             Event::SocketStart { .. } => Tracepoint::SocketStart,
             Event::SocketEnd { .. } => Tracepoint::SocketEnd,
             Event::ConnectionPath { .. } => Tracepoint::ConnectionPath,
+            Event::SendBlocked { .. } => Tracepoint::SendBlocked,
         }
     }
 
@@ -162,6 +174,7 @@ mod platform {
                 Tracepoint::SocketStart => ffi::quic_trace_udp_socket_start_enabled(),
                 Tracepoint::SocketEnd => ffi::quic_trace_udp_socket_end_enabled(),
                 Tracepoint::ConnectionPath => ffi::quic_trace_quic_connection_path_enabled(),
+                Tracepoint::SendBlocked => ffi::quic_trace_quic_send_blocked_enabled(),
             }
         }
     }
@@ -210,6 +223,21 @@ mod platform {
                 connection_id,
                 path,
             } => connection_path(timestamp_ns, connection_id, path),
+            Event::SendBlocked {
+                timestamp_ns,
+                span_id,
+                connection_id,
+                stream_id,
+                reason,
+                edge,
+            } => send_blocked(
+                timestamp_ns,
+                span_id,
+                connection_id,
+                stream_id,
+                reason,
+                edge,
+            ),
         }
     }
 
@@ -283,6 +311,8 @@ mod platform {
 
     fn stream_frame(timestamp_ns: u64, trace_id: u64, frame: StreamFrame, outcome: PacketOutcome) {
         unsafe {
+            let (has_retransmission, retransmission) =
+                encode_optional(frame.retransmission.map(u8::from));
             ffi::quic_trace_quic_stream_frame(&ffi::quic_trace_quic_stream_frame {
                 timestamp_ns,
                 trace_id,
@@ -290,6 +320,30 @@ mod platform {
                 offset_start: frame.offset_start,
                 offset_end: frame.offset_end,
                 outcome: outcome as u8,
+                has_retransmission,
+                retransmission,
+            });
+        }
+    }
+
+    fn send_blocked(
+        timestamp_ns: u64,
+        span_id: u64,
+        connection_id: u64,
+        stream_id: Option<u64>,
+        reason: SendBlockedReason,
+        edge: PhaseEdge,
+    ) {
+        unsafe {
+            let (has_stream_id, stream_id) = encode_optional(stream_id);
+            ffi::quic_trace_quic_send_blocked(&ffi::quic_trace_quic_send_blocked {
+                timestamp_ns,
+                span_id,
+                connection_id,
+                has_stream_id,
+                stream_id,
+                reason: reason as u8,
+                edge: edge as u8,
             });
         }
     }

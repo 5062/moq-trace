@@ -34,6 +34,10 @@ class Phase:
     #: out. Many packets wait in one queue at once, so the object timeline leaves
     #: packet waits out too, and draws an object's own waits apart from its work.
     wait: bool = False
+    #: Whether the phase runs inside another work phase of its subject rather
+    #: than after it. Work totals subtract a nested phase from the phase around
+    #: it instead of adding it.
+    nested: bool = False
 
 
 # Each tuple is in pipeline order.
@@ -42,6 +46,9 @@ OBJECT_PHASES = (
     Phase("object", "rx", "create", "Create"),
     Phase("object", "rx", "payload_read", "Payload read"),
     Phase("object", "rx", "frame_commit", "Frame commit"),
+    # Time inside the transport API, nested in the phase that called it. The
+    # same phase exists in both directions, as the object it belongs to does.
+    Phase("object", "rx", "transport_call", "Transport call", nested=True),
     # The fan-out work every copy shares, so it is charged once, to the inbound
     # object. A relay that wakes consumers inside its commit call emits none.
     Phase("object", "rx", "notify", "Notify"),
@@ -53,6 +60,7 @@ OBJECT_PHASES = (
     Phase("object", "tx", "payload_write", "Payload write"),
     # A write that could not proceed, until the relay resumed writing.
     Phase("object", "tx", "write_blocked", "Write blocked", wait=True),
+    Phase("object", "tx", "transport_call", "Transport call", nested=True),
 )
 
 PACKET_PHASES = (
@@ -91,9 +99,9 @@ def register(connection: duckdb.DuckDBPyConnection) -> None:
 
     connection.execute(
         "CREATE OR REPLACE TEMP TABLE phase_catalog("
-        "subject VARCHAR, direction VARCHAR, phase VARCHAR, label VARCHAR, wait BOOLEAN)"
+        "subject VARCHAR, direction VARCHAR, phase VARCHAR, label VARCHAR, wait BOOLEAN, nested BOOLEAN)"
     )
     connection.executemany(
-        "INSERT INTO phase_catalog VALUES (?, ?, ?, ?, ?)",
-        [(phase.subject, phase.direction, phase.name, phase.label, phase.wait) for phase in PHASES],
+        "INSERT INTO phase_catalog VALUES (?, ?, ?, ?, ?, ?)",
+        [(phase.subject, phase.direction, phase.name, phase.label, phase.wait, phase.nested) for phase in PHASES],
     )

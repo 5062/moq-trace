@@ -33,7 +33,7 @@ fn trace_id(event: &Event) -> Option<u64> {
         | Event::StreamFrame { trace_id, .. }
         | Event::SocketStart { trace_id, .. }
         | Event::SocketEnd { trace_id, .. } => Some(*trace_id),
-        Event::ConnectionPath { .. } => None,
+        Event::ConnectionPath { .. } | Event::SendBlocked { .. } => None,
     }
 }
 
@@ -46,7 +46,8 @@ fn timestamp(event: &Event) -> u64 {
         | Event::StreamFrame { timestamp_ns, .. }
         | Event::SocketStart { timestamp_ns, .. }
         | Event::SocketEnd { timestamp_ns, .. }
-        | Event::ConnectionPath { timestamp_ns, .. } => *timestamp_ns,
+        | Event::ConnectionPath { timestamp_ns, .. }
+        | Event::SendBlocked { timestamp_ns, .. } => *timestamp_ns,
     }
 }
 
@@ -322,6 +323,106 @@ fn handle_travels_across_tasks() {
     // stay movable and shareable between threads whatever a backend holds.
     fn assert_send_sync<T: Send + Sync + 'static>() {}
     assert_send_sync::<Handle>();
+}
+
+#[test]
+fn send_blocked_pairs_its_edges_and_ends_on_drop() {
+    let handle = trace();
+    let finished = handle.send_blocked(3, SendBlockedReason::CongestionWindow, None);
+    assert_eq!(finished.reason(), Some(SendBlockedReason::CongestionWindow));
+    finished.finish();
+    drop(handle.send_blocked(3, SendBlockedReason::StreamFlowControl, Some(8)));
+
+    let edges: Vec<_> = events(&handle)
+        .into_iter()
+        .map(|event| match event {
+            Event::SendBlocked {
+                span_id,
+                connection_id,
+                stream_id,
+                reason,
+                edge,
+                ..
+            } => (span_id, connection_id, stream_id, reason, edge),
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert_eq!(edges.len(), 4);
+    assert_eq!(edges[0].0, edges[1].0);
+    assert_ne!(edges[0].0, edges[2].0);
+    assert_eq!(edges[2].0, edges[3].0);
+    assert_eq!(edges[0].4, PhaseEdge::Start);
+    assert_eq!(edges[1].4, PhaseEdge::Done);
+    assert_eq!(edges[3].4, PhaseEdge::Done, "dropping ends the interval");
+    assert_eq!(edges[2].2, Some(8));
+    assert_eq!(edges[2].3, SendBlockedReason::StreamFlowControl);
+}
+
+#[test]
+fn disabled_send_blocked_reads_no_clock() {
+    let handle = trace();
+    let recording = recording(&handle);
+    recording.enable_only(Tracepoint::PacketStart);
+    let blocked = handle.send_blocked(3, SendBlockedReason::Pacing, None);
+    assert_eq!(blocked.reason(), None);
+    blocked.finish();
+    assert_eq!(recording.clock_reads(), 0);
+    assert!(events(&handle).is_empty());
+}
+
+#[test]
+fn stream_frame_carries_its_retransmission_flag() {
+    let handle = trace();
+    let packet = handle.packet(PacketContext::new(Direction::Tx, 1));
+    packet.stream_frame(
+        StreamFrame::new(4, 0, 10).with_retransmission(true),
+        PacketOutcome::Success,
+    );
+    packet.stream_frame(StreamFrame::new(4, 10, 20), PacketOutcome::Success);
+    packet.finish(PacketOutcome::Success);
+    let flags: Vec<_> = events(&handle)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::StreamFrame { frame, .. } => Some(frame.retransmission),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, [Some(true), None]);
+}
+
+#[test]
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn send_blocked_reason_wire_values_match_the_provider() {
+    use quic_trace_lttng_sys as ffi;
+    let reasons = [
+        (
+            SendBlockedReason::CongestionWindow,
+            ffi::quic_trace_send_blocked_reason_QUIC_TRACE_SEND_BLOCKED_REASON_CONGESTION_WINDOW,
+        ),
+        (
+            SendBlockedReason::Pacing,
+            ffi::quic_trace_send_blocked_reason_QUIC_TRACE_SEND_BLOCKED_REASON_PACING,
+        ),
+        (
+            SendBlockedReason::Amplification,
+            ffi::quic_trace_send_blocked_reason_QUIC_TRACE_SEND_BLOCKED_REASON_AMPLIFICATION,
+        ),
+        (
+            SendBlockedReason::ConnectionFlowControl,
+            ffi::quic_trace_send_blocked_reason_QUIC_TRACE_SEND_BLOCKED_REASON_CONNECTION_FLOW_CONTROL,
+        ),
+        (
+            SendBlockedReason::StreamFlowControl,
+            ffi::quic_trace_send_blocked_reason_QUIC_TRACE_SEND_BLOCKED_REASON_STREAM_FLOW_CONTROL,
+        ),
+        (
+            SendBlockedReason::SendBuffer,
+            ffi::quic_trace_send_blocked_reason_QUIC_TRACE_SEND_BLOCKED_REASON_SEND_BUFFER,
+        ),
+    ];
+    for (reason, wire) in reasons {
+        assert_eq!(reason as u32, wire, "{reason:?}");
+    }
 }
 
 #[test]

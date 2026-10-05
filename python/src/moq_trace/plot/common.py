@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import duckdb
 from matplotlib import pyplot as plt
@@ -116,3 +116,57 @@ def _quantile_box(axis: Axes, quantiles: Sequence[float], position: float, width
         whiskerprops={"color": color, "linewidth": 1.2},
         medianprops={"color": "black", "linewidth": 2},
     )
+
+
+# Panels per row of a grid of distributions.
+_PANEL_COLUMNS = 4
+
+
+def _cdf_panels(
+    path: pathlib.Path,
+    title: str,
+    runs: Sequence[PlotRun],
+    panels: Sequence[tuple[str, str]],
+    signed: Mapping[str, str] | None = None,
+) -> bool:
+    """Draw one CDF panel per metric with samples, overlaying the runs.
+
+    A metric no run has samples for gets no panel, and nothing is written when
+    no metric has any. A metric in `signed` may be negative, so its panel marks
+    zero and labels its axis with the given text instead of starting at zero.
+    """
+
+    # Imported here because the latency module imports this one.
+    from .latency import _draw_distribution
+
+    if not runs:
+        raise ValueError("a distribution figure requires at least one run")
+    signed = signed or {}
+    drawn = [
+        (metric, label, [_values_us(run.connection, metric, run.run_id) for run in runs]) for metric, label in panels
+    ]
+    drawn = [panel for panel in drawn if any(panel[2])]
+    if not drawn:
+        return False
+    columns = min(_PANEL_COLUMNS, len(drawn))
+    rows = -(-len(drawn) // columns)
+    fig, axes = plt.subplots(rows, columns, figsize=(6 * columns, 5 * rows), squeeze=False)
+    for axis in axes.flat[len(drawn) :]:
+        axis.set_visible(False)
+    for axis, (metric, label, series) in zip(axes.flat, drawn, strict=False):
+        for index, (run, values) in enumerate(zip(runs, series, strict=True)):
+            if values:
+                _draw_distribution(axis, None, values, run.label or "Copies", index)
+        axis.set_ylabel("CDF")
+        axis.set_ylim(0, 1.005)
+        axis.grid(alpha=0.25)
+        axis.legend(loc="lower right", fontsize=7)
+        axis.set_title(label)
+        if metric in signed:
+            axis.axvline(0, color="gray", linewidth=0.8)
+            axis.set_xlabel(signed[metric])
+        else:
+            axis.set_xlim(left=0)
+            axis.set_xlabel("µs")
+    _save(fig, path, title)
+    return True

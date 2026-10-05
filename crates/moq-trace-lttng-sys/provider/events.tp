@@ -25,6 +25,7 @@ LTTNG_UST_TRACEPOINT_ENUM(moq_trace, object_phase,
 		lttng_ust_field_enum_value("notify", MOQ_TRACE_OBJECT_PHASE_NOTIFY)
 		lttng_ust_field_enum_value("delivery_wait", MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT)
 		lttng_ust_field_enum_value("write_blocked", MOQ_TRACE_OBJECT_PHASE_WRITE_BLOCKED)
+		lttng_ust_field_enum_value("transport_call", MOQ_TRACE_OBJECT_PHASE_TRANSPORT_CALL)
 	)
 )
 

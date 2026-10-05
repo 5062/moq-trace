@@ -21,6 +21,7 @@ from .plot import (
     plot_object_timelines,
     plot_segments,
     plot_stability,
+    plot_transport_waits,
 )
 
 
@@ -60,6 +61,7 @@ def _render_run(
     plot_segments(plots / "segments.png", "Span segments", subtitle, runs)
     plot_breakdown(plots / "breakdown.png", "Latency breakdown", subtitle, runs)
     plot_moq_work(plots / "moq_work.png", "MoQ work", subtitle, runs)
+    plot_transport_waits(plots / "transport_waits.png", "Transport waits", subtitle, runs)
     plot_stability(plots / "stability.png", subtitle, connection)
     network = metadata.network
     if network is not None and (network.packets or network.qlog_connections):
@@ -99,6 +101,7 @@ def _render_comparison(
     plot_segments(plots / f"{prefix}_segments.png", f"Span segments by {dimension}", subtitle, runs)
     plot_breakdown(plots / f"{prefix}_breakdown.png", f"Where the time goes by {dimension}", subtitle, runs)
     plot_moq_work(plots / f"{prefix}_moq_work.png", f"MoQ work by {dimension}", subtitle, runs)
+    plot_transport_waits(plots / f"{prefix}_transport_waits.png", f"Transport waits by {dimension}", subtitle, runs)
 
 
 def render(path: pathlib.Path) -> None:

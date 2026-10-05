@@ -398,6 +398,79 @@ fn phase_at_records_the_captured_boundaries() {
     );
 }
 
+/// A future that runs one transport call per poll, pending once.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn calls_transport_twice() -> impl std::future::Future<Output = Result<u32, ()>> {
+    let mut polled = false;
+    std::future::poll_fn(move |cx| {
+        let mut call = std::pin::pin!(transport_call(std::future::ready(())));
+        let _ = call.as_mut().poll(cx);
+        if !polled {
+            polled = true;
+            return std::task::Poll::Pending;
+        }
+        std::task::Poll::Ready(Ok(5))
+    })
+}
+
+#[test]
+// Only a build that can emit records transport calls.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn transport_calls_nest_inside_the_measured_poll() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result = drive(object.measure(ObjectPhase::PayloadWrite, calls_transport_twice()));
+    assert_eq!(result, Ok(5));
+    object.finish(ObjectOutcome::Success);
+
+    let occurrences = named_occurrences(&events(&handle));
+    let writes: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.0 == ObjectPhase::PayloadWrite)
+        .collect();
+    let calls: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.0 == ObjectPhase::TransportCall)
+        .collect();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(calls.len(), 2, "one transport call per poll");
+    for (write, call) in writes.iter().zip(&calls) {
+        assert!(
+            write.1 <= call.1 && call.2 <= write.2,
+            "{call:?} nests in {write:?}"
+        );
+    }
+}
+
+#[test]
+fn a_transport_call_outside_a_measured_poll_reads_no_clock() {
+    let handle = trace();
+    let recording = recording(&handle);
+    let clock_reads = recording.clock_reads();
+    drive(transport_call(std::future::ready(())));
+    assert_eq!(recording.clock_reads(), clock_reads);
+    assert!(events(&handle).is_empty());
+}
+
+#[test]
+// Only a build that can emit records transport calls.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn a_nested_transport_call_is_counted_once() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let nested = transport_call(transport_call(std::future::ready(Ok::<_, ()>(1))));
+    assert_eq!(
+        drive(object.measure(ObjectPhase::PayloadWrite, nested)),
+        Ok(1)
+    );
+    object.finish(ObjectOutcome::Success);
+    let calls = named_occurrences(&events(&handle))
+        .into_iter()
+        .filter(|occurrence| occurrence.0 == ObjectPhase::TransportCall)
+        .count();
+    assert_eq!(calls, 1);
+}
+
 #[test]
 fn connection_ids_are_never_reused() {
     let first = next_connection_id();

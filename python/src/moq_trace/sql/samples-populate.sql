@@ -11,4 +11,6 @@ SELECT process_id, metric, NULL, NULL, trace_id, NULL, elapsed_ns, latency_ns FR
 UNION ALL
 SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM moq_work_samples
 UNION ALL
-SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM segment_samples;
+SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM segment_samples
+UNION ALL
+SELECT process_id, metric, rx_trace_id, tx_trace_id, NULL, NULL, elapsed_ns, latency_ns FROM transport_wait_samples;

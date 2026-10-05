@@ -61,3 +61,12 @@ SELECT process_id, trace_id, span_id, phase,
        ) - 1 AS occurrence,
        start_ns, end_ns, outcome, tid
 FROM paired;
+
+-- Intervals in which a connection could not send. An interval the capture cut
+-- off before it ended has no done edge and is left out, as an unfinished phase is.
+CREATE TEMP VIEW send_blocked_intervals AS
+SELECT starts.process_id, starts.span_id, starts.connection_id, starts.stream_id, starts.reason,
+       starts.timestamp_ns AS start_ns, finishes.timestamp_ns AS end_ns
+FROM quic_send_blocked AS starts
+JOIN quic_send_blocked AS finishes USING (process_id, span_id)
+WHERE starts.edge = 'start' AND finishes.edge = 'done';

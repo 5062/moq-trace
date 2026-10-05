@@ -48,6 +48,17 @@ LTTNG_UST_TRACEPOINT_ENUM(quic_trace, packet_outcome,
 	)
 )
 
+LTTNG_UST_TRACEPOINT_ENUM(quic_trace, send_blocked_reason,
+	LTTNG_UST_TP_ENUM_VALUES(
+		lttng_ust_field_enum_value("congestion_window", QUIC_TRACE_SEND_BLOCKED_REASON_CONGESTION_WINDOW)
+		lttng_ust_field_enum_value("pacing", QUIC_TRACE_SEND_BLOCKED_REASON_PACING)
+		lttng_ust_field_enum_value("amplification", QUIC_TRACE_SEND_BLOCKED_REASON_AMPLIFICATION)
+		lttng_ust_field_enum_value("connection_flow_control", QUIC_TRACE_SEND_BLOCKED_REASON_CONNECTION_FLOW_CONTROL)
+		lttng_ust_field_enum_value("stream_flow_control", QUIC_TRACE_SEND_BLOCKED_REASON_STREAM_FLOW_CONTROL)
+		lttng_ust_field_enum_value("send_buffer", QUIC_TRACE_SEND_BLOCKED_REASON_SEND_BUFFER)
+	)
+)
+
 LTTNG_UST_TRACEPOINT_ENUM(quic_trace, socket_outcome,
 	LTTNG_UST_TP_ENUM_VALUES(
 		lttng_ust_field_enum_value("success", QUIC_TRACE_SOCKET_OUTCOME_SUCCESS)
@@ -112,6 +123,21 @@ LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_stream_frame,
 		lttng_ust_field_integer(uint64_t, offset_start, event->offset_start)
 		lttng_ust_field_integer(uint64_t, offset_end, event->offset_end)
 		lttng_ust_field_enum(quic_trace, packet_outcome, uint8_t, outcome, event->outcome)
+		lttng_ust_field_integer(uint8_t, has_retransmission, event->has_retransmission)
+		lttng_ust_field_integer(uint8_t, retransmission, event->retransmission)
+	)
+)
+
+LTTNG_UST_TRACEPOINT_EVENT(quic_trace, quic_send_blocked,
+	LTTNG_UST_TP_ARGS(const struct quic_trace_quic_send_blocked *, event),
+	LTTNG_UST_TP_FIELDS(
+		lttng_ust_field_integer(uint64_t, timestamp_ns, event->timestamp_ns)
+		lttng_ust_field_integer(uint64_t, span_id, event->span_id)
+		lttng_ust_field_integer(uint64_t, connection_id, event->connection_id)
+		lttng_ust_field_integer(uint8_t, has_stream_id, event->has_stream_id)
+		lttng_ust_field_integer(uint64_t, stream_id, event->stream_id)
+		lttng_ust_field_enum(quic_trace, send_blocked_reason, uint8_t, reason, event->reason)
+		lttng_ust_field_enum(quic_trace, edge, uint8_t, edge, event->edge)
 	)
 )
 

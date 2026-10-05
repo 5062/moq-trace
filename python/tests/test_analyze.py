@@ -665,52 +665,128 @@ class SqlAnalysisTests(unittest.TestCase):
         _derive_samples(self.connection, origin)
         return dict(self.connection.execute("SELECT metric, latency_ns FROM moq_work_samples").fetchall())
 
-    def test_moq_work_excludes_transport_the_writing_thread_ran(self) -> None:
-        """A write that sends inside its call is charged only for its own work."""
+    def test_moq_work_excludes_the_transport_calls_its_phases_made(self) -> None:
+        """A write that sends inside its transport call is charged only for its own work."""
 
         self.object_start(1, "rx", 1)
         self.object_start(2, "tx", 2)
         self.packet(3, "rx", 1)
         self.packet(4, "tx", 2)
-        # Inbound: 1 + 0.5 + 0.5 + 1 µs of work; the last read ends at 150.5 µs.
+        # Inbound: 1 + 0.5 + 0.5 + 1 µs of work, with a 0.3 µs transport read
+        # inside the second payload read; the last read ends at 150.5 µs.
         self.object_phase(1, 1, "header_parse", 100_000, 101_000)
         self.object_phase(1, 2, "payload_read", 110_000, 110_500)
         self.object_phase(1, 3, "payload_read", 150_000, 150_500)
-        self.object_phase(1, 4, "frame_commit", 151_000, 152_000)
-        # Outbound: 0.2 + 0.3 µs, a 20 µs write on thread 1 and a 2 µs write on
-        # thread 2.
+        self.object_phase(1, 4, "transport_call", 150_100, 150_400)
+        self.object_phase(1, 5, "frame_commit", 151_000, 152_000)
+        # Outbound: 0.2 + 0.3 µs, then a 20 µs write whose transport call took 19 µs
+        # and a 2 µs write whose call took 1.5 µs.
         self.object_phase(2, 1, "clone", 210_000, 210_200)
         self.object_phase(2, 2, "header_encode", 211_000, 211_300)
-        self.object_phase(2, 3, "payload_write", 220_000, 240_000, tid=1)
-        self.object_phase(2, 4, "payload_write", 260_000, 262_000, tid=2)
-        # Packet 4 starts inside the first write on its thread and is clipped to
-        # the write's end. Packet 6 overlaps it and counts once. Packet 7 started
-        # before the second write and packet 8 on another thread, so neither is
-        # the second write's own work.
-        self.packet(6, "tx", 99)
-        self.packet(7, "tx", 99)
-        self.packet(8, "tx", 99)
-        for trace_id, start, tid in ((6, 225_000, 1), (7, 200_000, 2), (8, 261_000, 3)):
-            self.connection.execute(
-                "UPDATE raw.quic_packet_start SET timestamp_ns = ?, tid = ? WHERE trace_id = ?", [start, tid, trace_id]
+        self.object_phase(2, 3, "payload_write", 220_000, 240_000)
+        self.object_phase(2, 4, "transport_call", 220_500, 239_500)
+        self.object_phase(2, 5, "payload_write", 260_000, 262_000)
+        self.object_phase(2, 6, "transport_call", 260_200, 261_700)
+
+        work = self._moq_work()
+        self.assertEqual(work["moq_rx_work"], 3_000 - 300)
+        self.assertEqual(work["moq_tx_work"], 200 + 300 + 22_000 - 19_000 - 1_500)
+        self.assertEqual(work["moq_rx_transport"], 300)
+        self.assertEqual(work["moq_tx_transport"], 19_000 + 1_500)
+        self.assertEqual(work["moq_write_after_receive"], 220_000 - 150_500)
+        # The breakdown charges each work row the same way and keeps the calls apart.
+        _define_metrics(self.connection)
+        totals = dict(
+            self.connection.execute("SELECT phase, total_ns FROM metrics.phase_totals WHERE trace_id = 2").fetchall()
+        )
+        self.assertEqual(totals["payload_write"], 22_000 - 19_000 - 1_500)
+        self.assertEqual(totals["transport_call"], 19_000 + 1_500)
+
+    def test_rejects_a_transport_call_outside_any_work_phase(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.object_phase(2, 1, "payload_write", 220_000, 221_000)
+        self.object_phase(2, 2, "transport_call", 220_500, 222_000)
+        with self.assertRaisesRegex(TraceError, "nested object phases outside a work phase"):
+            self.prepare_model()
+
+    def send_blocked(self, span_id: int, connection_id: int, reason: str, start: int, end: int, stream=None) -> None:
+        for index, (edge, timestamp) in enumerate((("start", start), ("done", end))):
+            self.insert(
+                "quic_send_blocked",
+                ctf_timestamp_ns=span_id * 1_000 + index,
+                timestamp_ns=timestamp,
+                span_id=span_id,
+                connection_id=connection_id,
+                stream_id=stream,
+                reason=reason,
+                edge=edge,
             )
 
-        self.assertEqual(
-            self._moq_work(),
-            {
-                "moq_rx_work": 3_000,
-                "moq_tx_work": 200 + 300 + 20_000 + 2_000 - 20_000,
-                "moq_write_after_receive": 220_000 - 150_500,
-            },
+    def _transport_waits(self) -> dict[str, int]:
+        self.prepare_model()
+        origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
+        coverage.resolve(self.connection)
+        _derive_samples(self.connection, origin)
+        return dict(self.connection.execute("SELECT metric, latency_ns FROM transport_wait_samples").fetchall())
+
+    def test_send_wait_is_attributed_to_the_reasons_its_connection_was_blocked(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "frame_commit", 150_000, 151_000)
+        # The copy's write blocks 4 µs on its stream's flow control and ends at
+        # 215 µs; the packet carrying its bytes starts encoding at 220 µs.
+        self.object_phase(2, 1, "payload_write", 205_000, 206_000)
+        self.object_phase(2, 2, "write_blocked", 206_000, 210_000)
+        self.object_phase(2, 3, "payload_write", 210_000, 215_000)
+        self.send_blocked(1, 2, "stream_flow_control", 206_000, 210_000, stream=20)
+        self.send_blocked(2, 2, "stream_flow_control", 100_000, 101_000, stream=99)
+        self.send_blocked(3, 2, "congestion_window", 213_000, 218_000)
+        self.send_blocked(4, 2, "pacing", 218_000, 219_000)
+        self.send_blocked(5, 7, "pacing", 215_000, 220_000)
+
+        waits = self._transport_waits()
+        self.assertEqual(waits["send_wait"], 220_000 - 215_000)
+        self.assertEqual(waits["blocked_stream_flow_control"], 4_000)
+        self.assertEqual(waits["blocked_congestion_window"], 218_000 - 215_000)
+        self.assertEqual(waits["blocked_pacing"], 1_000)
+        self.assertEqual(waits["blocked_send_buffer"], 0)
+        self.assertNotIn("tx_repair", waits, "this provider marks no retransmissions")
+
+    def test_a_process_without_blocked_intervals_has_no_blocked_samples(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "frame_commit", 150_000, 151_000)
+        self.object_phase(2, 1, "payload_write", 205_000, 215_000)
+        waits = self._transport_waits()
+        self.assertEqual(sorted(waits), ["send_wait"])
+
+    def test_retransmissions_measure_repair_and_stay_out_of_coverage(self) -> None:
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.object_phase(1, 1, "frame_commit", 150_000, 151_000)
+        self.object_phase(2, 1, "payload_write", 205_000, 215_000)
+        self.connection.execute("UPDATE raw.quic_stream_frame SET retransmission = 0 WHERE trace_id = 4")
+        # A later packet resends the copy's bytes and completes 40 µs after it.
+        self.packet(5, "tx", 2)
+        self.connection.execute(
+            "UPDATE raw.quic_stream_frame SET retransmission = 1 WHERE trace_id = 5;"
+            "UPDATE raw.quic_packet_end SET timestamp_ns = 350000 WHERE trace_id = 5;"
+            "UPDATE raw.quic_packet_phase SET timestamp_ns = 350000 WHERE trace_id = 5 AND edge = 'done'"
         )
-        # The breakdown's payload write row is charged the same way.
-        _define_metrics(self.connection)
-        self.assertEqual(
-            self.connection.execute(
-                "SELECT total_ns FROM metrics.phase_totals WHERE trace_id = 2 AND phase = 'payload_write'"
-            ).fetchone()[0],
-            20_000 + 2_000 - 20_000,
-        )
+
+        waits = self._transport_waits()
+        self.assertEqual(waits["tx_repair"], 350_000 - 310_000)
+        complete = self.connection.execute(
+            "SELECT complete_packet_trace_id FROM model.coverage WHERE object_trace_id = 2"
+        ).fetchone()[0]
+        self.assertEqual(complete, 4, "the repair does not complete the copy")
 
     def test_waits_are_reported_apart_from_moq_work(self) -> None:
         """Notify is shared RX work; delivery and blocked writes are TX waits, not work."""

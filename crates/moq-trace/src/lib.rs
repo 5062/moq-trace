@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 pub use quic_trace::{
     ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace,
-    PacketSpace, PacketTrace, SocketOutcome, SocketStats, SocketTrace, StreamFrame,
-    next_connection_id,
+    PacketSpace, PacketTrace, SendBlockedReason, SendBlockedTrace, SocketOutcome, SocketStats,
+    SocketTrace, StreamFrame, next_connection_id,
 };
 pub use trace_core::now_ns;
 
@@ -20,7 +20,7 @@ pub use ids::{next_logical_group, next_logical_id, next_session_id};
 mod object;
 pub use object::{
     LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase, ObjectPhaseTrace,
-    ObjectTrace,
+    ObjectTrace, TransportCall, transport_call,
 };
 
 use trace_core::PhaseEdge;
@@ -74,6 +74,18 @@ impl Handle {
     /// Record a connection's path through the shared transport toolkit.
     pub fn connection_path(&self, connection_id: u64, path: ConnectionPath) {
         self.transport.connection_path(connection_id, path);
+    }
+
+    /// Start an interval in which a connection cannot send, through the shared
+    /// transport toolkit.
+    pub fn send_blocked(
+        &self,
+        connection_id: u64,
+        reason: SendBlockedReason,
+        stream_id: Option<u64>,
+    ) -> SendBlockedTrace {
+        self.transport
+            .send_blocked(connection_id, reason, stream_id)
     }
 }
 

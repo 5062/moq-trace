@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import duckdb
 
@@ -19,6 +20,7 @@ from moq_trace.plot import (  # noqa: E402
     plot_moq_work,
     plot_segments,
     plot_stability,
+    plot_transport_waits,
     timeline,  # noqa: E402
 )
 from moq_trace.plot.breakdown import _row_summary  # noqa: E402
@@ -51,6 +53,11 @@ def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
         "moq_rx_work": 15_000,
         "moq_tx_work": 60_000,
         "moq_write_after_receive": -40_000,
+        "moq_tx_transport": 20_000,
+        "moq_delivery_wait": 30_000,
+        "send_wait": 8_000,
+        "blocked_congestion_window": 3_000,
+        "tx_repair": 0,
     }
     rows = []
     for second in range(4):
@@ -87,7 +94,14 @@ class RunPlotTests(unittest.TestCase):
             connection = _artifact(packet_phases)
             try:
                 with tempfile.TemporaryDirectory() as directory:
-                    for plot in (plot_latency_cdf, plot_segments, plot_breakdown, plot_moq_work, plot_stability):
+                    for plot in (
+                        plot_latency_cdf,
+                        plot_segments,
+                        plot_breakdown,
+                        plot_moq_work,
+                        plot_transport_waits,
+                        plot_stability,
+                    ):
                         output = pathlib.Path(directory) / f"{plot.__name__}.png"
                         if plot in (plot_latency_cdf, plot_stability):
                             plot(output, SUBTITLE, connection)
@@ -144,6 +158,42 @@ class RunPlotTests(unittest.TestCase):
             connection.close()
 
 
+class TransportWaitPlotTests(unittest.TestCase):
+    def test_transport_waits_are_skipped_for_a_provider_without_them(self) -> None:
+        connection = _artifact(packet_phases=False)
+        try:
+            connection.execute(
+                "DELETE FROM metrics.samples WHERE metric IN ('send_wait', 'tx_repair') OR metric LIKE 'blocked_%'"
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory) / "transport_waits.png"
+                self.assertFalse(plot_transport_waits(output, "waits", SUBTITLE, (PlotRun("", connection),)))
+                self.assertFalse(output.exists())
+        finally:
+            connection.close()
+
+
+class TransportWaitTitleTests(unittest.TestCase):
+    def test_reasons_that_never_blocked_are_named_instead_of_drawn(self) -> None:
+        connection = _artifact(packet_phases=False)
+        try:
+            connection.execute(
+                "INSERT INTO metrics.samples VALUES "
+                "(1, 'blocked_pacing', 0, 10, 0, 0), (1, 'blocked_pacing', 1, 11, 0, 0)"
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory) / "transport_waits.png"
+                with mock.patch("moq_trace.plot.transport_waits._cdf_panels", return_value=True) as panels:
+                    plot_transport_waits(output, "waits", SUBTITLE, (PlotRun("", connection),))
+            heading, _runs, drawn = panels.call_args.args[1:4]
+            self.assertIn("Never blocked by: pacing", heading)
+            metrics = [metric for metric, _label in drawn]
+            self.assertNotIn("blocked_pacing", metrics)
+            self.assertIn("blocked_congestion_window", metrics)
+        finally:
+            connection.close()
+
+
 class ComparisonPlotTests(unittest.TestCase):
     """Shared figures render several runs, while the latency comparison requires two."""
 
@@ -152,7 +202,13 @@ class ComparisonPlotTests(unittest.TestCase):
         try:
             runs = tuple(PlotRun(f"run {index}", connection) for index, connection in enumerate(connections))
             with tempfile.TemporaryDirectory() as directory:
-                for plot in (plot_latency_comparison, plot_segments, plot_breakdown, plot_moq_work):
+                for plot in (
+                    plot_latency_comparison,
+                    plot_segments,
+                    plot_breakdown,
+                    plot_moq_work,
+                    plot_transport_waits,
+                ):
                     output = pathlib.Path(directory) / f"{plot.__name__}.png"
                     plot(output, "title", "subtitle", runs)
                     self.assertGreater(output.stat().st_size, 0)

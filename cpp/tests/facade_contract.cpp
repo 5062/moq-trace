@@ -23,7 +23,8 @@ int main() {
     for (const auto phase : {MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE, MOQ_TRACE_OBJECT_PHASE_CREATE,
          MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ, MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT,
          MOQ_TRACE_OBJECT_PHASE_CLONE, MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE, MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE,
-         MOQ_TRACE_OBJECT_PHASE_NOTIFY, MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT, MOQ_TRACE_OBJECT_PHASE_WRITE_BLOCKED}) {
+         MOQ_TRACE_OBJECT_PHASE_NOTIFY, MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT, MOQ_TRACE_OBJECT_PHASE_WRITE_BLOCKED,
+         MOQ_TRACE_OBJECT_PHASE_TRANSPORT_CALL}) {
       object.phase(phase).finish(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS);
     }
     object.phase_at(MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT, 50).finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, 150);
@@ -57,6 +58,9 @@ int main() {
         packet.phase(phase).finish(QUIC_TRACE_PACKET_OUTCOME_SUCCESS);
       }
       packet.stream_frame(7, 8, 1032, QUIC_TRACE_PACKET_OUTCOME_SUCCESS);
+      for (const bool retransmission : {false, true}) {
+        packet.stream_frame(7, 8, 1032, QUIC_TRACE_PACKET_OUTCOME_SUCCESS, retransmission);
+      }
       packet.finish(QUIC_TRACE_PACKET_OUTCOME_SUCCESS);
     }
     quic_trace::PacketContext completed_context;
@@ -95,5 +99,11 @@ int main() {
       socket.finish(outcome, {1, 2, 1200});
     }
     quic_trace::Socket abandoned(direction);
+  }
+  for (const auto reason : {QUIC_TRACE_SEND_BLOCKED_REASON_CONGESTION_WINDOW, QUIC_TRACE_SEND_BLOCKED_REASON_PACING,
+       QUIC_TRACE_SEND_BLOCKED_REASON_AMPLIFICATION, QUIC_TRACE_SEND_BLOCKED_REASON_CONNECTION_FLOW_CONTROL,
+       QUIC_TRACE_SEND_BLOCKED_REASON_STREAM_FLOW_CONTROL, QUIC_TRACE_SEND_BLOCKED_REASON_SEND_BUFFER}) {
+    quic_trace::SendBlocked(connection, reason).finish();
+    quic_trace::SendBlocked scoped(connection, reason, 7);
   }
 }

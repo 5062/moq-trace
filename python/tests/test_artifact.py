@@ -184,7 +184,7 @@ class ArtifactTests(unittest.TestCase):
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
             with open_artifact(output) as artifact:
-                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (4,))
+                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (5,))
                 self.assertEqual(artifact.connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,)
@@ -301,13 +301,13 @@ class ArtifactTests(unittest.TestCase):
             ctf._batch("udp_socket_end", [[value] for value in row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
-        for version in (3, 5):
+        for version in (4, 6):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "analysis.duckdb"
                 with duckdb.connect(str(output)) as connection:
                     write_metadata(connection, run_metadata())
                     connection.execute("UPDATE metadata SET schema_version = ?", [version])
-                expected = f"schema version {version}, .* reads only 4; .*new output path"
+                expected = f"schema version {version}, .* reads only 5; .*new output path"
                 with self.assertRaisesRegex(TraceError, expected):
                     with open_artifact(output):
                         pass

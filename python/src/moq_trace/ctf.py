@@ -96,6 +96,15 @@ SCHEMAS = {
         offset_start=pa.uint64(),
         offset_end=pa.uint64(),
         outcome=pa.string(),
+        # 1 when a TX frame resends bytes an earlier packet carried; null on RX.
+        retransmission=pa.uint8(),
+    ),
+    "quic_send_blocked": _schema(
+        span_id=pa.uint64(),
+        connection_id=pa.uint64(),
+        stream_id=pa.uint64(),
+        reason=pa.string(),
+        edge=pa.string(),
     ),
     "quic_connection_path": _schema(
         connection_id=pa.uint64(),

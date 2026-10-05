@@ -47,6 +47,26 @@ enum quic_trace_packet_outcome {
 	QUIC_TRACE_PACKET_OUTCOME_ABANDONED,
 };
 
+/*
+ * Why a connection could not send data it had. TX packets carry only what a
+ * stack was allowed to send, so these mark the waits between a write and the
+ * packets that carry its bytes, and the waits that block a write itself.
+ */
+enum quic_trace_send_blocked_reason {
+	/* Bytes in flight filled the congestion window. */
+	QUIC_TRACE_SEND_BLOCKED_REASON_CONGESTION_WINDOW,
+	/* The pacer delayed the next datagram. */
+	QUIC_TRACE_SEND_BLOCKED_REASON_PACING,
+	/* An unvalidated path reached its anti-amplification limit. */
+	QUIC_TRACE_SEND_BLOCKED_REASON_AMPLIFICATION,
+	/* A write found the peer's connection-level MAX_DATA used up. */
+	QUIC_TRACE_SEND_BLOCKED_REASON_CONNECTION_FLOW_CONTROL,
+	/* A write found the peer's MAX_STREAM_DATA for its stream used up. */
+	QUIC_TRACE_SEND_BLOCKED_REASON_STREAM_FLOW_CONTROL,
+	/* A write found the local buffer of unacknowledged data full. */
+	QUIC_TRACE_SEND_BLOCKED_REASON_SEND_BUFFER,
+};
+
 enum quic_trace_socket_outcome {
 	QUIC_TRACE_SOCKET_OUTCOME_SUCCESS,
 	QUIC_TRACE_SOCKET_OUTCOME_PENDING,
@@ -98,6 +118,25 @@ struct quic_trace_quic_stream_frame {
 	uint64_t offset_start;
 	uint64_t offset_end;
 	uint8_t outcome;
+	/* Set on a TX frame that resends bytes an earlier packet carried. A
+	 * receiver cannot tell, so an RX frame leaves it unset. */
+	uint8_t has_retransmission;
+	uint8_t retransmission;
+};
+
+/*
+ * One edge of an interval in which a connection could not send. The start and
+ * done edges share a span ID. A blocked write names its stream; a connection
+ * that cannot transmit at all leaves the stream unset.
+ */
+struct quic_trace_quic_send_blocked {
+	uint64_t timestamp_ns;
+	uint64_t span_id;
+	uint64_t connection_id;
+	uint8_t has_stream_id;
+	uint64_t stream_id;
+	uint8_t reason;
+	uint8_t edge;
 };
 
 /*
@@ -142,6 +181,8 @@ bool quic_trace_quic_packet_phase_enabled(void);
 void quic_trace_quic_packet_phase(const struct quic_trace_quic_packet_phase *event);
 bool quic_trace_quic_stream_frame_enabled(void);
 void quic_trace_quic_stream_frame(const struct quic_trace_quic_stream_frame *event);
+bool quic_trace_quic_send_blocked_enabled(void);
+void quic_trace_quic_send_blocked(const struct quic_trace_quic_send_blocked *event);
 bool quic_trace_quic_connection_path_enabled(void);
 void quic_trace_quic_connection_path(const struct quic_trace_quic_connection_path *event);
 bool quic_trace_udp_socket_start_enabled(void);
