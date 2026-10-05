@@ -54,7 +54,7 @@ distinguish the two artifact kinds.
 
 ## SQL Organization
 
-Packaged files in `python/src/moq_trace/analysis/sql/` define the current public tables,
+Packaged files in `python/src/moq_trace/sql/` define the current public tables,
 including their types, keys, foreign keys, and nullability. Separate SQL files
 populate those tables and construct the temporary analysis relations.
 `moq_trace.sql.read` loads resources with `importlib.resources`, so installed

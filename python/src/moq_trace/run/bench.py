@@ -81,7 +81,7 @@ class BenchResult:
 
 
 def _profile_files() -> dict[str, Any]:
-    directory = importlib.resources.files(__package__) / "relays"
+    directory = importlib.resources.files("moq_trace") / "relays"
     return {entry.name.removesuffix(".toml"): entry for entry in directory.iterdir() if entry.name.endswith(".toml")}
 
 
