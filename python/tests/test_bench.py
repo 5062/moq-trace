@@ -11,8 +11,8 @@ from unittest import mock
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import bench, cli  # noqa: E402
-from moq_trace.bench import RelayProfile, experiment_config, load_profile, profiles  # noqa: E402
+from moq_trace.run import bench, cli  # noqa: E402
+from moq_trace.run.bench import RelayProfile, experiment_config, load_profile, profiles  # noqa: E402
 
 
 def _profile(**launch) -> RelayProfile:
@@ -77,7 +77,7 @@ class BenchTests(unittest.TestCase):
 
     def test_bench_checks_every_binary_before_running(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with mock.patch("moq_trace.experiment.run", new_callable=mock.AsyncMock) as run:
+            with mock.patch("moq_trace.run.experiment.run", new_callable=mock.AsyncMock) as run:
                 with self.assertRaisesRegex(ValueError, "relay binary not found"):
                     asyncio.run(
                         bench.bench(
@@ -96,7 +96,7 @@ class BenchTests(unittest.TestCase):
                 (root / binary).parent.mkdir(parents=True)
                 (root / binary).touch()
             outcomes = [RuntimeError("relay exited"), root / "out/cloudflare-moq-rs/analysis.duckdb"]
-            with mock.patch("moq_trace.experiment.run", new_callable=mock.AsyncMock, side_effect=outcomes):
+            with mock.patch("moq_trace.run.experiment.run", new_callable=mock.AsyncMock, side_effect=outcomes):
                 results = asyncio.run(
                     bench.bench(
                         ["moq-dev-moq", "cloudflare-moq-rs"],

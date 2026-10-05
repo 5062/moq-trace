@@ -10,8 +10,8 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.patches import Patch
 
-from .. import phases
-from ..phases import Phase
+from ..analysis import phases
+from ..analysis.phases import Phase
 from .common import PlotRun, _format_us, _plain_log, _quantile_box, _save
 
 # Sections in pipeline order, each drawing the known phases of one subject and

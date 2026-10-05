@@ -1,7 +1,7 @@
 # QUIC decoder replacement feasibility
 
 Investigated 2026-10-04 against upstream source and the local capture contract.
-The question is whether replacing `python/src/moq_trace/quic.py` removes a
+The question is whether replacing `python/src/moq_trace/decode/quic.py` removes a
 substantial responsibility while preserving independent packet and STREAM
 validation. Production code and dependencies are unchanged by this research.
 

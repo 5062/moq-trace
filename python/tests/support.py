@@ -15,7 +15,7 @@ SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
-from moq_trace.artifact import SCHEMA_VERSION  # noqa: E402
+from moq_trace.analysis.artifact import SCHEMA_VERSION  # noqa: E402
 from moq_trace.metadata import (  # noqa: E402
     Counts,
     Population,

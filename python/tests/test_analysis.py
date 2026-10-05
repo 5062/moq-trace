@@ -14,8 +14,8 @@ sys.path.insert(0, str(SOURCE))
 
 from support import run_metadata, write_raw_metadata  # noqa: E402
 
-from moq_trace import phases  # noqa: E402
-from moq_trace.artifact import open_artifact, write_metadata  # noqa: E402
+from moq_trace.analysis import phases  # noqa: E402
+from moq_trace.analysis.artifact import open_artifact, write_metadata  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 
 

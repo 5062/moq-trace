@@ -17,12 +17,13 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-import test_analyze  # noqa: E402
+import analysis_case  # noqa: E402
 from support import run_metadata  # noqa: E402
 
-from moq_trace import analyze, coverage, ctf  # noqa: E402
-from moq_trace.artifact import open_artifact, write_metadata  # noqa: E402
-from moq_trace.comparison import bench_runs, snapshot_bench, write_comparison  # noqa: E402
+from moq_trace.analysis import analyze, coverage  # noqa: E402
+from moq_trace.analysis.artifact import open_artifact, write_metadata  # noqa: E402
+from moq_trace.analysis.comparison import bench_runs, snapshot_bench, write_comparison  # noqa: E402
+from moq_trace.decode import ctf  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 from moq_trace.metadata import Window, Workload  # noqa: E402
 from moq_trace.plot.timeline import _timelines  # noqa: E402
@@ -33,7 +34,7 @@ from moq_trace.render import render  # noqa: E402
 def fixture(scenario="basic"):
     """Use the same trace inputs that generated fixtures/frozen_results.json."""
 
-    trace = test_analyze.SqlAnalysisTests()
+    trace = analysis_case.ModelCase()
     trace.setUp()
     try:
         trace.object_start(1, "rx", 1)
@@ -266,7 +267,7 @@ class ArtifactTests(unittest.TestCase):
             )
             trace.connection.execute("UPDATE metrics.samples SET span_id = NULL WHERE span_id = 900")
             with self.assertRaisesRegex(TraceError, "invalid identity"):
-                analyze._check(trace.connection, "checks-samples")
+                analyze._check(trace.connection, "checks/samples")
 
     def test_raw_duplicate_and_unmatched_boundaries_cannot_be_hidden_by_pairing(self):
         for defect in ("duplicate", "unmatched"):

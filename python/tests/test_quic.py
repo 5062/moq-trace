@@ -10,7 +10,7 @@ import unittest
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import quic  # noqa: E402
+from moq_trace.decode import quic  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
 
 # RFC 9001 appendix A.

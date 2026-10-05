@@ -8,7 +8,7 @@ import duckdb
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
-from .. import phases
+from ..analysis import phases
 
 
 def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:

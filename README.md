@@ -133,7 +133,7 @@ object of each group and for the rest, so the setup cost stays visible.
 
 Each relay gets its own subdirectory under `--output`, which defaults to
 `artifacts/bench-<UTC time>`. The relays come from the launch profiles in
-`python/src/moq_trace/relays/`. A profile names the relay's checkout, binary,
+`python/src/moq_trace/run/relays/`. A profile names the relay's checkout, binary,
 arguments, readiness marker, and stop behavior, and may not set any workload key,
 so every relay in one invocation runs the same workload. The workload flags
 default to the experiment defaults. `--checkout RELAY=PATH` points one relay at

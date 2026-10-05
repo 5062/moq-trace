@@ -18,10 +18,11 @@ dependencies = [
 ]
 
 [project.scripts]
-moq-trace = "moq_trace.cli:main"
+moq-trace = "moq_trace.run.cli:main"
 
 [tool.setuptools.package-data]
-moq_trace = ["relays/*.toml", "sql/*.sql"]
+"moq_trace.run" = ["relays/*.toml"]
+"moq_trace.analysis" = ["sql/**/*.sql"]
 
 [tool.ruff]
 line-length = 120

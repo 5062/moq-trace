@@ -7,8 +7,8 @@ import pathlib
 import duckdb
 
 from . import labels
-from .artifact import open_artifact
-from .comparison import SNAPSHOT
+from .analysis.artifact import open_artifact
+from .analysis.comparison import SNAPSHOT
 from .errors import TraceError
 from .metadata import ComparisonMetadata, RunMetadata
 from .plot import (

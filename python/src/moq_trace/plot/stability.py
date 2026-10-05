@@ -9,7 +9,7 @@ import duckdb
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
-from .. import phases
+from ..analysis import phases
 from .common import _OBJECT_SPANS, _metrics, _plain_log, _save
 
 _QUEUING = next(phase for phase in phases.select("packet", "rx") if phase.name == "scheduling")

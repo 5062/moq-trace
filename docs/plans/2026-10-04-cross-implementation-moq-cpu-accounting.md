@@ -180,8 +180,8 @@ do not silently redefine existing `moq_rx_work` or `moq_tx_work` values as CPU.
 ### 5. Aggregate and present the measurements
 
 - [ ] Add exclusive CPU aggregation alongside the existing SQL in
-  `python/src/moq_trace/sql/`, especially `moq-work-samples-stage.sql`,
-  `metrics-schema.sql`, and phase aggregation. The nested `transport_call`
+  `python/src/moq_trace/analysis/sql/`, especially `samples/moq-work-stage.sql`,
+  `metrics/schema.sql`, and phase aggregation. The nested `transport_call`
   object phase already marks the transport API boundary in elapsed time; CPU
   readings extend those same scopes rather than adding a second boundary.
 - [ ] Validate that exclusive buckets reconcile to their measured inclusive

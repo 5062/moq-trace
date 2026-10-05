@@ -13,12 +13,14 @@ from unittest import mock
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-import test_analyze  # noqa: E402
+import analysis_case  # noqa: E402
 from test_quic import _Peer, _stream  # noqa: E402
 
-from moq_trace import analyze, coverage, ctf, network, pcap, quic, wire  # noqa: E402
-from moq_trace.artifact import open_artifact  # noqa: E402
+from moq_trace.analysis import analyze, coverage, network, wire  # noqa: E402
+from moq_trace.analysis.artifact import open_artifact  # noqa: E402
+from moq_trace.decode import ctf, pcap, quic  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest  # noqa: E402
 from moq_trace.metadata import Window, Workload  # noqa: E402
 from moq_trace.render import render  # noqa: E402
 
@@ -52,10 +54,10 @@ def _key_log(peer: _Peer) -> str:
 
 
 class WireTests(unittest.TestCase):
-    """A capture whose packets match the trace fixture of `test_analyze`."""
+    """A capture whose packets match the trace fixture of `analysis_case`."""
 
     def setUp(self) -> None:
-        self.trace = test_analyze.SqlAnalysisTests()
+        self.trace = analysis_case.ModelCase()
         self.trace.setUp()
         self.addCleanup(self.trace.tearDown)
         self.directory = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -127,8 +129,8 @@ class WireTests(unittest.TestCase):
             "key_logs": ("publisher.keylog", "subscriber.keylog"),
         }
         fields.update(overrides)
-        path = self.directory / network.MANIFEST
-        path.write_text(network.NetworkManifest(**fields).model_dump_json())
+        path = self.directory / MANIFEST
+        path.write_text(NetworkManifest(**fields).model_dump_json())
         return path
 
     def analyze(self, **overrides) -> pathlib.Path:
@@ -158,7 +160,7 @@ class WireTests(unittest.TestCase):
 
     def ingest(self, **overrides) -> int:
         path = self.manifest(**overrides)
-        return wire.ingest(self.trace.connection, network.read_manifest(path), self.directory, self.origin)
+        return wire.ingest(self.trace.connection, read_manifest(path), self.directory, self.origin)
 
     def test_the_capture_joins_the_trace_and_measures_the_wire(self) -> None:
         output = self.analyze()
@@ -336,7 +338,7 @@ class WireTests(unittest.TestCase):
             )
         self.prepare()
         self.trace.connection.execute("UPDATE model.window SET end_ns = 500000")
-        self.trace.connection.execute(wire.sql.read("wire-schema"))
+        self.trace.connection.execute(wire.sql.read("wire/schema"))
         states = [
             quic.Connection(
                 index=i,

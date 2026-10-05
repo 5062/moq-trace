@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import uuid
 
-from moq_trace import ctf
+from moq_trace.decode import ctf
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 

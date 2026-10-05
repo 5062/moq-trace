@@ -11,7 +11,7 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace.phases import Phase  # noqa: E402
+from moq_trace.analysis.phases import Phase  # noqa: E402
 from moq_trace.plot import (  # noqa: E402
     PlotRun,
     plot_breakdown,

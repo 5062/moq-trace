@@ -36,6 +36,12 @@ in their MoQ and QUIC code.
 - One capture can hold several processes. Every event carries the `vpid` it came
   from, and the analysis publishes one process's slice, so process-local IDs from
   a relay and a peer can never be paired with each other.
+- The Python package has four layers, and a lower layer never imports a higher
+  one: `decode` (CTF, pcap, QUIC parsers), `analysis` (the DuckDB pipeline and its
+  `sql/<stage>/` files), `plot`, and `run` (hosts, capture, relay profiles).
+  `errors`, `manifest`, and `metadata` are the shared contract. Analyzing a
+  capture must never need SSH or host code. `python/tests/test_layering.py`
+  enforces the direction.
 - Keep implementation-specific types and control flow outside this repository.
 
 Two bounded exceptions to that boundary exist.
@@ -47,7 +53,7 @@ under test, so it lives outside the workspace (`Cargo.toml` excludes it) and kee
 `moq-bench/` into `crates/` or `python/`, and relay policy must not leak the other
 way.
 
-`python/src/moq_trace/relays/` holds one launch profile per relay implementation,
+`python/src/moq_trace/run/relays/` holds one launch profile per relay implementation,
 so `moq-trace bench` can run one workload against all of them. A profile is data
 only: where the relay's checkout lives, its binary, its arguments, and how to wait
 for and stop it. `bench.LAUNCH_KEYS` lists the keys a profile may set, and it

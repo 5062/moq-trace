@@ -14,8 +14,10 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace import network, pcap  # noqa: E402
+from moq_trace.analysis import network  # noqa: E402
+from moq_trace.decode import pcap  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.manifest import MANIFEST, NetworkManifest  # noqa: E402
 from moq_trace.metadata import Workload  # noqa: E402
 from moq_trace.plot import plot_network  # noqa: E402
 from moq_trace.plot.network import _recovery_series  # noqa: E402
@@ -237,9 +239,9 @@ class IngestTests(unittest.TestCase):
                 }
             )
             _qlog(root / "qlog" / "relay.sqlog", f"monotonic_start_ns={origin_ns - 1_000_000_000}", events)
-            manifest = root / network.MANIFEST
+            manifest = root / MANIFEST
             manifest.write_text(
-                network.NetworkManifest(
+                NetworkManifest(
                     relay_port=RELAY_PORT,
                     realtime_offset_ns=realtime_offset_ns,
                     realtime_offset_end_ns=realtime_offset_ns,
@@ -311,9 +313,9 @@ class IngestTests(unittest.TestCase):
                     {"time": 2, "group_id": "sub", "name": "transport:packet_sent", "data": {}},
                 ],
             )
-            manifest = root / network.MANIFEST
+            manifest = root / MANIFEST
             manifest.write_text(
-                network.NetworkManifest(
+                NetworkManifest(
                     relay_port=RELAY_PORT,
                     realtime_offset_ns=0,
                     realtime_offset_end_ns=0,
@@ -365,9 +367,9 @@ class IngestTests(unittest.TestCase):
 
     def test_a_run_without_capture_or_qlog_loads_empty_tables(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            manifest = pathlib.Path(directory) / network.MANIFEST
+            manifest = pathlib.Path(directory) / MANIFEST
             manifest.write_text(
-                network.NetworkManifest(
+                NetworkManifest(
                     relay_port=RELAY_PORT,
                     realtime_offset_ns=0,
                     realtime_offset_end_ns=0,
