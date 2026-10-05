@@ -44,8 +44,9 @@ def _peer(config: ExperimentConfig, placement: Placement, role: str) -> list[str
         str(config.fps),
         "--frame-size",
         str(config.object_size),
+        # The peers count the frames after each group's keyframe.
         "--group-size",
-        "0",
+        str(config.objects_per_group - 1),
     ]
 
 

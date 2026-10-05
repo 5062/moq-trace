@@ -41,3 +41,20 @@ CREATE TABLE metrics.phase_totals (
     total_ns BIGINT NOT NULL,
     PRIMARY KEY (process_id, subject, trace_id, phase)
 );
+
+-- Object statistics split by the object's position in its group. Every group
+-- opens a new stream, so the first object carries the stream setup that later
+-- objects in the group reuse. Packet samples belong to no single object and
+-- have no position.
+CREATE TABLE metrics.position_statistics (
+    process_id UINTEGER NOT NULL,
+    metric VARCHAR NOT NULL,
+    position VARCHAR NOT NULL CHECK (position IN ('first', 'later')),
+    count UBIGINT NOT NULL,
+    mean_ns DOUBLE NOT NULL,
+    p50_ns DOUBLE NOT NULL,
+    p95_ns DOUBLE NOT NULL,
+    p99_ns DOUBLE NOT NULL,
+    max_ns BIGINT NOT NULL,
+    PRIMARY KEY (process_id, metric, position)
+);

@@ -121,8 +121,15 @@ turn, from the toolkit root so the default peer path resolves:
 
 ```sh
 moq-trace bench --relay moq-dev-moq,cloudflare-moq-rs,google-quiche \
-  --subscribers 4 --object-size 16384 --fps 30 --duration-seconds 20
+  --subscribers 4 --object-size 16384 --fps 30 --objects-per-group 30 \
+  --duration-seconds 20
 ```
+
+Every group opens a new stream, so `--objects-per-group` decides how many objects
+share one stream's setup. One object per group charges that setup to every
+object, which is a stress case; the default of 30 is one second of 30 fps video.
+`metrics.position_statistics` reports object metrics separately for the first
+object of each group and for the rest, so the setup cost stays visible.
 
 Each relay gets its own subdirectory under `--output`, which defaults to
 `artifacts/bench-<UTC time>`. The relays come from the launch profiles in

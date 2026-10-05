@@ -24,17 +24,25 @@ from .plot import (
 )
 
 
-def _describe(metadata: RunMetadata) -> str:
-    """Summarize validated workload metadata for a figure subtitle."""
+def _describe(metadata: RunMetadata, varied: str | None = None) -> str:
+    """Summarize validated workload metadata for a figure subtitle.
+
+    A comparison leaves out the workload key it `varied`, because the legend
+    already labels each run with its value.
+    """
 
     affinity, workload = metadata.affinity, metadata.workload
     values = [
-        f"pinned CPU {affinity.cpu}" if affinity.mode == "single-core" and affinity.cpu is not None else "unpinned",
-        labels.subscribers(workload.subscribers),
-        f"{workload.object_size} bytes",
+        f"pinned CPU {affinity.cpu}" if affinity.mode == "single-core" and affinity.cpu is not None else "unpinned"
     ]
+    if varied != "subscribers":
+        values.append(labels.subscribers(workload.subscribers))
+    if varied != "object_size":
+        values.append(f"{workload.object_size} bytes")
     if workload.fps is not None:
         values.append(f"{workload.fps} fps")
+    if workload.objects_per_group is not None and varied != "objects_per_group":
+        values.append(labels.objects_per_group(workload.objects_per_group))
     if metadata.protocol is not None:
         values.append(metadata.protocol)
     return " | ".join(values)
@@ -84,12 +92,7 @@ def _render_comparison(
         subtitle = _describe(first)
         prefix, title = "relays", "Object latency by relay"
     else:
-        comparison = (
-            f"{first.workload.object_size} bytes"
-            if dimension == "subscribers"
-            else labels.subscribers(first.workload.subscribers)
-        )
-        subtitle = f"{_describe(first)} | {comparison}"
+        subtitle = _describe(first, dimension)
         prefix, title = "comparison", f"Object latency by {dimension}"
     plots = database.parent / "plots"
     plot_latency_comparison(plots / f"{prefix}_cdf.png", title, subtitle, runs, show_tail=dimension != "relay")

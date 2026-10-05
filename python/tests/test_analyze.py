@@ -74,22 +74,24 @@ class SqlAnalysisTests(unittest.TestCase):
         self.connection.execute(f"INSERT INTO raw.{table} SELECT *, pid::UINTEGER AS process_id FROM rows")
         self.connection.unregister("rows")
 
-    def object_start(self, trace_id: int, direction: str, connection_id: int, pid: int = 0) -> None:
+    def object_start(self, trace_id: int, direction: str, connection_id: int, pid: int = 0, frame: int = 0) -> None:
+        # Later frames of the group follow the first on its stream, 16 bytes each.
+        offset = frame * 16
         self.insert(
             "moq_object_start",
             ctf_timestamp_ns=trace_id * 1_000,
             timestamp_ns=100_000 if direction == "rx" else 210_000,
             trace_id=trace_id,
             logical_group=7,
-            logical_frame=0,
+            logical_frame=frame,
             session_id=trace_id,
             connection_id=connection_id,
             direction=direction,
             track_alias=1,
             group_id=4,
-            object_id=0,
+            object_id=frame,
             stream_id=connection_id * 10,
-            stream_offset_start=0,
+            stream_offset_start=offset,
             pid=pid,
         )
         self.insert(
@@ -97,13 +99,13 @@ class SqlAnalysisTests(unittest.TestCase):
             ctf_timestamp_ns=trace_id * 1_000 + 1,
             timestamp_ns=200_000 if direction == "rx" else 300_000,
             trace_id=trace_id,
-            stream_offset_end=16,
+            stream_offset_end=offset + 16,
             payload_bytes=16,
             outcome="success",
             pid=pid,
         )
 
-    def packet(self, trace_id: int, direction: str, connection_id: int, pid: int = 0) -> None:
+    def packet(self, trace_id: int, direction: str, connection_id: int, pid: int = 0, frame: int = 0) -> None:
         self.insert(
             "quic_packet_start",
             ctf_timestamp_ns=trace_id * 1_000,
@@ -133,8 +135,8 @@ class SqlAnalysisTests(unittest.TestCase):
             timestamp_ns=190_000 if direction == "rx" else 290_000,
             trace_id=trace_id,
             stream_id=connection_id * 10,
-            offset_start=0,
-            offset_end=16,
+            offset_start=frame * 16,
+            offset_end=frame * 16 + 16,
             outcome="success",
             pid=pid,
         )
@@ -809,6 +811,39 @@ class SqlAnalysisTests(unittest.TestCase):
                     artifact.connection.execute("SELECT count(*) FROM metrics.statistics").fetchone()[0],
                     14,
                 )
+
+    def test_statistics_split_objects_by_position_in_their_group(self) -> None:
+        """The first object of a group carries stream setup, so it is reported apart."""
+
+        self.object_start(1, "rx", 1)
+        self.object_start(2, "tx", 2)
+        self.object_start(5, "rx", 1, frame=1)
+        self.object_start(6, "tx", 2, frame=1)
+        self.packet(3, "rx", 1)
+        self.packet(4, "tx", 2)
+        self.packet(7, "rx", 1, frame=1)
+        self.packet(8, "tx", 2, frame=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "analysis.duckdb"
+            with mock.patch.object(ctf, "batches", self.batches):
+                run(
+                    pathlib.Path("unused.ctf"),
+                    output,
+                    workload=Workload(object_size=16, subscribers=1, objects_per_group=2),
+                    window=Window(warmup_seconds=0, cooldown_seconds=0),
+                )
+
+            with open_artifact(output, "run") as artifact:
+                rows = artifact.connection.execute(
+                    """SELECT position, count FROM metrics.position_statistics
+                       WHERE metric = 'full_span' ORDER BY position"""
+                ).fetchall()
+                self.assertEqual(rows, [("first", 1), ("later", 1)])
+                packets = artifact.connection.execute(
+                    "SELECT count(*) FROM metrics.position_statistics WHERE metric LIKE 'rx_packet%'"
+                ).fetchone()[0]
+                self.assertEqual(packets, 0)
 
     def test_generic_profile_accepts_transport_without_quinn_phases(self) -> None:
         """A quiche provider can omit phases that only Quinn exposes."""

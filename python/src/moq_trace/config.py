@@ -87,6 +87,10 @@ class ExperimentConfig(StrictModel):
     subscribers: int = Field(default=1, gt=0, description="Subscriber sessions, one subscription each.")
     object_size: int = Field(default=16_384, gt=0, description="Bytes per object.")
     fps: int = Field(default=30, gt=0, description="Objects published per second.")
+    # One second of 30 fps video per group. Every group opens a new stream, so one
+    # object per group charges stream setup to every object instead of to one per
+    # group, which is a stress case rather than a media workload.
+    objects_per_group: int = Field(default=30, gt=0, description="Objects in each group, its keyframe included.")
     # A second at each end keeps connection and subscription ramp-up out of the measurement.
     warmup_seconds: float = Field(default=1.0, ge=0, description="Run time trimmed from the front of the window.")
     duration_seconds: float = Field(default=20.0, gt=0, description="Steady-state window length.")

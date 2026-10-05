@@ -241,6 +241,8 @@ class ConfigurationTests(unittest.TestCase):
         command = commands(config, _placement(config))
 
         self.assertEqual(command.subscriber[command.subscriber.index("--connections") + 1], "3")
+        # The peers count the frames after each group's keyframe.
+        self.assertEqual(command.publisher[command.publisher.index("--group-size") + 1], "29")
         self.assertNotIn("--duration", command.subscriber)
         self.assertNotIn("--duration", command.publisher)
 

@@ -153,7 +153,7 @@ async def run(config: ExperimentConfig, pool: SshPool) -> pathlib.Path:
             subscribers=config.subscribers,
             object_size=config.object_size,
             publishers=1,
-            objects_per_group=1,
+            objects_per_group=config.objects_per_group,
             fps=config.fps,
         ),
         window=Window(
@@ -199,7 +199,7 @@ async def compare(config: ComparisonConfig, pool: SshPool) -> pathlib.Path:
             }
         )
         database = await run(run_config, pool)
-        label = labels.subscribers(value) if field == "subscribers" else labels.byte_size(value)
+        label = labels.dimension(field, value)
         runs.append((label, database, value))
     database = output / "comparison.duckdb"
     await asyncio.to_thread(write_comparison, database, config.dimension, runs)

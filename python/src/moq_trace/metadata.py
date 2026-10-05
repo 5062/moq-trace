@@ -21,7 +21,7 @@ TransportProfile = Literal["generic", "quinn"]
 # The dimensions a comparison can vary. Shared with the experiment
 # configuration, because a comparison writes the value it varied straight into
 # its artifact.
-ComparisonDimension = Literal["subscribers", "object_size"]
+ComparisonDimension = Literal["subscribers", "object_size", "objects_per_group"]
 
 
 class ArtifactModel(BaseModel):
@@ -173,5 +173,5 @@ class ComparisonMetadata(ArtifactModel):
     # The on-disk artifact kind this model describes.
     KIND: ClassVar[str] = "comparison"
 
-    dimension: Literal["subscribers", "object_size", "relay"]
+    dimension: Literal[ComparisonDimension, "relay"]
     runs: tuple[ComparisonRun, ...] = Field(min_length=1)

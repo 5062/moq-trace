@@ -73,3 +73,17 @@ CREATE TABLE metrics.statistics (
     max_ns BIGINT NOT NULL,
     PRIMARY KEY (run_id, process_id, metric)
 );
+
+CREATE TABLE metrics.position_statistics (
+    run_id UINTEGER NOT NULL,
+    process_id UINTEGER NOT NULL,
+    metric VARCHAR NOT NULL,
+    position VARCHAR NOT NULL CHECK (position IN ('first', 'later')),
+    count UBIGINT NOT NULL,
+    mean_ns DOUBLE NOT NULL,
+    p50_ns DOUBLE NOT NULL,
+    p95_ns DOUBLE NOT NULL,
+    p99_ns DOUBLE NOT NULL,
+    max_ns BIGINT NOT NULL,
+    PRIMARY KEY (run_id, process_id, metric, position)
+);

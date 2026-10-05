@@ -120,12 +120,15 @@ A connection whose ClientHello random has no key log entry is an error.
 ## Decryption
 
 The analysis decrypts in Python with `cryptography`, which is already a
-dependency, rather than through tshark. The main reason is GSO: a GSO send has
-to be split into its segments before any packet in it can be decrypted, as
-described below, and tshark cannot do that split. A tool that has to split and
-decrypt anyway gains little from a second decryptor, and keeping one
-implementation keeps the parsing under the analyzer's own tests and error rules.
-tshark serves as an independent cross-check in the test suite (see Testing).
+dependency. GSO boundaries must be proved by authentication, as described below.
+Tshark 4.6.8 can split GSO sends using repeated connection IDs, but it commits
+to the first matching boundary before authenticating it. A valid encrypted
+packet containing a false match fails to decode, although tshark exits
+successfully. The [decoder replacement investigation](../research/quic-decoder-replacement.md)
+records exact agreement on three retained captures and this counterexample.
+Keeping one decoder preserves authenticated boundary recovery and the analyzer's
+strict error rules. Tshark remains a candidate independent cross-check for
+captures and fixtures whose boundaries it resolves (see Testing).
 
 ### Connections
 

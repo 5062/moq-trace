@@ -13,7 +13,7 @@ import duckdb
 from . import sql
 from .artifact import open_artifact, write_metadata
 from .errors import TraceError
-from .metadata import ComparisonMetadata, ComparisonRun
+from .metadata import ComparisonDimension, ComparisonMetadata, ComparisonRun
 
 # The comparison artifact a bench output directory holds beside its runs.
 SNAPSHOT = "comparison.duckdb"
@@ -21,7 +21,7 @@ SNAPSHOT = "comparison.duckdb"
 
 def write_comparison(
     output: pathlib.Path,
-    dimension: Literal["subscribers", "object_size", "relay"],
+    dimension: Literal[ComparisonDimension, "relay"],
     runs: Sequence[tuple[str, pathlib.Path, int | None]],
     *,
     replace: bool = False,
@@ -72,6 +72,7 @@ def write_comparison(
                         "metrics.samples",
                         "metrics.phase_totals",
                         "metrics.statistics",
+                        "metrics.position_statistics",
                     ):
                         query = f"SELECT * FROM {table}" + (" WHERE analyzed" if table == "processes" else "")
                         connection.register("snapshot", artifact.connection.execute(query).arrow())

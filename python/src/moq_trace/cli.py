@@ -50,6 +50,7 @@ _BENCH_SETTINGS = (
     "subscribers",
     "object_size",
     "fps",
+    "objects_per_group",
     "warmup_seconds",
     "duration_seconds",
     "cooldown_seconds",
