@@ -182,8 +182,10 @@ def plot_network(
         total = connection.execute("SELECT count(*) FROM network.losses").fetchone()[0]
         if total == 0:
             _no_data(loss, "No packets declared lost")
-        else:
+        elif loss.get_legend_handles_labels()[0]:
             loss.legend(loc="upper right", fontsize=8)
+        else:
+            _no_data(loss, "Losses occurred only on connections not shown")
     for axis in (throughput, rtt, loss, window):
         axis.grid(alpha=0.25)
     _save(fig, path, f"Network during the run | {subtitle}")

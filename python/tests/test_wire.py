@@ -319,17 +319,23 @@ class WireTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "RX packets that start before their datagram was captured: 1"):
             self.ingest()
 
-    def test_connections_sharing_an_address_pair_join_by_send_lifetimes(self) -> None:
+    def test_shared_addresses_join_by_complete_tx_sequences_despite_late_capture(self) -> None:
         self.path(3, SUBSCRIBER, 20_600)
         self.trace.packet(5, "tx", 3)
-        # Both connections send packet 1 with identical stream ranges. Only
-        # their send lifetimes distinguish the wire observations.
-        self.trace.connection.execute("UPDATE raw.quic_stream_frame SET stream_id = 20 WHERE trace_id = 5")
+        self.trace.packet(6, "tx", 2, frame=1)
+        self.trace.packet(7, "tx", 3, frame=1)
+        # Packet 1 has identical contents on both connections. Packet 2 has
+        # different lengths, so the complete sequences distinguish them.
+        for table in ("quic_packet_start", "quic_packet_end"):
+            self.trace.connection.execute(f"UPDATE raw.{table} SET packet_number = 2 WHERE trace_id IN (6, 7)")
+            self.trace.connection.execute(f"UPDATE raw.{table} SET byte_len = 1201 WHERE trace_id = 7")
+        self.trace.connection.execute("UPDATE raw.quic_stream_frame SET stream_id = 20 WHERE trace_id IN (5, 7)")
         for table in ("quic_packet_start", "quic_packet_end", "quic_packet_phase", "quic_stream_frame"):
             self.trace.connection.execute(
-                f"UPDATE raw.{table} SET timestamp_ns = timestamp_ns + 100000 WHERE trace_id = 5"
+                f"UPDATE raw.{table} SET timestamp_ns = timestamp_ns + 100000 WHERE trace_id IN (5, 7)"
             )
         self.prepare()
+        self.trace.connection.execute("UPDATE model.window SET end_ns = 500000")
         self.trace.connection.execute(wire.sql.read("wire-schema"))
         states = [
             quic.Connection(
@@ -354,7 +360,20 @@ class WireTests(unittest.TestCase):
             self.trace.connection,
             "network.wire_packets",
             wire._PACKET_COLUMNS,
-            [(i, i, "tx", timestamp, "data", 1, 1200, i, 0, 0) for i, timestamp in enumerate((309000, 409000))],
+            [
+                # Capture of connection 2's packet 1 is after its own send and
+                # inside connection 3's send. One-packet timing evidence lies.
+                (0, 0, "tx", 325000, "data", 1, 1200, 0, 0, 0),
+                (1, 1, "tx", 409000, "data", 1, 1200, 1, 0, 0),
+                (2, 0, "tx", 309000, "data", 2, 1200, 2, 0, 0),
+                (3, 1, "tx", 409000, "data", 2, 1201, 3, 0, 0),
+            ],
+        )
+        wire._load(
+            self.trace.connection,
+            "network.wire_stream_frames",
+            wire._FRAME_COLUMNS,
+            [(i, 20, 0 if i < 2 else 16, 16 if i < 2 else 32, False) for i in range(4)],
         )
         wire._join_connections(self.trace.connection, states)
         self.assertEqual(
@@ -363,14 +382,14 @@ class WireTests(unittest.TestCase):
             ).fetchall(),
             [(0, 2), (1, 3)],
         )
-        # Conflicting unique observations must not pick either candidate.
+        # A packet that contradicts both complete sequences must be rejected.
         wire._load(
             self.trace.connection,
             "network.wire_packets",
             wire._PACKET_COLUMNS,
-            [(2, 0, "tx", 409000, "data", 1, 1200, 2, 0, 0)],
+            [(4, 0, "tx", 409000, "data", 2, 1201, 4, 0, 0)],
         )
-        with self.assertRaisesRegex(TraceError, r"wire connection 0 .* matches 2 traced connections"):
+        with self.assertRaisesRegex(TraceError, r"wire connection 0 .* matches 0 traced connections"):
             wire._join_connections(self.trace.connection, states)
 
     def test_a_connection_without_a_path_event_is_rejected(self) -> None:
