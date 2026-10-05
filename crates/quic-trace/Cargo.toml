@@ -13,3 +13,6 @@ lttng = ["dep:quic-trace-lttng-sys", "trace-core/lttng"]
 [dependencies]
 quic-trace-lttng-sys = { workspace = true, optional = true }
 trace-core.workspace = true
+
+[dev-dependencies]
+trace-core = { workspace = true, features = ["recording"] }

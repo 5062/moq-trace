@@ -11,6 +11,9 @@ default = []
 # Draw identifiers and time from the native provider library the C++ facade
 # also links, so both languages share one set of counters and one clock.
 lttng = ["dep:quic-trace-lttng-sys"]
+# Add an in-process recording backend for tests. A production build leaves it
+# off, so the native backend carries no recording state or branch.
+recording = []
 
 [dependencies]
 libc.workspace = true

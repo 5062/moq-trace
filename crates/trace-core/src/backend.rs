@@ -1,14 +1,20 @@
 //! The provider seam shared by the MoQ and QUIC facades.
 //!
 //! A facade owns its schema and its native provider binding. This module owns
-//! everything around them: the enable mask, the recording sink, and the
-//! bookkeeping counters. Recording is a real backend selection rather than a
-//! test-only replacement, so a test drives the same dispatch path a live relay
-//! does and only the leaf call differs.
+//! the dispatch around them. A production build is a thin wrapper over the
+//! provider: it carries no state and no recording branch. The `recording`
+//! feature adds an in-process sink with an enable mask and bookkeeping
+//! counters, so a test drives the same dispatch path a live relay does and only
+//! the leaf call differs.
 
+#[cfg(not(feature = "recording"))]
+use std::marker::PhantomData;
 use std::ops::Deref;
+#[cfg(feature = "recording")]
 use std::sync::Arc;
+#[cfg(feature = "recording")]
 use std::sync::Mutex;
+#[cfg(feature = "recording")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{next_span_id, next_trace_id, now_ns};
@@ -54,15 +60,17 @@ pub trait Schema: 'static {
 }
 
 /// Return the enable mask bit for one tracepoint.
+#[cfg(feature = "recording")]
 fn mask<S: Schema>(tracepoint: S::Tracepoint) -> u64 {
     1_u64 << tracepoint.index()
 }
 
-/// A backend that retains events in process instead of emitting them.
+/// A sink that retains events in process instead of emitting them.
 ///
 /// Every tracepoint starts enabled. The counters exist so a test can prove that
 /// a disabled tracepoint performs no bookkeeping at all, which is the property
 /// that keeps instrumentation affordable on a hot path.
+#[cfg(feature = "recording")]
 struct Recording<S: Schema> {
     enabled: AtomicU64,
     events: Mutex<Vec<S::Event>>,
@@ -71,6 +79,7 @@ struct Recording<S: Schema> {
     clock_reads: AtomicU64,
 }
 
+#[cfg(feature = "recording")]
 impl<S: Schema> Recording<S> {
     fn new() -> Self {
         Self {
@@ -102,11 +111,16 @@ impl<S: Schema> Recording<S> {
 
 /// A provider selection for one schema.
 ///
-/// The recording sink is boxed so that the native backend stays the size of one
-/// pointer. A process keeps one backend per provider in a `OnceLock`, and every
-/// trace start clones a handle to it.
+/// Without the `recording` feature the backend is always bound to the native
+/// provider and holds no state. With it, the backend may instead own a recording
+/// sink, boxed so that the native backend stays the size of one pointer. A
+/// process keeps one backend per provider in a `OnceLock`, and every trace start
+/// clones a handle to it.
 pub struct Backend<S: Schema> {
+    #[cfg(feature = "recording")]
     recording: Option<Box<Recording<S>>>,
+    #[cfg(not(feature = "recording"))]
+    schema: PhantomData<fn() -> S>,
 }
 
 impl<S: Schema> Backend<S> {
@@ -115,13 +129,19 @@ impl<S: Schema> Backend<S> {
     /// This initializes the provider, so a process must create at most one.
     pub fn native() -> Self {
         S::initialize();
-        Self { recording: None }
+        Self {
+            #[cfg(feature = "recording")]
+            recording: None,
+            #[cfg(not(feature = "recording"))]
+            schema: PhantomData,
+        }
     }
 
     /// Create a backend that records events in process.
     ///
     /// Recording is for tests and tooling that need to inspect what a facade
     /// would have emitted. The returned backend never calls the provider.
+    #[cfg(feature = "recording")]
     pub fn recording() -> Self {
         Self {
             recording: Some(Box::new(Recording::new())),
@@ -131,10 +151,11 @@ impl<S: Schema> Backend<S> {
     /// Return whether a tracepoint is enabled.
     #[inline]
     pub fn enabled(&self, tracepoint: S::Tracepoint) -> bool {
-        match &self.recording {
-            Some(recording) => recording.enabled(tracepoint),
-            None => S::enabled(tracepoint),
+        #[cfg(feature = "recording")]
+        if let Some(recording) = &self.recording {
+            return recording.enabled(tracepoint);
         }
+        S::enabled(tracepoint)
     }
 
     /// Return whether any of these tracepoints is enabled.
@@ -152,6 +173,7 @@ impl<S: Schema> Backend<S> {
     ///
     /// Panics if this backend is bound to the native provider, which has no mask
     /// to restrict and reports enablement from the provider instead.
+    #[cfg(feature = "recording")]
     pub fn enable_only(&self, tracepoint: S::Tracepoint) {
         self.sink().enable_only(tracepoint);
     }
@@ -159,6 +181,7 @@ impl<S: Schema> Backend<S> {
     /// Enable or disable one tracepoint on a recording backend.
     ///
     /// Panics if this backend is bound to the native provider.
+    #[cfg(feature = "recording")]
     pub fn set_enabled(&self, tracepoint: S::Tracepoint, enabled: bool) {
         self.sink().set_enabled(tracepoint, enabled);
     }
@@ -172,19 +195,22 @@ impl<S: Schema> Backend<S> {
         if !self.enabled(S::tracepoint(&event)) {
             return;
         }
-        match &self.recording {
-            Some(recording) => recording
+        #[cfg(feature = "recording")]
+        if let Some(recording) = &self.recording {
+            recording
                 .events
                 .lock()
                 .expect("the recording event list is never poisoned")
-                .push(event),
-            None => S::emit(event),
+                .push(event);
+            return;
         }
+        S::emit(event);
     }
 
     /// Return the events a recording backend has retained, oldest first.
     ///
     /// Panics if this backend is bound to the native provider.
+    #[cfg(feature = "recording")]
     pub fn events(&self) -> Vec<S::Event> {
         self.sink()
             .events
@@ -196,6 +222,7 @@ impl<S: Schema> Backend<S> {
     /// Allocate a process-wide trace identifier.
     #[inline]
     pub fn next_trace_id(&self) -> u64 {
+        #[cfg(feature = "recording")]
         if let Some(recording) = &self.recording {
             recording.trace_id_calls.fetch_add(1, Ordering::Relaxed);
         }
@@ -205,6 +232,7 @@ impl<S: Schema> Backend<S> {
     /// Allocate a process-wide phase span identifier.
     #[inline]
     pub fn next_span_id(&self) -> u64 {
+        #[cfg(feature = "recording")]
         if let Some(recording) = &self.recording {
             recording.span_id_calls.fetch_add(1, Ordering::Relaxed);
         }
@@ -214,6 +242,7 @@ impl<S: Schema> Backend<S> {
     /// Return a monotonic timestamp in nanoseconds from the host clock.
     #[inline]
     pub fn now_ns(&self) -> u64 {
+        #[cfg(feature = "recording")]
         if let Some(recording) = &self.recording {
             recording.clock_reads.fetch_add(1, Ordering::Relaxed);
         }
@@ -223,6 +252,7 @@ impl<S: Schema> Backend<S> {
     /// Return how many trace identifiers a recording backend has allocated.
     ///
     /// Panics if this backend is bound to the native provider.
+    #[cfg(feature = "recording")]
     pub fn trace_id_calls(&self) -> u64 {
         self.sink().trace_id_calls.load(Ordering::Relaxed)
     }
@@ -230,6 +260,7 @@ impl<S: Schema> Backend<S> {
     /// Return how many span identifiers a recording backend has allocated.
     ///
     /// Panics if this backend is bound to the native provider.
+    #[cfg(feature = "recording")]
     pub fn span_id_calls(&self) -> u64 {
         self.sink().span_id_calls.load(Ordering::Relaxed)
     }
@@ -237,11 +268,13 @@ impl<S: Schema> Backend<S> {
     /// Return how many clock reads a recording backend has counted.
     ///
     /// Panics if this backend is bound to the native provider.
+    #[cfg(feature = "recording")]
     pub fn clock_reads(&self) -> u64 {
         self.sink().clock_reads.load(Ordering::Relaxed)
     }
 
     /// Return the recording sink, which only exists for a recording backend.
+    #[cfg(feature = "recording")]
     fn sink(&self) -> &Recording<S> {
         self.recording
             .as_deref()
@@ -252,12 +285,13 @@ impl<S: Schema> Backend<S> {
 /// A cheap, cloneable reference to a backend.
 ///
 /// The process-global backend is borrowed, so cloning a handle for a trace
-/// never touches an atomic. Owned handles exist for tests and tooling that need
-/// an isolated event stream.
+/// never touches an atomic. Owned handles exist only with the `recording`
+/// feature, for tests and tooling that need an isolated event stream.
 pub enum Handle<S: Schema> {
     /// Borrows a backend that outlives every handle.
     Shared(&'static Backend<S>),
     /// Shares ownership of a backend with other handles.
+    #[cfg(feature = "recording")]
     Owned(Arc<Backend<S>>),
 }
 
@@ -265,6 +299,7 @@ impl<S: Schema> Clone for Handle<S> {
     fn clone(&self) -> Self {
         match self {
             Self::Shared(backend) => Self::Shared(backend),
+            #[cfg(feature = "recording")]
             Self::Owned(backend) => Self::Owned(Arc::clone(backend)),
         }
     }
@@ -277,6 +312,7 @@ impl<S: Schema> Handle<S> {
     }
 
     /// Take shared ownership of a backend.
+    #[cfg(feature = "recording")]
     pub fn owned(backend: Backend<S>) -> Self {
         Self::Owned(Arc::new(backend))
     }
@@ -288,6 +324,7 @@ impl<S: Schema> Deref for Handle<S> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Shared(backend) => backend,
+            #[cfg(feature = "recording")]
             Self::Owned(backend) => backend,
         }
     }
