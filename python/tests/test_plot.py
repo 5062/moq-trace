@@ -40,7 +40,7 @@ def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
     connection = duckdb.connect(":memory:")
     connection.execute("CREATE SCHEMA metrics")
     connection.execute(
-        """CREATE TABLE metrics.samples(process_id UINTEGER, metric VARCHAR, rx_trace_id UBIGINT,
+        """CREATE TABLE metrics.samples(metric VARCHAR, rx_trace_id UBIGINT,
         tx_trace_id UBIGINT, elapsed_ns BIGINT, value_ns BIGINT)"""
     )
     # Four copies whose segments chain into each span, with a negative tail.
@@ -65,12 +65,12 @@ def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
         values["quic_full_span"] = values["read_to_moq"] + values["full_span"] + values["moq_to_send"]
         values["wire_full_span"] = values["wire_to_read"] + values["quic_full_span"] + values["send_to_wire"]
         rows += [(metric, second, second + 10, second * 1_000_000_000, value) for metric, value in values.items()]
-    connection.executemany("INSERT INTO metrics.samples VALUES (1, ?, ?, ?, ?, ?)", rows)
+    connection.executemany("INSERT INTO metrics.samples VALUES (?, ?, ?, ?, ?)", rows)
     packet_metrics = ["rx_packet_span", "tx_packet_span"]
     if packet_phases:
         packet_metrics += ["rx_scheduling", "rx_packet_processing_span"]
     connection.executemany(
-        "INSERT INTO metrics.samples VALUES (1, ?, NULL, NULL, ?, 5000)",
+        "INSERT INTO metrics.samples VALUES (?, NULL, NULL, ?, 5000)",
         [(metric, second * 1_000_000_000) for metric in packet_metrics for second in range(4)],
     )
     connection.execute(
@@ -178,8 +178,7 @@ class TransportWaitTitleTests(unittest.TestCase):
         connection = _artifact(packet_phases=False)
         try:
             connection.execute(
-                "INSERT INTO metrics.samples VALUES "
-                "(1, 'blocked_pacing', 0, 10, 0, 0), (1, 'blocked_pacing', 1, 11, 0, 0)"
+                "INSERT INTO metrics.samples VALUES ('blocked_pacing', 0, 10, 0, 0), ('blocked_pacing', 1, 11, 0, 0)"
             )
             with tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "transport_waits.png"

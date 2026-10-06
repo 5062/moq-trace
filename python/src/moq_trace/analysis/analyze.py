@@ -20,7 +20,6 @@ from ..metadata import (
     CommandSet,
     Counts,
     NetworkCapabilities,
-    Population,
     Processes,
     RunMetadata,
     TransportCapabilities,
@@ -44,18 +43,6 @@ _UNDELIVERED = ("expired", "dropped", "reset")
 
 def _count(connection: duckdb.DuckDBPyConnection, query: str, parameters=()) -> int:
     return int(connection.execute(query, parameters).fetchone()[0])
-
-
-def _check(connection: duckdb.DuckDBPyConnection, checks: str) -> None:
-    """Run a packaged check query and reject the trace if any defect it counts is present.
-
-    A check query returns one `(defect, count)` row per invariant, so one pass
-    reports every violated invariant rather than only the first.
-    """
-
-    defects = [f"{defect}: {count}" for defect, count in connection.execute(sql.read(checks)).fetchall() if count]
-    if defects:
-        raise TraceError("; ".join(defects))
 
 
 def _ingest(
@@ -85,9 +72,9 @@ def _ingest(
             source = (metadata[b"capture"].decode(), metadata[b"hostname"].decode())
         except KeyError as error:
             raise TraceError("CTF batch is missing its capture UUID or hostname") from error
+        # The labels of the outcome enum each event class declares, so every
+        # recorded outcome is among them.
         outcomes.update(json.loads(metadata.get(b"outcomes", b"[]")))
-        if "outcome" in batch.schema.names:
-            outcomes.update(value for value in batch.column("outcome").unique().to_pylist() if value is not None)
         connection.register("arrow_batch", batch)
         for pid in sorted(batch.column("pid").unique().to_pylist()):
             key = (*source, pid)
@@ -136,7 +123,8 @@ def _select_process(
 
     Trace and span IDs are counted per process, so two processes allocate the same
     values independently and a join on IDs alone would pair the wrong events.
-    Scoping every derived table to one process keeps those joins unambiguous.
+    Every event view holds one process, so every table derived from them does,
+    and joins on IDs alone are unambiguous.
     """
 
     if pid is None:
@@ -155,38 +143,20 @@ def _select_process(
     connection.execute("UPDATE processes SET analyzed = (process_id = ?)", [candidates[0][0]])
     for name in ctf.SCHEMAS:
         connection.execute(
-            f"CREATE TEMP VIEW {name} AS SELECT * FROM raw.{name} "
+            f"CREATE TEMP VIEW {name} AS SELECT * EXCLUDE (process_id) FROM raw.{name} "
             "WHERE process_id = (SELECT process_id FROM processes WHERE analyzed)"
         )
     return pid
 
 
-def _materialize_model(connection: duckdb.DuckDBPyConnection) -> None:
-    """Store validated pairs and copy identities once, retaining raw events.
-
-    Temporary relations are construction helpers on the builder connection.
-    They disappear when the builder connection closes.
-    """
-
-    connection.execute(sql.read("model/schema"))
-    connection.execute(sql.read("model/populate"))
-    for name, query in (
-        ("object_copies", "SELECT * FROM model.objects WHERE direction = 'tx' AND copy_ordinal IS NOT NULL"),
-        ("object_lifecycles", "SELECT * FROM model.objects"),
-        ("packet_lifecycles", "SELECT * FROM model.packets"),
-        ("object_phase_intervals", "SELECT * EXCLUDE(subject) FROM model.intervals WHERE subject = 'object'"),
-        ("packet_phase_intervals", "SELECT * EXCLUDE(subject) FROM model.intervals WHERE subject = 'packet'"),
-    ):
-        connection.execute(f"CREATE OR REPLACE TEMP VIEW {name} AS {query}")
-
-
 def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     """Check raw boundaries, store paired relations, then check their invariants."""
 
-    _check(connection, "checks/raw")
-    _materialize_model(connection)
+    sql.check(connection, "checks/raw")
+    connection.execute(sql.read("model/schema"))
+    connection.execute(sql.read("model/populate"))
     phases.register(connection)
-    _check(connection, "checks/model")
+    sql.check(connection, "checks/model")
 
 
 def _select_window(
@@ -205,109 +175,84 @@ def _select_window(
     missing copies that no subscriber was ever meant to get. The ``warmup``
     margin then trims further from that steady-state opening, and ``cooldown``
     trims the tail.
+
+    A copy accounts for its subscriber once it was delivered or deliberately not
+    delivered. Only the delivered ones carry latency samples.
     """
 
-    warmup_ns = round(warmup_seconds * 1_000_000_000)
-    cooldown_ns = round(cooldown_seconds * 1_000_000_000)
-    bounds = connection.execute(
-        """SELECT min(start_ns), max(start_ns)
-           FROM object_lifecycles
-           WHERE direction = 'rx' AND outcome = 'success' AND payload_bytes = ?""",
-        [object_size],
+    connection.execute(
+        """CREATE TEMP TABLE inbound_objects AS
+           SELECT rx.trace_id, rx.start_ns,
+                  count(tx.trace_id) FILTER (
+                    tx.outcome = 'success' OR list_contains($undelivered, tx.outcome::VARCHAR)
+                  ) AS copies
+           FROM model.objects AS rx
+           LEFT JOIN model.objects AS tx ON tx.rx_trace_id = rx.trace_id AND tx.direction = 'tx'
+           WHERE rx.direction = 'rx' AND rx.outcome = 'success' AND rx.payload_bytes = $size
+           GROUP BY rx.trace_id, rx.start_ns""",
+        {"undelivered": list(_UNDELIVERED), "size": object_size},
+    )
+    origin, last, steady = connection.execute(
+        "SELECT min(start_ns), max(start_ns), min(start_ns) FILTER (copies = ?) FROM inbound_objects", [subscribers]
     ).fetchone()
-    if bounds[0] is None:
+    if origin is None:
         raise TraceError(f"trace has no completed {object_size}-byte inbound objects")
-    origin, last = map(int, bounds)
-
-    # A subscriber whose copy the relay deliberately did not deliver was attached
-    # all the same, so it counts toward the steady state.
-    steady = connection.execute(
-        """SELECT min(start_ns) FROM (
-             SELECT rx.start_ns
-             FROM object_lifecycles AS rx
-             JOIN object_lifecycles AS tx
-               ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id AND tx.direction = 'tx'
-             WHERE rx.direction = 'rx' AND rx.outcome = 'success' AND rx.payload_bytes = ?
-               AND (tx.outcome::VARCHAR = 'success' OR list_contains(?, tx.outcome::VARCHAR))
-             GROUP BY rx.process_id, rx.trace_id, rx.start_ns
-             HAVING count(*) = ?
-           )""",
-        [object_size, list(_UNDELIVERED), subscribers],
-    ).fetchone()[0]
     if steady is None:
         raise TraceError(f"trace has no {object_size}-byte inbound object copied to all {subscribers} subscribers")
 
-    start = min(int(steady) + warmup_ns, 2**63 - 1)
-    end = max(last - cooldown_ns, 0)
+    start = min(int(steady) + round(warmup_seconds * 1_000_000_000), 2**63 - 1)
+    end = max(int(last) - round(cooldown_seconds * 1_000_000_000), 0)
+    connection.execute("INSERT INTO model.window VALUES (?, ?, ?)", [origin, start, end])
     connection.execute(
         """CREATE TEMP TABLE selected_rx AS
-           SELECT * FROM object_lifecycles
-           WHERE direction = 'rx' AND outcome = 'success'
-             AND payload_bytes = ? AND start_ns BETWEEN ? AND ?""",
-        [object_size, start, end],
+           SELECT * FROM model.objects
+           SEMI JOIN inbound_objects AS inbound USING (trace_id)
+           WHERE start_ns BETWEEN ? AND ?""",
+        [start, end],
     )
     if _count(connection, "SELECT count(*) FROM selected_rx") == 0:
         raise TraceError("steady-state window contains no complete objects")
-    # A copy counts once it was delivered or deliberately not delivered. Only the
-    # delivered ones carry latency samples.
     bad = _count(
         connection,
-        """SELECT count(*) FROM (
-             SELECT rx.process_id, rx.trace_id,
-                    count(tx.trace_id) FILTER (
-                      tx.outcome::VARCHAR = 'success' OR list_contains(?, tx.outcome::VARCHAR)
-                    ) AS copies
-             FROM selected_rx AS rx
-             LEFT JOIN object_lifecycles AS tx
-               ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id AND tx.direction = 'tx'
-             GROUP BY rx.process_id, rx.trace_id HAVING copies <> ?
-           )""",
-        [list(_UNDELIVERED), subscribers],
+        "SELECT count(*) FROM inbound_objects WHERE start_ns BETWEEN ? AND ? AND copies <> ?",
+        [start, end, subscribers],
     )
     if bad:
         raise TraceError(
             f"{bad} steady-state objects do not have exactly {subscribers} outbound copies "
             f"that were delivered or ended {', '.join(_UNDELIVERED)}"
         )
-    connection.execute(sql.read("window/schema"))
+    connection.execute("INSERT INTO model.selected_objects SELECT trace_id FROM selected_rx")
     connection.execute(
-        "INSERT INTO model.window SELECT process_id, ?, ?, ? FROM processes WHERE analyzed", [origin, start, end]
+        """CREATE TEMP VIEW selected_copies AS
+           SELECT rx.trace_id AS rx_trace_id, rx.start_ns AS rx_start_ns,
+                  tx.trace_id AS tx_trace_id, tx.end_ns AS tx_end_ns,
+                  tx.connection_id, tx.stream_id, tx.stream_offset_start, tx.stream_offset_end
+           FROM selected_rx AS rx JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id"""
     )
-    connection.execute("CREATE TEMP VIEW analysis_window AS SELECT origin_ns, start_ns, end_ns FROM model.window")
-    connection.execute("INSERT INTO model.selected_objects SELECT process_id, trace_id FROM selected_rx")
-    return origin
+    return int(origin)
 
 
 def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
-    """Derive per-copy object and packet latency samples from the window.
+    """Stage per-copy object and packet latency samples from the window.
 
     Elapsed time is measured from ``origin``, the first completed inbound
     object in the trace, so every sample shares one time axis.
     """
 
     connection.execute(
-        sql.read("samples/object-stage"),
-        {"origin": origin},
-    )
-    connection.execute(
-        sql.read("samples/quic-object-stage"),
-        {"origin": origin},
-    )
-    connection.execute(
         """CREATE TEMP VIEW selected_packets AS
-           SELECT * FROM packet_lifecycles
-           SEMI JOIN (
-             SELECT DISTINCT process_id, packet_trace_id AS trace_id FROM model.coverage_packets
-           ) AS selected USING (process_id, trace_id)"""
+           SELECT * FROM model.packets
+           SEMI JOIN (SELECT DISTINCT packet_trace_id AS trace_id FROM model.coverage_packets) USING (trace_id)"""
     )
-    connection.execute(
-        sql.read("samples/packet-stage"),
-        {"origin": origin},
-    )
-    connection.execute(sql.read("samples/segment-stage"), {"origin": origin})
-    connection.execute(sql.read("samples/wire-schema"))
-    connection.execute(sql.read("samples/moq-work-stage"), {"origin": origin})
-    connection.execute(sql.read("samples/transport-wait-stage"), {"origin": origin})
+    connection.execute(sql.read("samples/schema"))
+    for stage in (
+        "samples/copy-spans-stage",
+        "samples/packet-stage",
+        "samples/moq-work-stage",
+        "samples/transport-wait-stage",
+    ):
+        connection.execute(sql.read(stage), {"origin": origin})
 
 
 def _catalog() -> list[tuple[str, str, str, str, str, int]]:
@@ -373,46 +318,42 @@ def _catalog() -> list[tuple[str, str, str, str, str, int]]:
 
 
 def _define_metrics(connection: duckdb.DuckDBPyConnection) -> None:
-    """Declare the metric catalog and its per-metric statistics.
+    """Declare the metric catalog, publish the staged samples, and summarize them.
 
-    A packet phase this table does not know is still measured, because the
-    generic analyzer uses whichever phases a provider emits.
+    A packet phase the catalog does not know is still measured, because the
+    generic analyzer uses whichever phases a provider emits. Every other metric
+    is in the catalog, so an unknown staged metric is such a phase.
     """
 
     connection.execute(sql.read("metrics/schema"))
     catalog = _catalog()
     known = {row[0] for row in catalog}
-    extra = connection.execute("SELECT DISTINCT metric FROM packet_samples ORDER BY metric").fetchall()
-    for (metric,) in extra:
+    for (metric,) in connection.execute("SELECT DISTINCT metric FROM staged_samples ORDER BY metric").fetchall():
         if metric not in known:
             catalog.append((metric, "packet", metric.replace("_", " "), "ns", "occurrence", len(catalog)))
     connection.executemany("INSERT INTO metrics.definitions VALUES (?, ?, ?, ?, ?, ?)", catalog)
-    connection.execute(sql.read("samples/populate"))
-    _check(connection, "checks/samples")
-    connection.execute(sql.read("metrics/statistics-populate"))
-    connection.execute(sql.read("metrics/phase-totals-populate"))
-
-
-def _define_timelines(connection: duckdb.DuckDBPyConnection) -> None:
-    """Select representative objects and their aligned timeline intervals."""
-
-    connection.execute(sql.read("timeline/schema"))
-    connection.execute(sql.read("timeline/populate"))
+    connection.execute("INSERT INTO metrics.samples BY NAME SELECT * FROM staged_samples")
+    sql.check(connection, "checks/samples")
+    for populate in ("metrics/statistics-populate", "metrics/phase-totals-populate", "timeline/populate"):
+        connection.execute(sql.read(populate))
 
 
 def _ingest_network(connection: duckdb.DuckDBPyConnection, path: pathlib.Path, origin: int) -> NetworkCapabilities:
     """Load the network capture and, when it holds a packet capture, decrypt and check it.
 
     The decrypted capture adds wire samples, so it runs before the metrics are
-    defined.
+    defined. It reads the capture in the same pass that measures throughput.
     """
 
-    capabilities = network_capture.ingest(connection, path, origin)
     manifest = read_manifest(path)
-    if manifest.pcap is None:
-        return capabilities
-    packets = wire.ingest(connection, manifest, path.parent, origin)
-    return capabilities.model_copy(update={"wire_packets": packets})
+    root = path.parent
+    return network_capture.ingest(
+        connection,
+        manifest,
+        root,
+        origin,
+        decrypt=lambda datagrams: wire.ingest(connection, manifest, root, origin, datagrams),
+    )
 
 
 def _verify_transport_metrics(connection: duckdb.DuckDBPyConnection, transport_profile: TransportProfile) -> None:
@@ -460,15 +401,9 @@ def _write_run_metadata(
                     ).fetchall()
                 )
             ),
-            population=Population(
-                object="selected_object_copies",
-                quic_object="selected_object_copies",
-                packet="selected_object_packets",
-                timeline="slowest_copy_per_selected_object",
-            ),
             counts=Counts(
                 groups=_count(connection, "SELECT count(DISTINCT group_id) FROM selected_rx"),
-                packets=_count(connection, "SELECT count(*) FROM packet_lifecycles"),
+                packets=_count(connection, "SELECT count(*) FROM model.packets"),
                 selected_packets=_count(connection, "SELECT count(*) FROM selected_packets"),
                 correlated_objects=_count(connection, "SELECT count(*) FROM selected_rx"),
                 correlated_object_copies=_count(
@@ -479,8 +414,7 @@ def _write_run_metadata(
                     connection.execute(
                         """SELECT tx.outcome::VARCHAR, count(*)::INTEGER
                            FROM model.selected_objects AS rx
-                           JOIN model.objects AS tx
-                             ON tx.process_id = rx.process_id AND tx.rx_trace_id = rx.trace_id
+                           JOIN model.objects AS tx ON tx.rx_trace_id = rx.trace_id
                            WHERE tx.direction = 'tx' GROUP BY ALL ORDER BY ALL"""
                     ).fetchall()
                 ),
@@ -542,7 +476,6 @@ def run(
             connection.execute(sql.read("model/macros"))
             captured = _ingest(connection, input_path, expected_pids)
             analyzed = _select_process(connection, pid, captured)
-            connection.execute(sql.read("model/lifecycles-stage"))
             _validate_raw(connection)
             origin = _select_window(
                 connection,
@@ -551,13 +484,12 @@ def run(
                 warmup_seconds=window.warmup_seconds,
                 cooldown_seconds=window.cooldown_seconds,
             )
-            _check(connection, "checks/window")
+            sql.check(connection, "checks/window")
             coverage.resolve(connection)
             _derive_samples(connection, origin)
             capabilities = None if network is None else _ingest_network(connection, network, origin)
             _define_metrics(connection)
             _verify_transport_metrics(connection, transport_profile)
-            _define_timelines(connection)
             _write_run_metadata(
                 connection,
                 pid=analyzed,

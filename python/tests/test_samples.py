@@ -11,7 +11,6 @@ from analysis_case import ModelCase  # noqa: E402
 from moq_trace.analysis import coverage  # noqa: E402
 from moq_trace.analysis.analyze import (  # noqa: E402
     _define_metrics,
-    _define_timelines,
     _derive_samples,
     _select_window,
 )
@@ -38,7 +37,7 @@ class SampleTests(ModelCase):
 
         self.assertEqual(
             self.connection.execute(
-                "SELECT trace_id, packet_number, packet_space, byte_len FROM packet_lifecycles ORDER BY trace_id"
+                "SELECT trace_id, packet_number, packet_space, byte_len FROM model.packets ORDER BY trace_id"
             ).fetchall(),
             [(3, 1, "data", 1200), (4, 1, "data", 1200)],
         )
@@ -62,13 +61,12 @@ class SampleTests(ModelCase):
         coverage.resolve(self.connection)
         _derive_samples(self.connection, origin)
         _define_metrics(self.connection)
-        _define_timelines(self.connection)
 
         self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 1)
         self.assertEqual(
-            self.connection.execute(
-                "SELECT count(*) FROM quic_object_samples WHERE metric = 'quic_full_span'"
-            ).fetchone()[0],
+            self.connection.execute("SELECT count(*) FROM staged_samples WHERE metric = 'quic_full_span'").fetchone()[
+                0
+            ],
             1,
         )
         self.assertEqual(
@@ -83,7 +81,7 @@ class SampleTests(ModelCase):
         return [
             int(latency)
             for (latency,) in self.connection.execute(
-                "SELECT latency_ns FROM packet_samples WHERE metric = ?", [metric]
+                "SELECT value_ns FROM staged_samples WHERE metric = ?", [metric]
             ).fetchall()
         ]
 
@@ -140,9 +138,7 @@ class SampleTests(ModelCase):
         )
         coverage.resolve(self.connection)
         _derive_samples(self.connection, origin)
-        return self.connection.execute(
-            "SELECT latency_ns FROM quic_object_samples WHERE metric = ?", [metric]
-        ).fetchone()[0]
+        return self.connection.execute("SELECT value_ns FROM staged_samples WHERE metric = ?", [metric]).fetchone()[0]
 
     def test_cut_through_tail_gap_starts_at_buffer_acceptance(self) -> None:
         """A stack that sends inside inbound packet processing ends that packet after its sends.
@@ -242,9 +238,13 @@ class SampleTests(ModelCase):
         self.connection.execute("UPDATE raw.moq_object_end SET timestamp_ns = 315000 WHERE trace_id = 2")
 
         full = self._quic_object_metric("quic_full_span")
-        segments = dict(self.connection.execute("SELECT metric, latency_ns FROM segment_samples").fetchall())
+        segments = dict(
+            self.connection.execute(
+                "SELECT metric, value_ns FROM staged_samples WHERE metric IN ('read_to_moq', 'moq_to_send')"
+            ).fetchall()
+        )
         self.assertEqual(segments, {"read_to_moq": 100_000 - 90_000, "moq_to_send": 310_000 - 315_000})
-        moq = self.connection.execute("SELECT latency_ns FROM object_samples").fetchone()[0]
+        moq = self.connection.execute("SELECT value_ns FROM staged_samples WHERE metric = 'full_span'").fetchone()[0]
         self.assertEqual(segments["read_to_moq"] + moq + segments["moq_to_send"], full)
         _define_metrics(self.connection)
 
@@ -253,7 +253,12 @@ class SampleTests(ModelCase):
         origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         coverage.resolve(self.connection)
         _derive_samples(self.connection, origin)
-        return dict(self.connection.execute("SELECT metric, latency_ns FROM moq_work_samples").fetchall())
+        return dict(
+            self.connection.execute(
+                """SELECT metric, value_ns FROM staged_samples
+                   WHERE starts_with(metric, 'moq_') AND metric <> 'moq_to_send'"""
+            ).fetchall()
+        )
 
     def test_moq_work_excludes_the_transport_calls_its_phases_made(self) -> None:
         """A write that sends inside its transport call is charged only for its own work."""
@@ -299,7 +304,7 @@ class SampleTests(ModelCase):
         _derive_samples(self.connection, origin)
         return dict(
             self.connection.execute(
-                "SELECT metric, latency_ns FROM packet_samples WHERE metric IN ('tx_send_batching', 'tx_send_syscall')"
+                "SELECT metric, value_ns FROM staged_samples WHERE metric IN ('tx_send_batching', 'tx_send_syscall')"
             ).fetchall()
         )
 
@@ -510,6 +515,7 @@ class SampleTests(ModelCase):
                 outcome=outcome,
             )
 
+        self.prepare_model()
         intervals = self.connection.execute(
             """SELECT span_id, start_ns, end_ns FROM packet_phase_intervals
                ORDER BY span_id"""

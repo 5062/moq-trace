@@ -11,8 +11,8 @@ sys.path.insert(0, str(SOURCE))
 
 from analysis_case import ModelCase  # noqa: E402
 
+from moq_trace.analysis import sql  # noqa: E402
 from moq_trace.analysis.analyze import (  # noqa: E402
-    _check,
     _ingest,
     _select_process,
     _select_window,
@@ -58,7 +58,7 @@ class WindowAndProcessTests(ModelCase):
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         self.connection.execute("UPDATE model.window SET end_ns = 500_000")
 
-        _check(self.connection, "checks/window")
+        sql.check(self.connection, "checks/window")
 
     def test_a_lifecycle_unfinished_inside_the_window_is_rejected(self) -> None:
         self.object_start(1, "rx", 1)
@@ -69,7 +69,7 @@ class WindowAndProcessTests(ModelCase):
         self.connection.execute("UPDATE model.window SET end_ns = 500_000")
 
         with self.assertRaisesRegex(TraceError, "object starts without completions inside the analysis window"):
-            _check(self.connection, "checks/window")
+            sql.check(self.connection, "checks/window")
 
     def test_phases_cut_off_after_the_window_are_accepted(self) -> None:
         self.object_start(1, "rx", 1)
@@ -96,7 +96,7 @@ class WindowAndProcessTests(ModelCase):
 
         self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
-        _check(self.connection, "checks/window")
+        sql.check(self.connection, "checks/window")
 
     def test_phase_unfinished_inside_the_window_is_rejected(self) -> None:
         self.object_start(1, "rx", 1)
@@ -115,7 +115,7 @@ class WindowAndProcessTests(ModelCase):
         self.prepare_model()
         _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         with self.assertRaisesRegex(TraceError, "quic_packet_phase contains unmatched phase boundaries"):
-            _check(self.connection, "checks/window")
+            sql.check(self.connection, "checks/window")
 
     def test_analysis_accepts_nonconsecutive_groups(self) -> None:
         for trace_id, direction in ((1, "rx"), (2, "tx"), (3, "rx"), (4, "tx")):
@@ -168,7 +168,7 @@ class WindowAndProcessTests(ModelCase):
 
         # The peer contributes no inbound objects, so only the relay is measured.
         self.assertEqual(self.connection.execute("SELECT count(*) FROM selected_rx").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("SELECT count(*) FROM object_lifecycles").fetchone()[0], 2)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM model.objects").fetchone()[0], 2)
 
     def test_select_process_needs_a_pid_for_a_multi_process_trace(self) -> None:
         with self.assertRaisesRegex(TraceError, "holds 2 processes"):

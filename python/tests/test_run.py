@@ -243,7 +243,6 @@ class RunTests(ModelCase):
                     ).fetchall(),
                     [(13,), (14,)],
                 )
-                self.assertEqual(artifact.metadata.population.packet, "selected_object_packets")
                 self.assertEqual(
                     artifact.connection.execute("SELECT origin_ns, start_ns, end_ns FROM model.window").fetchall(),
                     [(100_000, 500_100_000, 1_000_100_000)],

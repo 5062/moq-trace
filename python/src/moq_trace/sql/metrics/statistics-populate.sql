@@ -1,21 +1,21 @@
-INSERT INTO metrics.statistics
-SELECT process_id, metric, count(*)::UBIGINT AS count, avg(value_ns) AS mean_ns,
-       quantile_cont(value_ns, 0.50)::DOUBLE AS p50_ns,
-       quantile_cont(value_ns, 0.95)::DOUBLE AS p95_ns,
-       quantile_cont(value_ns, 0.99)::DOUBLE AS p99_ns, max(value_ns)::BIGINT AS max_ns
-FROM metrics.samples GROUP BY process_id, metric;
+-- One summary, so the whole and positional statistics agree on what they report.
+CREATE OR REPLACE TEMP MACRO latency_summary(value_ns) AS {
+    'count': count(value_ns)::UBIGINT,
+    'mean_ns': avg(value_ns),
+    'p50_ns': quantile_cont(value_ns, 0.50)::DOUBLE,
+    'p95_ns': quantile_cont(value_ns, 0.95)::DOUBLE,
+    'p99_ns': quantile_cont(value_ns, 0.99)::DOUBLE,
+    'max_ns': max(value_ns)::BIGINT
+};
+
+INSERT INTO metrics.statistics BY NAME
+SELECT metric, unnest(latency_summary(value_ns)) FROM metrics.samples GROUP BY metric;
 
 -- An RX object and its TX copies share one logical frame, so either trace ID
 -- locates the sample's position in its group.
-INSERT INTO metrics.position_statistics
-SELECT samples.process_id, samples.metric,
-       CASE WHEN objects.logical_frame = 0 THEN 'first' ELSE 'later' END AS position,
-       count(*)::UBIGINT AS count, avg(samples.value_ns) AS mean_ns,
-       quantile_cont(samples.value_ns, 0.50)::DOUBLE AS p50_ns,
-       quantile_cont(samples.value_ns, 0.95)::DOUBLE AS p95_ns,
-       quantile_cont(samples.value_ns, 0.99)::DOUBLE AS p99_ns, max(samples.value_ns)::BIGINT AS max_ns
+INSERT INTO metrics.position_statistics BY NAME
+SELECT samples.metric, CASE WHEN objects.logical_frame = 0 THEN 'first' ELSE 'later' END AS position,
+       unnest(latency_summary(samples.value_ns))
 FROM metrics.samples AS samples
-JOIN model.objects AS objects
-  ON objects.process_id = samples.process_id
- AND objects.trace_id = coalesce(samples.rx_trace_id, samples.tx_trace_id)
-GROUP BY samples.process_id, samples.metric, position;
+JOIN model.objects AS objects ON objects.trace_id = coalesce(samples.rx_trace_id, samples.tx_trace_id)
+GROUP BY samples.metric, position;

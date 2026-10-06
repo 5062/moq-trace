@@ -3,7 +3,9 @@
 Coverage reads STREAM frames from `coverage_frame_source`, which names each
 frame's connection, direction, stream, byte range, the instant it completed its
 bytes, and its packet's ID and start. The trace provides one source and the
-decrypted packet capture another, and both resolve with the same rule.
+decrypted packet capture another, and both resolve with the same rule into a
+family of tables of one layout: `<family>`, `<family>_frames`, and
+`<family>_packets`.
 """
 
 from __future__ import annotations
@@ -45,100 +47,43 @@ def _validate_targets(connection: duckdb.DuckDBPyConnection) -> None:
         raise TraceError(f"object trace {empty} has an empty transport range")
 
 
-def _stage_frames(connection: duckdb.DuckDBPyConnection) -> None:
-    """Stage every successful STREAM frame overlapping a target in `coverage_frames`.
+def _resolve_targets(connection: duckdb.DuckDBPyConnection, family: str = "model.coverage") -> None:
+    """Materialize coverage of the staged `coverage_targets` into the `family` tables.
 
-    Each row pairs one object with one frame, clips the frame to the object's
-    range, and numbers the object's frames by `seq` in the order they completed
-    their bytes, then by packet trace ID and offsets. A TX frame completes when
-    the send carrying its packet completes, so TX frames follow send order even
-    when a packet encoded early is sent late. An RX frame completes when the
-    stream's receive buffer accepts it.
-
-    A connection carries few streams, so matching frames to objects on the stream
-    alone compares every object with every frame on it, and the work grows with
-    the square of the capture length. Both sides are split into the offset
-    buckets they cover and also matched on the bucket. An overlapping pair shares
-    the bucket where its overlap begins, and only that bucket reports it, so each
-    pair appears exactly once.
-    """
-
-    connection.execute(
-        sql.read("coverage/frames-stage"),
-        {"bucket": _BUCKET_BYTES},
-    )
-
-
-def _stage_completion(connection: duckdb.DuckDBPyConnection) -> None:
-    """Stage the `seq` of the frame that completes each target in `coverage_completion`.
-
-    Cutting a target at every clipped frame edge yields segments that each frame
-    covers entirely or not at all. A segment is first covered by the lowest `seq`
-    among the frames spanning it, and the target is complete once its last
-    segment is, so the completing frame is the maximum of those first covers.
-    This is the frame at which subtracting frames in `seq` order leaves no gap,
-    without replaying the frames one at a time. A target with a segment no frame
-    covers has a NULL `complete_seq`.
-
-    Segments are matched to frames on the bucket holding the segment start, so a
-    large object compares each segment only with the frames near it.
-    """
-
-    connection.execute(
-        sql.read("coverage/completion-stage"),
-        {"bucket": _BUCKET_BYTES},
-    )
-
-
-def _resolve_targets(connection: duckdb.DuckDBPyConnection, tables: str = "model.coverage") -> None:
-    """Materialize coverage for the staged `coverage_targets` into the `tables` family.
-
-    Each object records the first packet in completion order, the packet that
-    completed its byte range, and every packet up to that one in `seq` order.
-    Frames after the completing one, such as late retransmissions, do not
-    extend the object. The object's origin is the earliest packet start among
-    those packets, chosen apart from the completion order.
+    Reads frames from `coverage_frame_source`. The stages it builds stay on the
+    connection until :func:`resolve` drops them.
     """
 
     _validate_targets(connection)
-    _stage_frames(connection)
-    _stage_completion(connection)
+    for stage in ("coverage/frames-stage", "coverage/completion-stage"):
+        connection.execute(sql.read(stage), {"bucket": _BUCKET_BYTES})
     incomplete = _first_trace(
         connection,
-        """SELECT trace_id FROM coverage_completion
-           WHERE complete_seq IS NULL ORDER BY trace_id LIMIT 1""",
+        "SELECT trace_id FROM coverage_completion WHERE complete_seq IS NULL ORDER BY trace_id LIMIT 1",
     )
     if incomplete is not None:
         raise TraceError(f"object trace {incomplete} does not have complete packet coverage")
-    # Every family shares one layout: `<tables>`, `<tables>_frames`, and `<tables>_packets`.
     for name in ("coverage/schema", "coverage/populate"):
-        connection.execute(sql.read(name).replace("model.coverage", tables))
+        connection.execute(sql.read(name).replace("{coverage}", family))
 
 
-def _resolve(connection: duckdb.DuckDBPyConnection, source: str, tables: str) -> None:
-    """Own the temporary source and stages for one coverage calculation."""
+def resolve(
+    connection: duckdb.DuckDBPyConnection,
+    source: str = "coverage/trace-source",
+    family: str = "model.coverage",
+) -> None:
+    """Materialize packet coverage for the selected objects and their copies.
+
+    `source` names the SQL defining `coverage_frame_source`: by default the
+    trace's own frames, resolved into `model.coverage`. The decrypted capture
+    passes its own source and family.
+    """
 
     try:
         connection.execute(sql.read(source))
         connection.execute(sql.read("coverage/targets-stage"))
-        _resolve_targets(connection, tables)
+        _resolve_targets(connection, family)
     finally:
         for table in ("coverage_completion", "coverage_frames", "coverage_targets"):
             connection.execute(f"DROP TABLE IF EXISTS {table}")
         connection.execute("DROP VIEW IF EXISTS coverage_frame_source")
-
-
-def resolve(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize packet coverage for the trace model's selected object lifecycles."""
-
-    _resolve(connection, "coverage/trace-source", "model.coverage")
-
-
-def resolve_wire(connection: duckdb.DuckDBPyConnection) -> None:
-    """Materialize coverage from joined wire packets for the same selected objects.
-
-    Reads the trace model and ``network.wire_packets`` and
-    ``network.wire_stream_frames``. Source adaptation and staging are internal.
-    """
-
-    _resolve(connection, "wire/coverage-source", "network.wire_coverage")

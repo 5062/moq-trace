@@ -94,7 +94,7 @@ def _copy_rows(
     return connection.execute(
         f"""SELECT {columns} FROM metrics.samples
             WHERE metric IN ({names}){scope}
-            GROUP BY process_id, rx_trace_id, tx_trace_id
+            GROUP BY rx_trace_id, tx_trace_id
             HAVING count(DISTINCT metric) = {len(metrics)}""",
         [run_id] if run_id is not None else [],
     ).fetchall()

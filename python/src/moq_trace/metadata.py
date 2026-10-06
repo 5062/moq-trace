@@ -78,15 +78,6 @@ class TransportCapabilities(ArtifactModel):
     packet_phases: tuple[str, ...]
 
 
-class Population(ArtifactModel):
-    """Row population each metric domain is drawn from."""
-
-    object: str
-    quic_object: str
-    packet: str
-    timeline: str
-
-
 class Counts(ArtifactModel):
     """Row counts that let a reader size the analysis without querying it."""
 
@@ -153,7 +144,6 @@ class RunMetadata(ArtifactModel):
     window: Window
     transport_profile: TransportProfile
     transport_capabilities: TransportCapabilities
-    population: Population
     counts: Counts
     processes: Processes
     protocol: str | None = None

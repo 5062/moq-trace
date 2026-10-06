@@ -21,14 +21,14 @@ import ipaddress
 import json
 import pathlib
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import duckdb
 import pyarrow as pa
 
 from ..decode import pcap
 from ..errors import TraceError
-from ..manifest import NetworkManifest, read_manifest
+from ..manifest import NetworkManifest
 from ..metadata import NetworkCapabilities
 from . import sql
 
@@ -37,9 +37,6 @@ _MONOTONIC_START = re.compile(r"monotonic_start_ns=(\d+)")
 # seconds; Quinn 0.11, for one, serializes `Duration::as_secs_f32`. A producer
 # declares that with `rtt_unit=s` beside its start instant.
 _RTT_UNIT = re.compile(r"rtt_unit=(ms|s)\b")
-
-# Bound event rows retained between Arrow inserts.
-_BATCH_ROWS = 8192
 
 
 def _endpoint(address: str, port: int) -> str:
@@ -123,34 +120,11 @@ def read_qlog(path: pathlib.Path) -> Iterator[tuple[int, str, str, dict]]:
         yield start_ns + round(float(time_ms) * 1_000_000), connection, name, data
 
 
-def _load(
-    connection: duckdb.DuckDBPyConnection,
-    table: str,
-    columns: pa.Schema,
-    rows: list[tuple],
-) -> None:
-    """Materialize typed rows in DuckDB, including an empty table."""
-
-    batch = pa.Table.from_arrays(
-        [pa.array([row[index] for row in rows], type=field.type) for index, field in enumerate(columns)],
-        schema=columns,
-    )
-    connection.register("network_batch", batch)
-    try:
-        connection.execute(
-            f"INSERT INTO {table} SELECT "
-            "(SELECT process_id FROM processes WHERE analyzed)::UINTEGER, * FROM network_batch"
-        )
-    finally:
-        connection.unregister("network_batch")
-
-
 _DATAGRAM_COLUMNS = pa.schema(
     [
         ("elapsed_ns", pa.int64()),
         ("direction", pa.string()),
         ("peer", pa.string()),
-        ("role", pa.string()),
         ("bytes", pa.int32()),
     ]
 )
@@ -163,7 +137,6 @@ _RECOVERY_COLUMNS = pa.schema(
         ("latest_rtt_ns", pa.float64()),
         ("congestion_window", pa.int64()),
         ("bytes_in_flight", pa.int64()),
-        ("role", pa.string()),
     ]
 )
 _LOSS_COLUMNS = pa.schema(
@@ -173,7 +146,6 @@ _LOSS_COLUMNS = pa.schema(
         ("packet_number", pa.uint64()),
         ("bytes", pa.int32()),
         ("trigger", pa.string()),
-        ("role", pa.string()),
     ]
 )
 
@@ -224,43 +196,46 @@ def _assign_roles(
         for table, key in tables:
             connection.execute(
                 f"UPDATE {table} AS target SET role = roles.role FROM network_roles AS roles "
-                f"WHERE target.{key} = roles.key "
-                "AND target.process_id = (SELECT process_id FROM processes WHERE analyzed)"
+                f"WHERE target.{key} = roles.key"
             )
     finally:
         connection.unregister("network_roles")
 
 
-def _ingest_datagrams(
-    connection: duckdb.DuckDBPyConnection,
-    manifest: NetworkManifest,
-    root: pathlib.Path,
-    origin_ns: int,
-) -> None:
-    """Store throughput in bounded batches and assign peer roles.
+class _Throughput:
+    """Datagram totals per peer, and the throughput rows of one capture.
 
-    Totals include datagrams before the origin, even though those rows are not stored.
+    Totals include datagrams before the origin, even though those rows are not
+    stored, so a peer's role reflects all of its traffic.
     """
 
-    if manifest.pcap is None:
-        return
-    inbound: dict[str, int] = {}
-    outbound: dict[str, int] = {}
-    first_seen: dict[str, int] = {}
-    rows = []
-    for datagram in pcap.read_datagrams(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes):
+    def __init__(self, connection: duckdb.DuckDBPyConnection, realtime_offset_ns: int, origin_ns: int) -> None:
+        self.connection = connection
+        self.realtime_offset_ns = realtime_offset_ns
+        self.origin_ns = origin_ns
+        self.inbound: dict[str, int] = {}
+        self.outbound: dict[str, int] = {}
+        self.first_seen: dict[str, int] = {}
+        self.rows = sql.Rows(connection, "network.datagrams", _DATAGRAM_COLUMNS)
+
+    def count(self, datagram: pcap.Datagram) -> pcap.Datagram:
+        """Count one datagram and store it when it falls after the origin, then pass it on."""
+
         peer = _endpoint(*datagram.peer)
-        totals = inbound if datagram.from_peer else outbound
+        totals = self.inbound if datagram.from_peer else self.outbound
         totals[peer] = totals.get(peer, 0) + datagram.payload_bytes
-        first_seen.setdefault(peer, datagram.realtime_ns)
-        elapsed_ns = datagram.realtime_ns - manifest.realtime_offset_ns - origin_ns
+        self.first_seen.setdefault(peer, datagram.realtime_ns)
+        elapsed_ns = datagram.realtime_ns - self.realtime_offset_ns - self.origin_ns
         if elapsed_ns >= 0:
-            rows.append((elapsed_ns, "ingress" if datagram.from_peer else "egress", peer, None, datagram.payload_bytes))
-            if len(rows) >= _BATCH_ROWS:
-                _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, rows)
-                rows.clear()
-    _load(connection, "network.datagrams", _DATAGRAM_COLUMNS, rows)
-    _assign_roles(connection, (("network.datagrams", "peer"),), _roles(inbound, outbound, first_seen, numbered=False))
+            self.rows.append((elapsed_ns, "ingress" if datagram.from_peer else "egress", peer, datagram.payload_bytes))
+        return datagram
+
+    def store(self) -> None:
+        """Store the remaining rows and assign peer roles from the complete totals."""
+
+        self.rows.flush()
+        roles = _roles(self.inbound, self.outbound, self.first_seen, numbered=False)
+        _assign_roles(self.connection, (("network.datagrams", "peer"),), roles)
 
 
 def _ingest_qlog(
@@ -275,8 +250,8 @@ def _ingest_qlog(
     received: dict[str, int] = {}
     sent: dict[str, int] = {}
     first_seen: dict[str, int] = {}
-    recovery = []
-    losses = []
+    recovery = sql.Rows(connection, "network.recovery", _RECOVERY_COLUMNS)
+    losses = sql.Rows(connection, "network.losses", _LOSS_COLUMNS)
     for path in files:
         for monotonic_ns, key, name, data in read_qlog(path):
             first_seen.setdefault(key, monotonic_ns)
@@ -286,6 +261,8 @@ def _ingest_qlog(
             elif name == "transport:packet_sent":
                 sent[key] = sent.get(key, 0) + 1
             elif name == "recovery:metrics_updated":
+                # Recovery values settled before the origin still hold inside
+                # the window, so they are kept at negative times.
                 recovery.append(
                     (
                         elapsed_ns,
@@ -296,51 +273,54 @@ def _ingest_qlog(
                         ),
                         data.get("congestion_window"),
                         data.get("bytes_in_flight"),
-                        None,
                     )
                 )
-            elif name == "recovery:packet_lost":
+            elif name == "recovery:packet_lost" and elapsed_ns >= 0:
                 header = data.get("header") or {}
-                if elapsed_ns >= 0:
-                    losses.append(
-                        (elapsed_ns, key, header.get("packet_number"), header.get("length"), data.get("trigger"), None)
-                    )
-            for table, columns, rows in (
-                ("network.recovery", _RECOVERY_COLUMNS, recovery),
-                ("network.losses", _LOSS_COLUMNS, losses),
-            ):
-                if len(rows) >= _BATCH_ROWS:
-                    _load(connection, table, columns, rows)
-                    rows.clear()
+                losses.append((elapsed_ns, key, header.get("packet_number"), header.get("length"), data.get("trigger")))
+    recovery.flush()
+    losses.flush()
     roles = _roles(received, sent, first_seen, numbered=True)
-    for table, columns, rows in (
-        ("network.recovery", _RECOVERY_COLUMNS, recovery),
-        ("network.losses", _LOSS_COLUMNS, losses),
-    ):
-        # Recovery values settled before the origin still hold inside the window.
-        _load(connection, table, columns, rows)
     _assign_roles(connection, (("network.recovery", "connection"), ("network.losses", "connection")), roles)
     return len(roles)
 
 
 def ingest(
     connection: duckdb.DuckDBPyConnection,
-    manifest_path: pathlib.Path,
+    manifest: NetworkManifest,
+    root: pathlib.Path,
     origin_ns: int,
+    decrypt: Callable[[Iterator[pcap.Datagram]], int] | None = None,
 ) -> NetworkCapabilities:
     """Load a run's network capture into tables on the analysis time axis.
 
-    Every table measures `elapsed_ns` from `origin_ns`, the trace instant the
-    latency samples are measured from, so network and latency figures share one
-    axis. Datagrams and losses before the origin are dropped. Recovery updates
-    before it are kept at negative times, because their values hold until the
-    next update.
+    `root` is the directory the manifest's paths are relative to. Every table
+    measures `elapsed_ns` from `origin_ns`, the trace instant the latency
+    samples are measured from, so network and latency figures share one axis.
+    Datagrams and losses before the origin are dropped. Recovery updates before
+    it are kept at negative times, because their values hold until the next
+    update.
+
+    `decrypt`, when given, consumes the capture's datagrams as throughput counts
+    them, so a decrypting reader shares this pass over the capture, and returns
+    how many packets it decrypted.
     """
 
     connection.execute(sql.read("network/schema"))
-    manifest = read_manifest(manifest_path)
-    root = manifest_path.parent
-    _ingest_datagrams(connection, manifest, root, origin_ns)
-    packets = manifest.pcap is not None
+    wire_packets = 0
+    if manifest.pcap is not None:
+        throughput = _Throughput(connection, manifest.realtime_offset_ns, origin_ns)
+        datagrams = map(
+            throughput.count,
+            pcap.read_datagrams(root / manifest.pcap, manifest.relay_port, manifest.loopback_ifindexes),
+        )
+        if decrypt is None:
+            for _ in datagrams:
+                pass
+        else:
+            wire_packets = decrypt(datagrams)
+        throughput.store()
     qlog_connections = _ingest_qlog(connection, manifest, root, origin_ns)
-    return NetworkCapabilities(packets=packets, wire_packets=0, qlog_connections=qlog_connections)
+    return NetworkCapabilities(
+        packets=manifest.pcap is not None, wire_packets=wire_packets, qlog_connections=qlog_connections
+    )

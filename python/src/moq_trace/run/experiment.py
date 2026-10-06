@@ -116,7 +116,7 @@ def _validate_workload(database: pathlib.Path) -> None:
     with open_artifact(database, "run") as artifact:
         count, first, last = artifact.connection.execute(
             "SELECT count(DISTINCT group_id), min(group_id), max(group_id) "
-            "FROM model.selected_objects JOIN model.objects USING(process_id, trace_id)"
+            "FROM model.selected_objects JOIN model.objects USING (trace_id)"
         ).fetchone()
         if count != last - first + 1:
             raise ExperimentError("steady-state groups are not contiguous")

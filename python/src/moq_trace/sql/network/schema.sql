@@ -1,7 +1,6 @@
 CREATE SCHEMA IF NOT EXISTS network;
 
 CREATE TABLE network.datagrams (
-    process_id UINTEGER NOT NULL,
     elapsed_ns BIGINT NOT NULL,
     direction VARCHAR,
     peer VARCHAR,
@@ -10,7 +9,6 @@ CREATE TABLE network.datagrams (
 );
 
 CREATE TABLE network.recovery (
-    process_id UINTEGER NOT NULL,
     elapsed_ns BIGINT NOT NULL,
     connection VARCHAR,
     smoothed_rtt_ns DOUBLE,
@@ -22,7 +20,6 @@ CREATE TABLE network.recovery (
 );
 
 CREATE TABLE network.losses (
-    process_id UINTEGER NOT NULL,
     elapsed_ns BIGINT NOT NULL,
     connection VARCHAR,
     packet_number UBIGINT,

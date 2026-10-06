@@ -16,7 +16,7 @@ sys.path.insert(0, str(SOURCE))
 import analysis_case  # noqa: E402
 from test_quic import _Peer, _stream  # noqa: E402
 
-from moq_trace.analysis import analyze, coverage, network, wire  # noqa: E402
+from moq_trace.analysis import analyze, coverage, sql, wire  # noqa: E402
 from moq_trace.analysis.artifact import open_artifact  # noqa: E402
 from moq_trace.decode import ctf, pcap, quic  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
@@ -159,8 +159,10 @@ class WireTests(unittest.TestCase):
         analyze._derive_samples(self.trace.connection, self.origin)
 
     def ingest(self, **overrides) -> int:
-        path = self.manifest(**overrides)
-        return wire.ingest(self.trace.connection, read_manifest(path), self.directory, self.origin)
+        manifest = read_manifest(self.manifest(**overrides))
+        capture = self.directory / manifest.pcap
+        datagrams = pcap.read_datagrams(capture, manifest.relay_port, manifest.loopback_ifindexes)
+        return wire.ingest(self.trace.connection, manifest, self.directory, self.origin, datagrams)
 
     def test_the_capture_joins_the_trace_and_measures_the_wire(self) -> None:
         output = self.analyze()
@@ -214,18 +216,14 @@ class WireTests(unittest.TestCase):
         reference = self.analyze()
         reference.rename(self.directory / "reference.duckdb")
         sizes = []
-        load = wire._load
+        flush = sql.Rows.flush
 
-        def record_load(connection, table, columns, rows):
-            if table in ("network.wire_packets", "network.wire_stream_frames"):
-                sizes.append(len(rows))
-            load(connection, table, columns, rows)
+        def record_flush(rows):
+            if rows.table in ("network.wire_packets", "network.wire_stream_frames"):
+                sizes.append(len(rows.rows))
+            flush(rows)
 
-        with (
-            mock.patch.object(wire, "_BATCH_ROWS", 1),
-            mock.patch.object(network, "_BATCH_ROWS", 1),
-            mock.patch.object(wire, "_load", record_load),
-        ):
+        with mock.patch.object(sql, "BATCH_ROWS", 1), mock.patch.object(sql.Rows, "flush", record_flush):
             batched = self.analyze()
         self.assertTrue(sizes)
         self.assertLessEqual(max(sizes), 1)
@@ -338,7 +336,7 @@ class WireTests(unittest.TestCase):
             )
         self.prepare()
         self.trace.connection.execute("UPDATE model.window SET end_ns = 500000")
-        self.trace.connection.execute(wire.sql.read("wire/schema"))
+        self.trace.connection.execute(sql.read("wire/schema"))
         states = [
             quic.Connection(
                 index=i,
@@ -352,13 +350,13 @@ class WireTests(unittest.TestCase):
             )
             for i in range(2)
         ]
-        wire._load(
+        _load(
             self.trace.connection,
             "network.wire_connections",
             wire._CONNECTION_COLUMNS,
             [(i, *RELAY, *SUBSCRIBER, True, 20000, 500000) for i in range(2)],
         )
-        wire._load(
+        _load(
             self.trace.connection,
             "network.wire_packets",
             wire._PACKET_COLUMNS,
@@ -371,7 +369,7 @@ class WireTests(unittest.TestCase):
                 (3, 1, "tx", 409000, "data", 2, 1201, 3, 0, 0),
             ],
         )
-        wire._load(
+        _load(
             self.trace.connection,
             "network.wire_stream_frames",
             wire._FRAME_COLUMNS,
@@ -385,7 +383,7 @@ class WireTests(unittest.TestCase):
             [(0, 2), (1, 3)],
         )
         # A packet that contradicts both complete sequences must be rejected.
-        wire._load(
+        _load(
             self.trace.connection,
             "network.wire_packets",
             wire._PACKET_COLUMNS,
@@ -416,6 +414,15 @@ class WireTests(unittest.TestCase):
         self.prepare()
         with self.assertRaisesRegex(TraceError, "no key logs"):
             self.ingest(key_logs=())
+
+
+def _load(connection, table: str, columns, rows: list[tuple]) -> None:
+    """Insert fixture rows into one wire table as ingest does."""
+
+    loaded = sql.Rows(connection, table, columns)
+    for row in rows:
+        loaded.append(row)
+    loaded.flush()
 
 
 if __name__ == "__main__":

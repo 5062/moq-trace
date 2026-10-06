@@ -57,7 +57,7 @@ class CoverageTests(ModelCase):
             self.connection.execute(
                 """SELECT origin_ns, packet_ids FROM (SELECT c.object_trace_id AS trace_id, c.origin_ns,
                 c.first_ns, c.complete_ns, list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids
-                FROM model.coverage c JOIN model.coverage_packets p USING(process_id, object_trace_id) GROUP
+                FROM model.coverage c JOIN model.coverage_packets p USING (object_trace_id) GROUP
                 BY ALL) WHERE trace_id = 1"""
             ).fetchone(),
             (90000, [3]),
@@ -101,6 +101,13 @@ class CoverageTests(ModelCase):
 
         with self.assertRaisesRegex(TraceError, "object trace 1 does not have complete packet coverage"):
             coverage.resolve(self.connection)
+
+    def _build_model(self) -> None:
+        """Pair the raw events into the model without validating them, as a bare coverage input."""
+
+        self.connection.execute("CREATE TYPE outcome AS ENUM ('success', 'malformed', 'dropped')")
+        self.connection.execute(sql.read("model/schema"))
+        self.connection.execute(sql.read("model/populate"))
 
     def insert_rows(self, table: str, rows: list[dict]) -> None:
         for row in rows:
@@ -190,13 +197,12 @@ class CoverageTests(ModelCase):
         self.insert_rows("quic_packet_start", packet_starts)
         self.insert_rows("quic_packet_end", packet_ends)
         self.insert_rows("quic_stream_frame", frames)
-        self.connection.execute("CREATE SCHEMA model")
+        self._build_model()
         self.connection.execute(
             """CREATE TEMP TABLE coverage_targets(trace_id UBIGINT, connection_id UBIGINT, direction VARCHAR,
-                   stream_id UBIGINT, stream_offset_start UBIGINT, stream_offset_end UBIGINT, process_id UINTEGER
-                   DEFAULT 0)"""
+                   stream_id UBIGINT, stream_offset_start UBIGINT, stream_offset_end UBIGINT)"""
         )
-        self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?, DEFAULT)", targets)
+        self.connection.executemany("INSERT INTO coverage_targets VALUES (?, ?, ?, ?, ?, ?)", targets)
         self.connection.execute(sql.read("coverage/trace-source"))
 
     def _plain_overlaps(self) -> list[tuple]:
@@ -211,7 +217,7 @@ class CoverageTests(ModelCase):
                       packet.trace_id, packet.start_ns,
                       CASE packet.direction WHEN 'tx' THEN packet.end_ns ELSE frame.timestamp_ns END AS completion_ns
                FROM coverage_targets AS object
-               JOIN packet_lifecycles AS packet
+               JOIN model.packets AS packet
                  ON packet.connection_id = object.connection_id
                 AND packet.direction = object.direction
                 AND packet.outcome = 'success'
@@ -231,7 +237,7 @@ class CoverageTests(ModelCase):
         self._random_coverage_trace(7, complete=False)
         expected = self._plain_overlaps()
         self.assertGreater(len(expected), 100)
-        coverage._stage_frames(self.connection)
+        self.connection.execute(sql.read("coverage/frames-stage"), {"bucket": coverage._BUCKET_BYTES})
         self.assertEqual(
             self.connection.execute(
                 """SELECT trace_id, offset_start, offset_end, packet_id, packet_start_ns, completion_ns
@@ -266,7 +272,7 @@ class CoverageTests(ModelCase):
                         """SELECT * FROM (SELECT c.object_trace_id AS trace_id, c.origin_ns,
                             c.first_ns, c.complete_ns,
                         list(p.packet_trace_id ORDER BY p.ordinal) AS packet_ids FROM model.coverage c JOIN
-                        model.coverage_packets p USING(process_id, object_trace_id) GROUP BY ALL) ORDER BY
+                        model.coverage_packets p USING (object_trace_id) GROUP BY ALL) ORDER BY
                         trace_id"""
                     ).fetchall(),
                     expected,
@@ -275,10 +281,10 @@ class CoverageTests(ModelCase):
     def test_coverage_rejects_a_range_with_a_gap(self) -> None:
         self.packet(3, "rx", 1)
         self.connection.execute("UPDATE raw.quic_stream_frame SET offset_end = 8 WHERE trace_id = 3")
-        self.connection.execute("CREATE SCHEMA model")
+        self._build_model()
         self.connection.execute(
             """CREATE TEMP TABLE coverage_targets AS
-               SELECT 0::UINTEGER AS process_id, 1::UBIGINT AS trace_id, 1::UBIGINT AS connection_id, 'rx' AS direction,
+               SELECT 1::UBIGINT AS trace_id, 1::UBIGINT AS connection_id, 'rx' AS direction,
                       10::UBIGINT AS stream_id, 0::UBIGINT AS stream_offset_start,
                       16::UBIGINT AS stream_offset_end"""
         )

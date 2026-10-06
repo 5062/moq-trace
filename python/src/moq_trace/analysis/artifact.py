@@ -16,7 +16,7 @@ from . import sql
 
 # The on-disk schema version this tool writes and reads. An artifact of any other
 # version is rebuilt rather than migrated.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # The metadata schema each artifact kind must satisfy. A kind is an on-disk
 # identity rather than an internal detail, so metadata is validated when it is
@@ -71,38 +71,40 @@ def open_artifact(database: pathlib.Path, expected_kind: str | None = None) -> G
     never inspects a partially understood artifact.
     """
 
-    connection = None
     try:
         connection = duckdb.connect(str(database), read_only=True)
-        rows = connection.execute("SELECT kind, schema_version, value::VARCHAR FROM metadata").fetchall()
-        if len(rows) != 1:
-            raise TraceError("artifact metadata must contain exactly one row")
-        kind, version, encoded = rows[0]
-        if kind not in ARTIFACT_MODELS:
-            raise TraceError(f"unknown artifact kind {kind!r}; this tool reads {sorted(ARTIFACT_MODELS)}")
-        if version != SCHEMA_VERSION:
-            rebuild = (
-                "re-run moq-trace analyze on the retained CTF trace into a new output path; "
-                "if the trace is unavailable, capture a new run"
-                if kind == "run"
-                else "rebuild the comparison from rebuilt run artifacts"
-            )
-            raise TraceError(
-                f"{kind} artifact has schema version {version}, but this tool reads only {SCHEMA_VERSION}; {rebuild}"
-            )
-        if expected_kind is not None and kind != expected_kind:
-            raise TraceError(f"expected a {expected_kind} artifact, found {kind}")
-        value = _decode(str(kind), encoded)
-    except TraceError:
-        if connection is not None:
-            connection.close()
-        raise
-    except (OSError, duckdb.Error, TypeError, ValueError) as error:
-        if connection is not None:
-            connection.close()
+    except (OSError, duckdb.Error) as error:
         raise TraceError(f"failed to load analysis database {database}: {error}") from error
-
     try:
-        yield Artifact(connection, value)
+        yield Artifact(connection, _read_metadata(database, connection, expected_kind))
     finally:
         connection.close()
+
+
+def _read_metadata(
+    database: pathlib.Path, connection: duckdb.DuckDBPyConnection, expected_kind: str | None
+) -> RunMetadata | ComparisonMetadata:
+    """Validate an artifact's identity and decode its metadata."""
+
+    try:
+        rows = connection.execute("SELECT kind, schema_version, value::VARCHAR FROM metadata").fetchall()
+    except duckdb.Error as error:
+        raise TraceError(f"failed to load analysis database {database}: {error}") from error
+    if len(rows) != 1:
+        raise TraceError("artifact metadata must contain exactly one row")
+    kind, version, encoded = rows[0]
+    if kind not in ARTIFACT_MODELS:
+        raise TraceError(f"unknown artifact kind {kind!r}; this tool reads {sorted(ARTIFACT_MODELS)}")
+    if version != SCHEMA_VERSION:
+        rebuild = (
+            "re-run moq-trace analyze on the retained CTF trace into a new output path; "
+            "if the trace is unavailable, capture a new run"
+            if kind == "run"
+            else "rebuild the comparison from rebuilt run artifacts"
+        )
+        raise TraceError(
+            f"{kind} artifact has schema version {version}, but this tool reads only {SCHEMA_VERSION}; {rebuild}"
+        )
+    if expected_kind is not None and kind != expected_kind:
+        raise TraceError(f"expected a {expected_kind} artifact, found {kind}")
+    return _decode(str(kind), encoded)

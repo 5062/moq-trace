@@ -23,6 +23,7 @@ from __future__ import annotations
 import ipaddress
 import pathlib
 import re
+from collections.abc import Iterable
 
 import duckdb
 import pyarrow as pa
@@ -35,9 +36,6 @@ from . import coverage, sql
 # How far two samples of the realtime offset may differ, beyond their own
 # uncertainty, before the realtime clock counts as stepped.
 _CLOCK_STEP_NS = 1_000
-
-# Bound both packet and frame rows retained between Arrow inserts.
-_BATCH_ROWS = 8192
 
 _DROPPED = re.compile(r"(\d+) packets? dropped by (kernel|interface)")
 
@@ -114,21 +112,6 @@ _FRAME_COLUMNS = pa.schema(
 )
 
 
-def _load(connection: duckdb.DuckDBPyConnection, table: str, columns: pa.Schema, rows: list[tuple]) -> None:
-    batch = pa.Table.from_arrays(
-        [pa.array([row[index] for row in rows], type=field.type) for index, field in enumerate(columns)],
-        schema=columns,
-    )
-    connection.register("wire_batch", batch)
-    try:
-        connection.execute(
-            f"INSERT INTO {table} BY NAME SELECT "
-            "(SELECT process_id FROM processes WHERE analyzed)::UINTEGER AS process_id, * FROM wire_batch"
-        )
-    finally:
-        connection.unregister("wire_batch")
-
-
 def decrypt(manifest: NetworkManifest, root: pathlib.Path) -> quic.Decryptor:
     """Prepare a decryptor holding the secrets of every key log a manifest lists."""
 
@@ -151,8 +134,9 @@ def ingest(
     manifest: NetworkManifest,
     root: pathlib.Path,
     origin_ns: int,
+    datagrams: Iterable[pcap.Datagram],
 ) -> int:
-    """Decrypt the capture, join it to the trace, check both, and stage wire samples.
+    """Decrypt the capture's `datagrams`, join them to the trace, check both, and stage wire samples.
 
     Returns the number of decrypted packets. Must run after trace coverage is
     resolved and the sample stages exist, because it adds the wire coverage and
@@ -166,11 +150,11 @@ def ingest(
     decryptor = decrypt(manifest, root)
     connection.execute(sql.read("wire/schema"))
 
-    packets = []
-    frames = []
+    packets = sql.Rows(connection, "network.wire_packets", _PACKET_COLUMNS)
+    frames = sql.Rows(connection, "network.wire_stream_frames", _FRAME_COLUMNS)
     packet_count = 0
     capture_path = root / manifest.pcap
-    for datagram in pcap.read_datagrams(capture_path, manifest.relay_port, manifest.loopback_ifindexes):
+    for datagram in datagrams:
         monotonic_ns = datagram.realtime_ns - manifest.realtime_offset_ns
         for packet in decryptor.datagram(
             monotonic_ns, datagram.local, datagram.peer, datagram.from_peer, datagram.complete_payload(capture_path)
@@ -195,32 +179,28 @@ def ingest(
             )
             for frame in packet.stream_frames:
                 frames.append((packet_id, frame.stream_id, frame.offset_start, frame.offset_end, frame.fin))
-                if len(frames) >= _BATCH_ROWS:
-                    _load(connection, "network.wire_stream_frames", _FRAME_COLUMNS, frames)
-                    frames.clear()
-            if len(packets) >= _BATCH_ROWS:
-                _load(connection, "network.wire_packets", _PACKET_COLUMNS, packets)
-                packets.clear()
-    connections = [
-        (
-            state.index,
-            state.local[0],
-            state.local[1],
-            state.peer[0],
-            state.peer[1],
-            state.client_is_peer,
-            state.first_ns,
-            state.last_ns,
+    packets.flush()
+    frames.flush()
+    connections = sql.Rows(connection, "network.wire_connections", _CONNECTION_COLUMNS)
+    for state in decryptor.connections:
+        connections.append(
+            (
+                state.index,
+                state.local[0],
+                state.local[1],
+                state.peer[0],
+                state.peer[1],
+                state.client_is_peer,
+                state.first_ns,
+                state.last_ns,
+            )
         )
-        for state in decryptor.connections
-    ]
-    _load(connection, "network.wire_connections", _CONNECTION_COLUMNS, connections)
-    _load(connection, "network.wire_packets", _PACKET_COLUMNS, packets)
-    _load(connection, "network.wire_stream_frames", _FRAME_COLUMNS, frames)
+    connections.flush()
     _join_connections(connection, decryptor.connections)
     connection.execute(sql.read("wire/join"))
-    _check(connection, manifest)
-    coverage.resolve_wire(connection)
+    tolerance = manifest.realtime_offset_uncertainty_ns + _CLOCK_STEP_NS
+    sql.check(connection, "wire/checks", {"tolerance": tolerance}, "the packet capture disagrees with the trace: ")
+    coverage.resolve(connection, "wire/coverage-source", "network.wire_coverage")
     _check_coverage(connection)
     for stage in ("wire/object-samples-stage", "wire/packet-samples-stage"):
         connection.execute(sql.read(stage), {"origin": origin_ns})
@@ -285,40 +265,26 @@ def _join_connections(connection: duckdb.DuckDBPyConnection, states: list[quic.C
         )
 
 
-def _check(connection: duckdb.DuckDBPyConnection, manifest: NetworkManifest) -> None:
-    tolerance = manifest.realtime_offset_uncertainty_ns + _CLOCK_STEP_NS
-    defects = [
-        f"{defect}: {count}"
-        for defect, count in connection.execute(sql.read("wire/checks"), {"tolerance": tolerance}).fetchall()
-        if count
-    ]
-    if defects:
-        raise TraceError("the packet capture disagrees with the trace: " + "; ".join(defects))
-
-
 def _check_coverage(connection: duckdb.DuckDBPyConnection) -> None:
     """The trace and the wire must choose the same packets for every object and copy."""
 
     disagreements = connection.execute(
         """WITH trace AS (
-             SELECT process_id, object_trace_id, list(packet_trace_id ORDER BY packet_trace_id) AS packets
+             SELECT object_trace_id, list(packet_trace_id ORDER BY packet_trace_id) AS packets
              FROM model.coverage_packets GROUP BY ALL
            ), wire AS (
-             SELECT coverage.process_id, coverage.object_trace_id,
-                    list(packet.trace_id ORDER BY packet.trace_id) AS packets
+             SELECT coverage.object_trace_id, list(packet.trace_id ORDER BY packet.trace_id) AS packets
              FROM network.wire_coverage_packets AS coverage
-             JOIN network.wire_packets AS packet
-               ON packet.process_id = coverage.process_id AND packet.packet_id = coverage.packet_trace_id
+             JOIN network.wire_packets AS packet ON packet.packet_id = coverage.packet_trace_id
              GROUP BY ALL
            ), completing AS (
              SELECT trace.object_trace_id
              FROM model.coverage AS trace
-             JOIN network.wire_coverage AS wire USING (process_id, object_trace_id)
-             JOIN network.wire_packets AS packet
-               ON packet.process_id = wire.process_id AND packet.packet_id = wire.complete_packet_trace_id
+             JOIN network.wire_coverage AS wire USING (object_trace_id)
+             JOIN network.wire_packets AS packet ON packet.packet_id = wire.complete_packet_trace_id
              WHERE packet.trace_id IS DISTINCT FROM trace.complete_packet_trace_id
            )
-           SELECT (SELECT count(*) FROM trace FULL JOIN wire USING (process_id, object_trace_id)
+           SELECT (SELECT count(*) FROM trace FULL JOIN wire USING (object_trace_id)
                    WHERE trace.packets IS DISTINCT FROM wire.packets),
                   (SELECT count(*) FROM completing)"""
     ).fetchone()

@@ -9,7 +9,6 @@ CREATE TABLE metrics.definitions (
 );
 
 CREATE TABLE metrics.samples (
-    process_id UINTEGER NOT NULL,
     metric VARCHAR NOT NULL,
     rx_trace_id UBIGINT,
     tx_trace_id UBIGINT,
@@ -21,7 +20,6 @@ CREATE TABLE metrics.samples (
 );
 
 CREATE TABLE metrics.statistics (
-    process_id UINTEGER NOT NULL,
     metric VARCHAR NOT NULL,
     count UBIGINT NOT NULL,
     mean_ns DOUBLE NOT NULL,
@@ -29,17 +27,16 @@ CREATE TABLE metrics.statistics (
     p95_ns DOUBLE NOT NULL,
     p99_ns DOUBLE NOT NULL,
     max_ns BIGINT NOT NULL,
-    PRIMARY KEY (process_id, metric)
+    PRIMARY KEY (metric)
 );
 
 CREATE TABLE metrics.phase_totals (
-    process_id UINTEGER NOT NULL,
     subject subject NOT NULL,
     direction direction NOT NULL,
     trace_id UBIGINT NOT NULL,
     phase VARCHAR NOT NULL,
     total_ns BIGINT NOT NULL,
-    PRIMARY KEY (process_id, subject, trace_id, phase)
+    PRIMARY KEY (subject, trace_id, phase)
 );
 
 -- Object statistics split by the object's position in its group. Every group
@@ -47,7 +44,6 @@ CREATE TABLE metrics.phase_totals (
 -- objects in the group reuse. Packet samples belong to no single object and
 -- have no position.
 CREATE TABLE metrics.position_statistics (
-    process_id UINTEGER NOT NULL,
     metric VARCHAR NOT NULL,
     position VARCHAR NOT NULL CHECK (position IN ('first', 'later')),
     count UBIGINT NOT NULL,
@@ -56,5 +52,16 @@ CREATE TABLE metrics.position_statistics (
     p95_ns DOUBLE NOT NULL,
     p99_ns DOUBLE NOT NULL,
     max_ns BIGINT NOT NULL,
-    PRIMARY KEY (process_id, metric, position)
+    PRIMARY KEY (metric, position)
+);
+
+-- The inbound objects whose slowest copy lies nearest each summary statistic of
+-- every object's slowest copy, which the timeline figure draws.
+CREATE TABLE metrics.timeline_selections (
+    selection_order INTEGER NOT NULL,
+    statistic VARCHAR NOT NULL,
+    target_ns DOUBLE NOT NULL,
+    rx_trace_id UBIGINT NOT NULL,
+    actual_ns BIGINT NOT NULL,
+    PRIMARY KEY (selection_order)
 );

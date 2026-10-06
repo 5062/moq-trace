@@ -15,7 +15,7 @@ records every measurement, stage medians, source paths, and library versions.
 Failures retain the subprocess error and any completed runs for inspection.
 
 Stage times include CTF decoding and insertion (`_ingest`), lifecycle validation,
-window selection, coverage (`resolve`), samples, metrics, and timelines. The total
+window selection, coverage (`resolve`), samples, and metrics with timelines. The total
 analysis time also includes setup, remaining checks, metadata, and checkpointing.
 Rendering is timed separately. Peak RSS is the worker's lifetime high-water mark
 in KiB on Linux, including rendering when requested. Database size is recorded

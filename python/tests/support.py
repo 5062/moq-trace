@@ -18,7 +18,6 @@ if str(SOURCE) not in sys.path:
 from moq_trace.analysis.artifact import SCHEMA_VERSION  # noqa: E402
 from moq_trace.metadata import (  # noqa: E402
     Counts,
-    Population,
     Processes,
     RunMetadata,
     TransportCapabilities,
@@ -35,12 +34,6 @@ def run_metadata(**overrides) -> RunMetadata:
         "window": Window(warmup_seconds=0.0, cooldown_seconds=0.0),
         "transport_profile": "generic",
         "transport_capabilities": TransportCapabilities(packet_phases=()),
-        "population": Population(
-            object="selected_object_copies",
-            quic_object="selected_object_copies",
-            packet="selected_object_packets",
-            timeline="slowest_copy_per_selected_object",
-        ),
         "counts": Counts(
             groups=1,
             packets=1,

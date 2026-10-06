@@ -14,10 +14,10 @@ import duckdb
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
-from moq_trace.analysis import network  # noqa: E402
+from moq_trace.analysis import network, sql  # noqa: E402
 from moq_trace.decode import pcap  # noqa: E402
 from moq_trace.errors import TraceError  # noqa: E402
-from moq_trace.manifest import MANIFEST, NetworkManifest  # noqa: E402
+from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest  # noqa: E402
 from moq_trace.metadata import Workload  # noqa: E402
 from moq_trace.plot import plot_network  # noqa: E402
 from moq_trace.plot.network import _recovery_series  # noqa: E402
@@ -252,9 +252,8 @@ class IngestTests(unittest.TestCase):
             )
 
             connection = duckdb.connect(":memory:")
-            connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
             try:
-                capabilities = network.ingest(connection, manifest, origin_ns)
+                capabilities = network.ingest(connection, read_manifest(manifest), root, origin_ns)
                 roles = connection.execute(
                     "SELECT direction, role, min(elapsed_ns) FROM network.datagrams GROUP BY ALL ORDER BY ALL"
                 ).fetchall()
@@ -325,16 +324,15 @@ class IngestTests(unittest.TestCase):
                 ).model_dump_json()
             )
             sizes = []
-            load = network._load
+            flush = sql.Rows.flush
 
-            def record_load(connection, table, columns, rows):
-                sizes.append(len(rows))
-                load(connection, table, columns, rows)
+            def record_flush(rows):
+                sizes.append(len(rows.rows))
+                flush(rows)
 
             with duckdb.connect(":memory:") as connection:
-                connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
-                with mock.patch.object(network, "_BATCH_ROWS", 1), mock.patch.object(network, "_load", record_load):
-                    network.ingest(connection, manifest, 10)
+                with mock.patch.object(sql, "BATCH_ROWS", 1), mock.patch.object(sql.Rows, "flush", record_flush):
+                    network.ingest(connection, read_manifest(manifest), root, 10)
                 self.assertLessEqual(max(sizes), 1)
                 self.assertEqual(
                     connection.execute("SELECT peer, role FROM network.datagrams ORDER BY elapsed_ns").fetchall(),
@@ -377,9 +375,8 @@ class IngestTests(unittest.TestCase):
                 ).model_dump_json()
             )
             connection = duckdb.connect(":memory:")
-            connection.execute("CREATE TABLE processes AS SELECT 0::UINTEGER AS process_id, true AS analyzed")
             try:
-                capabilities = network.ingest(connection, manifest, 0)
+                capabilities = network.ingest(connection, read_manifest(manifest), manifest.parent, 0)
                 counts = [
                     connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
                     for table in ("network.datagrams", "network.recovery", "network.losses")

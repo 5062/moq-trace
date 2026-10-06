@@ -3,7 +3,6 @@
 CREATE SCHEMA IF NOT EXISTS network;
 
 CREATE TABLE network.wire_connections (
-    process_id UINTEGER NOT NULL,
     connection UINTEGER NOT NULL,
     local_address VARCHAR NOT NULL,
     local_port USMALLINT NOT NULL,
@@ -14,11 +13,10 @@ CREATE TABLE network.wire_connections (
     first_ns BIGINT NOT NULL,
     last_ns BIGINT NOT NULL,
     trace_connection_id UBIGINT,
-    PRIMARY KEY (process_id, connection)
+    PRIMARY KEY (connection)
 );
 
 CREATE TABLE network.wire_packets (
-    process_id UINTEGER NOT NULL,
     packet_id UBIGINT NOT NULL,
     connection UINTEGER NOT NULL,
     -- `rx` for a packet the relay received, `tx` for one it sent.
@@ -34,14 +32,25 @@ CREATE TABLE network.wire_packets (
     segment UINTEGER NOT NULL,
     packet_index UINTEGER NOT NULL,
     trace_id UBIGINT,
-    PRIMARY KEY (process_id, packet_id)
+    PRIMARY KEY (packet_id)
 );
 
 CREATE TABLE network.wire_stream_frames (
-    process_id UINTEGER NOT NULL,
     packet_id UBIGINT NOT NULL,
     stream_id UBIGINT NOT NULL,
     offset_start UBIGINT NOT NULL,
     offset_end UBIGINT NOT NULL,
     fin BOOLEAN NOT NULL
 );
+
+-- Each packet's nonempty STREAM ranges in one comparable list, on the wire and
+-- in the trace, which the connection join and the checks compare.
+CREATE TEMP VIEW wire_frame_lists AS
+SELECT packet_id,
+       list((stream_id, offset_start, offset_end) ORDER BY stream_id, offset_start, offset_end) AS frames
+FROM network.wire_stream_frames WHERE offset_start < offset_end GROUP BY ALL;
+
+CREATE TEMP VIEW trace_frame_lists AS
+SELECT trace_id,
+       list((stream_id, offset_start, offset_end) ORDER BY stream_id, offset_start, offset_end) AS frames
+FROM quic_stream_frame WHERE offset_start < offset_end GROUP BY ALL;

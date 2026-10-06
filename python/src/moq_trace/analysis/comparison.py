@@ -18,6 +18,17 @@ from .artifact import open_artifact, write_metadata
 # The comparison artifact a bench output directory holds beside its runs.
 SNAPSHOT = "comparison.duckdb"
 
+# The run tables a comparison copies from the attached run, each under its own
+# name with `run_id` prepended. `processes` keeps only the analyzed process.
+_SNAPSHOT_TABLES = {
+    "processes": "SELECT * FROM run.processes WHERE analyzed",
+    "metrics.definitions": "SELECT * FROM run.metrics.definitions",
+    "metrics.samples": "SELECT * FROM run.metrics.samples",
+    "metrics.phase_totals": "SELECT * FROM run.metrics.phase_totals",
+    "metrics.statistics": "SELECT * FROM run.metrics.statistics",
+    "metrics.position_statistics": "SELECT * FROM run.metrics.position_statistics",
+}
+
 
 def write_comparison(
     output: pathlib.Path,
@@ -66,20 +77,16 @@ def write_comparison(
                             artifact.metadata.model_dump_json(),
                         ],
                     )
-                    for table in (
-                        "processes",
-                        "metrics.definitions",
-                        "metrics.samples",
-                        "metrics.phase_totals",
-                        "metrics.statistics",
-                        "metrics.position_statistics",
-                    ):
-                        query = f"SELECT * FROM {table}" + (" WHERE analyzed" if table == "processes" else "")
-                        connection.register("snapshot", artifact.connection.execute(query).arrow())
-                        try:
-                            connection.execute(f"INSERT INTO {table} SELECT ?::UINTEGER, * FROM snapshot", [run_id])
-                        finally:
-                            connection.unregister("snapshot")
+                    path = str(source).replace("'", "''")
+                    connection.execute(f"ATTACH '{path}' AS run (READ_ONLY)")
+                    try:
+                        for table, query in _SNAPSHOT_TABLES.items():
+                            # The first run gives each table its layout, so a
+                            # comparison never restates the run schema.
+                            copy = f"CREATE TABLE {table} AS" if run_id == 0 else f"INSERT INTO {table} BY NAME"
+                            connection.execute(f"{copy} SELECT {run_id}::UINTEGER AS run_id, * FROM ({query})")
+                    finally:
+                        connection.execute("DETACH run")
                     entries.append(ComparisonRun(run_id=run_id))
             write_metadata(connection, ComparisonMetadata(dimension=dimension, runs=tuple(entries)))
             connection.execute("CHECKPOINT")

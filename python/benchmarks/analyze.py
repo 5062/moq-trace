@@ -48,7 +48,6 @@ def measure(args: argparse.Namespace) -> dict:
         (analyze, "_derive_samples"),
         (analyze, "_ingest_network"),
         (analyze, "_define_metrics"),
-        (analyze, "_define_timelines"),
     )
     started = time.perf_counter()
     with contextlib.ExitStack() as stack:

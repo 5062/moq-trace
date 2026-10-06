@@ -37,17 +37,15 @@ class ConfigurationTests(unittest.TestCase):
                 write_metadata(connection, run_metadata())
                 connection.execute("CREATE SCHEMA model")
                 connection.execute(
-                    """CREATE TABLE model.objects AS SELECT 0 AS process_id,
-                       unnest([4, 6]) AS trace_id, unnest([4, 6]) AS group_id"""
+                    """CREATE TABLE model.objects AS
+                       SELECT unnest([4, 6]) AS trace_id, unnest([4, 6]) AS group_id"""
                 )
-                connection.execute(
-                    "CREATE TABLE model.selected_objects AS SELECT process_id, trace_id FROM model.objects"
-                )
+                connection.execute("CREATE TABLE model.selected_objects AS SELECT trace_id FROM model.objects")
             with self.assertRaisesRegex(ExperimentError, "groups are not contiguous"):
                 _validate_workload(database)
             with duckdb.connect(str(database)) as connection:
-                connection.execute("INSERT INTO model.objects VALUES (0, 5, 5)")
-                connection.execute("INSERT INTO model.selected_objects VALUES (0, 5)")
+                connection.execute("INSERT INTO model.objects VALUES (5, 5)")
+                connection.execute("INSERT INTO model.selected_objects VALUES (5)")
             _validate_workload(database)
 
     def test_the_relay_certificate_is_a_self_signed_localhost_pair(self) -> None:

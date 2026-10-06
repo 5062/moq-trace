@@ -20,7 +20,7 @@ sys.path.insert(0, str(SOURCE))
 import analysis_case  # noqa: E402
 from support import run_metadata  # noqa: E402
 
-from moq_trace.analysis import analyze, coverage  # noqa: E402
+from moq_trace.analysis import analyze, coverage, sql  # noqa: E402
 from moq_trace.analysis.artifact import open_artifact, write_metadata  # noqa: E402
 from moq_trace.analysis.comparison import bench_runs, snapshot_bench, write_comparison  # noqa: E402
 from moq_trace.decode import ctf  # noqa: E402
@@ -145,13 +145,12 @@ class ArtifactTests(unittest.TestCase):
         for scenario, baseline in expected.items():
             with self.subTest(scenario=scenario), fixture(scenario) as trace:
                 trace._derive_all()
-                analyze._define_timelines(trace.connection)
                 queries = {
                     "samples": """SELECT domain, metric, elapsed_ns, value_ns FROM metrics.samples
                         JOIN metrics.definitions USING(metric) ORDER BY ALL""",
                     "coverage": """SELECT c.object_trace_id, origin_ns, first_ns, complete_ns,
                         list(p.packet_trace_id ORDER BY ordinal) FROM model.coverage c
-                        JOIN model.coverage_packets p USING(process_id, object_trace_id) GROUP BY ALL ORDER BY 1""",
+                        JOIN model.coverage_packets p USING (object_trace_id) GROUP BY ALL ORDER BY 1""",
                     "selections": """SELECT selection_order, statistic, target_ns, rx_trace_id, actual_ns
                         FROM metrics.timeline_selections ORDER BY selection_order""",
                 }
@@ -185,7 +184,7 @@ class ArtifactTests(unittest.TestCase):
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
             with open_artifact(output) as artifact:
-                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (6,))
+                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (7,))
                 self.assertEqual(artifact.connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,)
@@ -267,7 +266,7 @@ class ArtifactTests(unittest.TestCase):
             )
             trace.connection.execute("UPDATE metrics.samples SET span_id = NULL WHERE span_id = 900")
             with self.assertRaisesRegex(TraceError, "invalid identity"):
-                analyze._check(trace.connection, "checks/samples")
+                sql.check(trace.connection, "checks/samples")
 
     def test_raw_duplicate_and_unmatched_boundaries_cannot_be_hidden_by_pairing(self):
         for defect in ("duplicate", "unmatched"):
@@ -302,13 +301,13 @@ class ArtifactTests(unittest.TestCase):
             ctf._batch("udp_socket_end", [[value] for value in row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
-        for version in (5, 7):
+        for version in (6, 8):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "analysis.duckdb"
                 with duckdb.connect(str(output)) as connection:
                     write_metadata(connection, run_metadata())
                     connection.execute("UPDATE metadata SET schema_version = ?", [version])
-                expected = f"schema version {version}, .* reads only 6; .*new output path"
+                expected = f"schema version {version}, .* reads only 7; .*new output path"
                 with self.assertRaisesRegex(TraceError, expected):
                     with open_artifact(output):
                         pass
@@ -326,7 +325,7 @@ class ArtifactTests(unittest.TestCase):
             analyze._derive_samples(trace.connection, origin)
             # Exercise the totals' lifecycle filter independently of coverage's
             # earlier eligibility filter, which also excludes failed packets.
-            trace.connection.execute("CREATE OR REPLACE TEMP VIEW selected_packets AS SELECT * FROM packet_lifecycles")
+            trace.connection.execute("CREATE OR REPLACE TEMP VIEW selected_packets AS SELECT * FROM model.packets")
             analyze._define_metrics(trace.connection)
             self.assertEqual(
                 trace.connection.execute(
@@ -412,8 +411,8 @@ class ArtifactTests(unittest.TestCase):
                     [(16, 0), (16, 1)],
                 )
                 self.assertEqual(
-                    artifact.connection.execute("""SELECT run_id, process_id, count(*)
-                    FROM metrics.samples JOIN processes USING(run_id, process_id)
+                    artifact.connection.execute("""SELECT run_id, processes.process_id, count(*)
+                    FROM metrics.samples JOIN processes USING (run_id)
                     GROUP BY ALL ORDER BY run_id""").fetchall(),
                     [(0, 0, 14), (1, 0, 14)],
                 )

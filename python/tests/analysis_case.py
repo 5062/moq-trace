@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import unittest
@@ -21,6 +22,22 @@ from moq_trace.analysis.analyze import (  # noqa: E402
 )
 from moq_trace.decode import ctf  # noqa: E402
 
+# Every outcome label the providers declare, which a capture's metadata lists.
+OUTCOMES = (
+    "success",
+    "failed",
+    "abandoned",
+    "expired",
+    "dropped",
+    "reset",
+    "malformed",
+    "authentication_failed",
+    "pending",
+    "would_block",
+    "connection_reset",
+    "error",
+)
+
 
 class ModelCase(unittest.TestCase):
     """Build raw trace events and the analysis model they feed.
@@ -40,7 +57,6 @@ class ModelCase(unittest.TestCase):
         self.connection.execute(sql.read("model/processes"))
         self.connection.execute("INSERT INTO processes VALUES (0, 'fixture', 'test-host', 0, 0, 0, true)")
         _select_process(self.connection, 0, (0,))
-        self.connection.execute(sql.read("model/lifecycles-stage"))
 
     def prepare_model(self) -> None:
         """Validate fixture events through the same model-building path as analysis."""
@@ -213,16 +229,31 @@ class ModelCase(unittest.TestCase):
         origin = _select_window(self.connection, object_size=16, subscribers=1, warmup_seconds=0, cooldown_seconds=0)
         coverage.resolve(self.connection)
         _derive_samples(self.connection, origin)
-        return dict(self.connection.execute("SELECT metric, latency_ns FROM transport_wait_samples").fetchall())
+        return dict(
+            self.connection.execute(
+                """SELECT metric, value_ns FROM staged_samples
+                   WHERE metric IN ('send_wait', 'tx_repair') OR starts_with(metric, 'blocked_')"""
+            ).fetchall()
+        )
 
     def batches(self, input_path, expected_pids=None, batch_size=65_536):
-        """Yield the fixture tables where ingest would read batches from CTF."""
+        """Yield the fixture tables where ingest would read batches from CTF.
 
+        A capture's metadata lists the outcome labels its providers declare, so
+        the fixture's providers declare every label the fixture records.
+        """
+
+        recorded = self.connection.execute(
+            " UNION ".join(
+                f"SELECT outcome FROM raw.{name} WHERE outcome IS NOT NULL"
+                for name, schema in ctf.SCHEMAS.items()
+                if "outcome" in schema.names
+            )
+        ).fetchall()
+        outcomes = json.dumps(sorted(set(OUTCOMES) | {outcome for (outcome,) in recorded}))
         for name in ctf.SCHEMAS:
             batch = self.connection.execute(f"SELECT * EXCLUDE(process_id) FROM raw.{name}").to_arrow_table()
             yield (
                 name,
-                batch.replace_schema_metadata(
-                    {"capture": "fixture", "hostname": "test-host", "outcomes": '["success", "malformed", "dropped"]'}
-                ),
+                batch.replace_schema_metadata({"capture": "fixture", "hostname": "test-host", "outcomes": outcomes}),
             )
