@@ -49,7 +49,8 @@ DATA = "data"
 CLIENT = "client"
 SERVER = "server"
 
-_LONG_TYPES = {0: INITIAL, 1: ZERO_RTT, 2: HANDSHAKE, 3: "retry"}
+_LONG_SPACES = {0: INITIAL, 1: ZERO_RTT, 2: HANDSHAKE}
+_RETRY = 3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -117,11 +118,6 @@ class Keys:
         """Decrypt and authenticate a payload, raising `InvalidTag` on failure."""
 
         return self._aead.decrypt(self.nonce(packet_number), ciphertext, header)
-
-    def seal(self, packet_number: int, header: bytes, plaintext: bytes) -> bytes:
-        """Encrypt a payload, as the sender did."""
-
-        return self._aead.encrypt(self.nonce(packet_number), plaintext, header)
 
     def updated(self) -> Keys:
         """Return the keys of the next key generation."""
@@ -207,48 +203,39 @@ _SECRETS = {
 }
 
 
-def read_key_log(lines: Iterable[str], source: str = "key log") -> dict[bytes, dict[str, bytes]]:
-    """Parse NSS key log lines into secrets keyed by ClientHello random and label.
+def read_key_logs(logs: Iterable[tuple[str, Iterable[str]]]) -> dict[bytes, dict[str, bytes]]:
+    """Parse `(source, lines)` NSS key logs into secrets keyed by ClientHello random and label.
 
     Labels this analysis does not use, such as TLS 1.2 secrets or exporter
     secrets, are ignored. Two different secrets for one random and label are an
-    error, because they cannot both describe the connection.
+    error, whether one log or two hold them, because they cannot both describe
+    the connection.
     """
 
     secrets: dict[bytes, dict[str, bytes]] = {}
-    for number, line in enumerate(lines, 1):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split()
-        if len(fields) != 3:
-            raise TraceError(f"{source} line {number} is not `LABEL CLIENT_RANDOM SECRET`")
-        label, random_hex, secret_hex = fields
-        if label not in _SECRETS:
-            continue
-        try:
-            random, secret = bytes.fromhex(random_hex), bytes.fromhex(secret_hex)
-        except ValueError as error:
-            raise TraceError(f"{source} line {number} holds a value that is not hexadecimal") from error
-        known = secrets.setdefault(random, {})
-        if known.get(label, secret) != secret:
-            raise TraceError(f"{source} holds two different {label} secrets for one ClientHello random")
-        known[label] = secret
+    for source, lines in logs:
+        for number, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split()
+            if len(fields) != 3:
+                raise TraceError(f"{source} line {number} is not `LABEL CLIENT_RANDOM SECRET`")
+            label, random_hex, secret_hex = fields
+            if label not in _SECRETS:
+                continue
+            try:
+                random, secret = bytes.fromhex(random_hex), bytes.fromhex(secret_hex)
+            except ValueError as error:
+                raise TraceError(f"{source} line {number} holds a value that is not hexadecimal") from error
+            known = secrets.setdefault(random, {})
+            if known.get(label, secret) != secret:
+                raise TraceError(
+                    f"{source} line {number} makes the key logs hold two different {label} secrets "
+                    "for one ClientHello random"
+                )
+            known[label] = secret
     return secrets
-
-
-def merge_key_logs(logs: Iterable[Mapping[bytes, Mapping[str, bytes]]]) -> dict[bytes, dict[str, bytes]]:
-    """Merge parsed key logs, rejecting conflicting secrets."""
-
-    merged: dict[bytes, dict[str, bytes]] = {}
-    for log in logs:
-        for random, labels in log.items():
-            known = merged.setdefault(random, {})
-            for label, secret in labels.items():
-                if known.get(label, secret) != secret:
-                    raise TraceError(f"the key logs hold two different {label} secrets for one ClientHello random")
-                known[label] = secret
-    return merged
 
 
 @dataclasses.dataclass(frozen=True)
@@ -292,7 +279,6 @@ class Connection:
     peer: tuple[str, int]
     # Which endpoint sent the first client Initial: the peer or the local side.
     client_is_peer: bool
-    client_scid: bytes
     initial: dict[str, Keys]
     first_ns: int
     last_ns: int
@@ -318,6 +304,11 @@ class Connection:
 
         return CLIENT if from_peer == self.client_is_peer else SERVER
 
+    def receiver(self, from_peer: bool) -> str:
+        """Name the endpoint a datagram was sent to, given whether the peer sent it."""
+
+        return SERVER if from_peer == self.client_is_peer else CLIENT
+
 
 @dataclasses.dataclass(frozen=True)
 class _Decrypted:
@@ -331,8 +322,8 @@ class _Decrypted:
     new_connection: bool
     # The 1-RTT generation the packet used, which becomes current on commit.
     generation: int | None
-    # Connection IDs learned from the long header, applied on commit.
-    cids: tuple[tuple[str, bytes], ...]
+    # The sender's connection ID from a long header, applied on commit.
+    scid: bytes | None
 
 
 class Decryptor:
@@ -380,13 +371,13 @@ class Decryptor:
                 version = int.from_bytes(payload[position + 1 : position + 5], "big")
                 if version == 0:
                     # Version negotiation carries no packet number and fills its datagram.
-                    position = length if segment_size is None else min(segment_start + segment_size, length)
+                    position = end
                     continue
                 if version != VERSION_1:
                     raise TraceError(f"datagram {datagram} from {peer} uses QUIC version {version:#x}, not version 1")
-                if _LONG_TYPES[(first & 0x30) >> 4] == "retry":
+                if (first & 0x30) >> 4 == _RETRY:
                     self._retry(local, peer, payload[position:], from_peer, timestamp_ns)
-                    position = length if segment_size is None else min(segment_start + segment_size, length)
+                    position = end
                     continue
                 decrypted = self._long(timestamp_ns, local, peer, from_peer, payload, position)
             else:
@@ -396,7 +387,6 @@ class Decryptor:
                     if decrypted.end < length:
                         segment_size = decrypted.end - segment_start
                 else:
-                    end = min(segment_start + segment_size, length)
                     try:
                         decrypted = self._short(connection, from_peer, payload, position, end)
                     except _Undecryptable as error:
@@ -414,8 +404,8 @@ class Decryptor:
             raise TraceError(f"datagram {datagram} from {peer} has a short header before any Initial packet")
         candidates = []
         for connection in connections:
-            receiver = SERVER if connection.sender(from_peer) == CLIENT else CLIENT
-            if any(data[position + 1 : position + 1 + len(cid)] == cid for cid in connection.cids.get(receiver, ())):
+            cids = connection.cids.get(connection.receiver(from_peer), ())
+            if any(data[position + 1 : position + 1 + len(cid)] == cid for cid in cids):
                 candidates.append(connection)
         if len(candidates) != 1:
             raise TraceError(
@@ -426,8 +416,7 @@ class Decryptor:
     def _long_connection(self, local, peer, from_peer: bool, dcid: bytes, scid: bytes) -> Connection | None:
         candidates = []
         for connection in self._current.get((local, peer), []):
-            sender = connection.sender(from_peer)
-            receiver = SERVER if sender == CLIENT else CLIENT
+            receiver, sender = connection.receiver(from_peer), connection.sender(from_peer)
             if dcid in connection.cids.get(receiver, ()) or scid in connection.cids.get(sender, ()):
                 candidates.append(connection)
         if len(candidates) > 1:
@@ -455,7 +444,7 @@ class Decryptor:
         reader.bytes(4)
         dcid = reader.bytes(reader.byte())
         scid = reader.bytes(reader.byte())
-        space = _LONG_TYPES[(first & 0x30) >> 4]
+        space = _LONG_SPACES[(first & 0x30) >> 4]
         if space == INITIAL:
             reader.bytes(reader.varint())
         length = reader.varint()
@@ -474,7 +463,6 @@ class Decryptor:
                 local=local,
                 peer=peer,
                 client_is_peer=from_peer,
-                client_scid=scid,
                 initial=initial_keys(dcid),
                 cids={SERVER: {dcid}},
                 first_ns=timestamp_ns,
@@ -500,7 +488,7 @@ class Decryptor:
             connection,
             new_connection,
             None,
-            ((sender, scid),),
+            scid,
         )
 
     def _long_keys(self, connection: Connection, space: str, sender: str, peer) -> Keys:
@@ -527,9 +515,7 @@ class Decryptor:
         ID is a candidate end, and authentication decides.
         """
 
-        sender = connection.sender(from_peer)
-        receiver = SERVER if sender == CLIENT else CLIENT
-        dcid_length = connection.cid_length.get(receiver)
+        dcid_length = connection.cid_length.get(connection.receiver(from_peer))
         if dcid_length is None:
             raise TraceError(f"connection {connection.index} sent a short header before its connection IDs were known")
         length = len(data)
@@ -539,7 +525,7 @@ class Decryptor:
         cids = {
             cid
             for candidate in self._current[(connection.local, connection.peer)]
-            for cid in candidate.cids.get(SERVER if candidate.sender(from_peer) == CLIENT else CLIENT, ())
+            for cid in candidate.cids.get(candidate.receiver(from_peer), ())
         }
         for cid in cids:
             if cid:
@@ -565,8 +551,7 @@ class Decryptor:
 
     def _short(self, connection: Connection, from_peer: bool, data: bytes, position: int, end: int) -> _Decrypted:
         sender = connection.sender(from_peer)
-        receiver = SERVER if sender == CLIENT else CLIENT
-        packet_number_offset = position + 1 + connection.cid_length[receiver]
+        packet_number_offset = position + 1 + connection.cid_length[connection.receiver(from_peer)]
         generations = connection.generations.get(sender)
         if not generations:
             raise TraceError(f"no key log secret decrypts the 1-RTT packets of connection {connection.index}")
@@ -590,7 +575,7 @@ class Decryptor:
                 )
             except _Undecryptable:
                 continue
-            return _Decrypted(DATA, packet_number, end, payload, sender, connection, False, generation, ())
+            return _Decrypted(DATA, packet_number, end, payload, sender, connection, False, generation, None)
         raise _Undecryptable()
 
     @staticmethod
@@ -635,11 +620,10 @@ class Decryptor:
             self.connections.append(connection)
             self._current.setdefault((connection.local, connection.peer), []).append(connection)
         connection.last_ns = timestamp_ns
-        for endpoint, cid in decrypted.cids:
-            connection.cids.setdefault(endpoint, set()).add(cid)
-            length = len(cid)
-            known = connection.cid_length.setdefault(endpoint, length)
-            if known != length:
+        if decrypted.scid is not None:
+            connection.cids.setdefault(decrypted.sender, set()).add(decrypted.scid)
+            length = len(decrypted.scid)
+            if connection.cid_length.setdefault(decrypted.sender, length) != length:
                 raise TraceError(f"connection {connection.index} uses connection IDs of more than one length")
         key = (decrypted.sender, decrypted.space)
         connection.largest[key] = max(connection.largest.get(key, -1), decrypted.packet_number)
@@ -742,9 +726,7 @@ def _frames(payload: bytes, connection: Connection, sender: str, space: str) -> 
         raise _Malformed("empty payload")
     while reader.remaining():
         frame_type = reader.varint()
-        if frame_type == 0x00:
-            continue
-        if frame_type in (0x01, 0x1E, 0x1F):
+        if frame_type in (0x00, 0x01, 0x1E, 0x1F):
             continue
         if frame_type in (0x02, 0x03):
             reader.varint()

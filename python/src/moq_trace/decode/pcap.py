@@ -98,17 +98,10 @@ def read_datagrams(path: pathlib.Path, relay_port: int, loopback_ifindexes: tupl
         udp = ip.data
         if udp.ulen < 8:
             continue
-        if udp.sport == relay_port:
-            from_peer, local, peer = False, (ip.src, udp.sport), (ip.dst, udp.dport)
-        elif udp.dport == relay_port:
-            from_peer, local, peer = True, (ip.dst, udp.dport), (ip.src, udp.sport)
-        else:
+        if relay_port not in (udp.sport, udp.dport):
             continue
-        yield Datagram(
-            realtime_ns,
-            from_peer,
-            (str(ipaddress.ip_address(local[0])), local[1]),
-            (str(ipaddress.ip_address(peer[0])), peer[1]),
-            udp.ulen - 8,
-            bytes(udp.data),
-        )
+        source = (str(ipaddress.ip_address(ip.src)), udp.sport)
+        destination = (str(ipaddress.ip_address(ip.dst)), udp.dport)
+        from_peer = udp.sport != relay_port
+        local, peer = (destination, source) if from_peer else (source, destination)
+        yield Datagram(realtime_ns, from_peer, local, peer, udp.ulen - 8, bytes(udp.data))

@@ -46,7 +46,7 @@ def capture(binary: pathlib.Path, output: pathlib.Path) -> dict:
             if row["timestamp_ns"] > 1000:
                 row["timestamp_ns"] = None
             for field in ctf.CONTEXT_FIELDS:
-                del row[field]
+                del row[field.name]
             rows[name].append(row)
     return dict(rows)
 

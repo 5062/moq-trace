@@ -19,26 +19,21 @@ else:
     _BT2_IMPORT_ERROR = None
 
 
-# Filled in from the event context instead of the provider payload. The decoder
-# writes them first, so every schema leads with them in this order.
-CONTEXT_FIELDS = ("pid", "tid", "ctf_timestamp_ns")
+# Filled in from the event context instead of the provider payload: `pid` and
+# `tid` from the LTTng `vpid` and `vtid` contexts and `ctf_timestamp_ns` from the
+# event clock snapshot. The decoder writes them first, so every schema leads with
+# them in this order. Both clocks are narrowed to signed nanoseconds, so a
+# timestamp that does not fit fails while decoding instead of while deriving
+# spans from it.
+CONTEXT_FIELDS = (
+    pa.field("pid", pa.uint64()),
+    pa.field("tid", pa.uint64()),
+    pa.field("ctf_timestamp_ns", pa.int64()),
+)
 
 
 def _schema(**fields: pa.DataType) -> pa.Schema:
-    # `pid` and `tid` come from the LTTng `vpid` and `vtid` contexts and
-    # `ctf_timestamp_ns` from the event clock snapshot, rather than from the
-    # provider payload. Both clocks
-    # are narrowed to signed nanoseconds here, so a timestamp that does not fit
-    # fails while decoding instead of while deriving spans from it.
-    return pa.schema(
-        (
-            ("pid", pa.uint64()),
-            ("tid", pa.uint64()),
-            ("ctf_timestamp_ns", pa.int64()),
-            ("timestamp_ns", pa.int64()),
-            *fields.items(),
-        )
-    )
+    return pa.schema((*CONTEXT_FIELDS, ("timestamp_ns", pa.int64()), *fields.items()))
 
 
 SCHEMAS = {
@@ -179,7 +174,7 @@ class _Decoder:
     enumeration label in a table, and never inspect a field's type again.
     """
 
-    __slots__ = ("event_name", "fields", "name")
+    __slots__ = ("event_name", "fields", "name", "outcomes")
 
     def __init__(self, event_class, name: str) -> None:
         self.name = name
@@ -202,6 +197,7 @@ class _Decoder:
             )
 
         fields = []
+        outcomes: list[str] = []
         for field in expected:
             value_class = payload_class[field].field_class
             _require_unsigned(self.event_name, field, value_class)
@@ -213,40 +209,32 @@ class _Decoder:
             if presence is not None:
                 _require_unsigned(self.event_name, presence, payload_class[presence].field_class)
             labels = _Labels(self.event_name, field, value_class) if labelled else None
+            if field == "outcome" and labelled:
+                outcomes = sorted(label for label, _ in value_class.items())
             fields.append((field, presence, labels))
         self.fields = tuple(fields)
+        # Every label the provider can emit, so the analysis knows an outcome no
+        # event happened to record.
+        self.outcomes = json.dumps(outcomes)
 
         # One capture can hold several processes, and trace IDs are process-local,
-        # so an event that does not name its process cannot be analyzed.
+        # so an event must name its process. Work that one call runs inside
+        # another is attributed by thread, so it must name its thread too.
         context_class = stream_class.event_common_context_field_class
-        if context_class is None or "vpid" not in context_class:
-            raise CtfError(
-                f"{self.event_name} events have no vpid context; record the trace with `lttng add-context --type vpid`"
-            )
-        vpid_class = context_class["vpid"].field_class
-        if not isinstance(vpid_class, (bt2._UnsignedIntegerFieldClassConst, bt2._SignedIntegerFieldClassConst)):
-            raise CtfError(f"{self.event_name} has a vpid context that is not an integer")
-        # Work that one call runs inside another is attributed by thread, so an
-        # event that does not name its thread cannot be analyzed either.
-        if "vtid" not in context_class:
-            raise CtfError(
-                f"{self.event_name} events have no vtid context; record the trace with `lttng add-context --type vtid`"
-            )
-        vtid_class = context_class["vtid"].field_class
-        if not isinstance(vtid_class, (bt2._UnsignedIntegerFieldClassConst, bt2._SignedIntegerFieldClassConst)):
-            raise CtfError(f"{self.event_name} has a vtid context that is not an integer")
+        integer = (bt2._UnsignedIntegerFieldClassConst, bt2._SignedIntegerFieldClassConst)
+        for context in ("vpid", "vtid"):
+            if context_class is None or context not in context_class:
+                raise CtfError(
+                    f"{self.event_name} events have no {context} context; "
+                    f"record the trace with `lttng add-context --type {context}`"
+                )
+            if not isinstance(context_class[context].field_class, integer):
+                raise CtfError(f"{self.event_name} has a {context} context that is not an integer")
 
-    @staticmethod
-    def pid(event) -> int:
-        """Return the VPID an event was recorded from."""
-
-        return int(event.common_context_field["vpid"])
-
-    def append(self, message, event, pid: int, columns: list[list]) -> None:
+    def append(self, message, event, pid: int, tid: int, columns: list[list]) -> None:
         """Append one event directly to its typed batch's column buffers."""
 
         payload = event.payload_field
-        tid = int(event.common_context_field["vtid"])
         columns[0].append(pid)
         columns[1].append(tid)
         columns[2].append(message.default_clock_snapshot.ns_from_origin)
@@ -324,9 +312,9 @@ def _batches(
     # Keyed by the event class address, which is stable for the whole iteration,
     # so one lookup replaces resolving the event layout on every event.
     decoders: dict[int, _Decoder | None] = {}
-    buffers: dict[tuple[str, str, str], list[list]] = {}
+    # The column buffers and schema metadata of each table of each trace.
+    outputs: dict[tuple[str, str, str], tuple[list[list], dict]] = {}
     sources: dict[int, tuple[object, tuple[str, str]]] = {}
-    metadata: dict[tuple[str, str, str], dict] = {}
     discarded_events = 0
     discarded_packets = 0
     event_count = 0
@@ -348,7 +336,8 @@ def _batches(
             decoder = decoders[event_class.addr] = _decoder(event_class)
         if decoder is None:
             continue
-        pid = decoder.pid(event)
+        context = event.common_context_field
+        pid = int(context["vpid"])
         if allowed is not None and pid not in allowed:
             raise CtfError(f"event {decoder.event_name} came from VPID {pid}, which is not in {sorted(allowed)}")
         # A stream belongs to one trace for its lifetime. Cache its identity so
@@ -362,23 +351,15 @@ def _batches(
             capture, hostname = _capture_identity(stream.trace)
             sources[stream_address] = (stream, (capture, hostname))
         key = (capture, hostname, decoder.name)
-        if key not in metadata:
-            outcomes = sorted(
-                {
-                    label
-                    for field, _, labels in decoder.fields
-                    if field == "outcome" and labels is not None
-                    for label, _ in labels._mappings
-                }
-            )
-            metadata[key] = {"capture": capture, "hostname": hostname, "outcomes": json.dumps(outcomes)}
-        if key not in buffers:
-            buffers[key] = [[] for _ in SCHEMAS[decoder.name]]
-        columns = buffers[key]
-        decoder.append(message, event, pid, columns)
+        output = outputs.get(key)
+        if output is None:
+            metadata = {"capture": capture, "hostname": hostname, "outcomes": decoder.outcomes}
+            output = outputs[key] = ([[] for _ in SCHEMAS[decoder.name]], metadata)
+        columns, metadata = output
+        decoder.append(message, event, pid, int(context["vtid"]), columns)
         event_count += 1
         if len(columns[0]) == batch_size:
-            yield decoder.name, _batch(decoder.name, columns, metadata[key])
+            yield decoder.name, _batch(decoder.name, columns, metadata)
             for column in columns:
                 column.clear()
 
@@ -386,6 +367,6 @@ def _batches(
         raise CtfError(f"LTTng discarded {discarded_events} events and {discarded_packets} packets")
     if event_count == 0:
         raise CtfError("CTF trace contains no MoQ or QUIC trace events")
-    for key, columns in buffers.items():
+    for (_, _, name), (columns, metadata) in outputs.items():
         if columns[0]:
-            yield key[2], _batch(key[2], columns, metadata[key])
+            yield name, _batch(name, columns, metadata)

@@ -123,10 +123,10 @@ def decrypt(manifest: NetworkManifest, root: pathlib.Path) -> quic.Decryptor:
     for name in manifest.key_logs:
         path = root / name
         try:
-            logs.append(quic.read_key_log(path.read_text().splitlines(), str(path)))
+            logs.append((str(path), path.read_text().splitlines()))
         except OSError as error:
             raise TraceError(f"failed to read the key log {path}: {error}") from error
-    return quic.Decryptor(quic.merge_key_logs(logs))
+    return quic.Decryptor(quic.read_key_logs(logs))
 
 
 def ingest(
@@ -161,13 +161,11 @@ def ingest(
         ):
             packet_id = packet_count
             packet_count += 1
-            state = decryptor.connections[packet.connection]
-            received = (packet.sender == quic.CLIENT) == state.client_is_peer
             packets.append(
                 (
                     packet_id,
                     packet.connection,
-                    "rx" if received else "tx",
+                    "rx" if datagram.from_peer else "tx",
                     packet.timestamp_ns,
                     packet.space,
                     packet.packet_number,

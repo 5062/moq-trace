@@ -343,7 +343,6 @@ class WireTests(unittest.TestCase):
                 local=RELAY,
                 peer=SUBSCRIBER,
                 client_is_peer=True,
-                client_scid=b"",
                 initial={},
                 first_ns=20000,
                 last_ns=500000,

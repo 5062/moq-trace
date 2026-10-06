@@ -7,6 +7,8 @@ import pathlib
 import sys
 import unittest
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
+
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
@@ -170,7 +172,8 @@ class _Peer:
     def _protect(keys: quic.Keys, header: bytes, offset: int, number: int, payload: bytes, bits: int) -> bytes:
         length = (header[0] & 0x03) + 1
         payload = payload + b"\x00" * max(0, 4 - length - len(payload))
-        sealed = keys.seal(number, header, payload)
+        aead = ChaCha20Poly1305(keys.key) if keys.suite.chacha else AESGCM(keys.key)
+        sealed = aead.encrypt(keys.nonce(number), payload, header)
         sample = sealed[4 - length : 20 - length]
         mask = keys.mask(sample)
         first = header[0] ^ (mask[0] & bits)
@@ -243,7 +246,7 @@ class DecryptorTests(unittest.TestCase):
 
     def test_four_connections_share_one_udp_address_pair(self) -> None:
         peers = [_Peer(seed=i, client_cid=bytes([i]) * 8, server_cid=bytes([i + 4]) * 8) for i in range(1, 5)]
-        decryptor = quic.Decryptor(quic.merge_key_logs(peer.key_log() for peer in peers))
+        decryptor = quic.Decryptor({random: labels for peer in peers for random, labels in peer.key_log().items()})
         for stage in range(3):
             for index, peer in enumerate(peers):
                 packets = _decrypt(decryptor, [peer.handshake_datagrams()[stage]])
@@ -437,19 +440,20 @@ class KeyLogTests(unittest.TestCase):
             f"CLIENT_RANDOM {random} {'cc' * 48}",
         ]
         self.assertEqual(
-            quic.read_key_log(lines), {bytes.fromhex(random): {"CLIENT_TRAFFIC_SECRET_0": bytes.fromhex("aa" * 32)}}
+            quic.read_key_logs([("log", lines)]),
+            {bytes.fromhex(random): {"CLIENT_TRAFFIC_SECRET_0": bytes.fromhex("aa" * 32)}},
         )
 
     def test_conflicting_secrets_are_an_error(self) -> None:
         random = "11" * 32
-        first = quic.read_key_log([f"CLIENT_TRAFFIC_SECRET_0 {random} {'aa' * 32}"])
-        second = quic.read_key_log([f"CLIENT_TRAFFIC_SECRET_0 {random} {'bb' * 32}"])
-        with self.assertRaisesRegex(TraceError, "two different CLIENT_TRAFFIC_SECRET_0 secrets"):
-            quic.merge_key_logs([first, second])
+        first = ("first", [f"CLIENT_TRAFFIC_SECRET_0 {random} {'aa' * 32}"])
+        second = ("second", [f"CLIENT_TRAFFIC_SECRET_0 {random} {'bb' * 32}"])
+        with self.assertRaisesRegex(TraceError, "second line 1 .* two different CLIENT_TRAFFIC_SECRET_0 secrets"):
+            quic.read_key_logs([first, second])
 
     def test_malformed_lines_are_an_error(self) -> None:
         with self.assertRaisesRegex(TraceError, "line 1 is not"):
-            quic.read_key_log(["CLIENT_TRAFFIC_SECRET_0 only-two"])
+            quic.read_key_logs([("log", ["CLIENT_TRAFFIC_SECRET_0 only-two"])])
 
 
 if __name__ == "__main__":
