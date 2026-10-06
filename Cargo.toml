@@ -22,7 +22,6 @@ version = "0.1.0"
 [workspace.dependencies]
 bindgen = { version = "0.73.2", default-features = false, features = ["runtime"] }
 cc = "1"
-libc = "0.2.189"
 pkg-config = "0.3"
 moq-trace = { version = "0.1.0", path = "crates/moq-trace", default-features = false }
 moq-trace-lttng-sys = { version = "0.1.0", path = "crates/moq-trace-lttng-sys" }

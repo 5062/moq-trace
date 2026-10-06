@@ -9,9 +9,6 @@
 
 #[cfg(not(feature = "recording"))]
 use std::marker::PhantomData;
-use std::ops::Deref;
-#[cfg(feature = "recording")]
-use std::sync::Arc;
 #[cfg(feature = "recording")]
 use std::sync::Mutex;
 #[cfg(feature = "recording")]
@@ -41,11 +38,6 @@ pub trait Schema: 'static {
     /// backend retains it so tests and tooling can inspect what was emitted.
     type Event: Clone + Send + 'static;
 
-    /// Initialize the native provider.
-    ///
-    /// This runs at most once per process, from [`Backend::native`].
-    fn initialize();
-
     /// Return whether the process has this tracepoint enabled.
     fn enabled(tracepoint: Self::Tracepoint) -> bool;
 
@@ -74,7 +66,6 @@ fn mask<S: Schema>(tracepoint: S::Tracepoint) -> u64 {
 struct Recording<S: Schema> {
     enabled: AtomicU64,
     events: Mutex<Vec<S::Event>>,
-    trace_id_calls: AtomicU64,
     span_id_calls: AtomicU64,
     clock_reads: AtomicU64,
 }
@@ -85,7 +76,6 @@ impl<S: Schema> Recording<S> {
         Self {
             enabled: AtomicU64::new(u64::MAX),
             events: Mutex::new(Vec::new()),
-            trace_id_calls: AtomicU64::new(0),
             span_id_calls: AtomicU64::new(0),
             clock_reads: AtomicU64::new(0),
         }
@@ -114,8 +104,8 @@ impl<S: Schema> Recording<S> {
 /// Without the `recording` feature the backend is always bound to the native
 /// provider and holds no state. With it, the backend may instead own a recording
 /// sink, boxed so that the native backend stays the size of one pointer. A
-/// process keeps one backend per provider in a `OnceLock`, and every trace start
-/// clones a handle to it.
+/// process keeps one backend per provider in a `OnceLock`, and every trace
+/// token holds a `&'static` reference to it, which costs no atomic to copy.
 pub struct Backend<S: Schema> {
     #[cfg(feature = "recording")]
     recording: Option<Box<Recording<S>>>,
@@ -125,10 +115,7 @@ pub struct Backend<S: Schema> {
 
 impl<S: Schema> Backend<S> {
     /// Create the backend bound to the native provider.
-    ///
-    /// This initializes the provider, so a process must create at most one.
     pub fn native() -> Self {
-        S::initialize();
         Self {
             #[cfg(feature = "recording")]
             recording: None,
@@ -140,12 +127,14 @@ impl<S: Schema> Backend<S> {
     /// Create a backend that records events in process.
     ///
     /// Recording is for tests and tooling that need to inspect what a facade
-    /// would have emitted. The returned backend never calls the provider.
+    /// would have emitted. The backend never calls the provider, and it is
+    /// leaked so that trace tokens can borrow it for `'static` like the native
+    /// one. Each call leaks one backend, which a test process can afford.
     #[cfg(feature = "recording")]
-    pub fn recording() -> Self {
-        Self {
+    pub fn recording() -> &'static Self {
+        Box::leak(Box::new(Self {
             recording: Some(Box::new(Recording::new())),
-        }
+        }))
     }
 
     /// Return whether a tracepoint is enabled.
@@ -222,10 +211,6 @@ impl<S: Schema> Backend<S> {
     /// Allocate a process-wide trace identifier.
     #[inline]
     pub fn next_trace_id(&self) -> u64 {
-        #[cfg(feature = "recording")]
-        if let Some(recording) = &self.recording {
-            recording.trace_id_calls.fetch_add(1, Ordering::Relaxed);
-        }
         next_trace_id()
     }
 
@@ -247,14 +232,6 @@ impl<S: Schema> Backend<S> {
             recording.clock_reads.fetch_add(1, Ordering::Relaxed);
         }
         now_ns()
-    }
-
-    /// Return how many trace identifiers a recording backend has allocated.
-    ///
-    /// Panics if this backend is bound to the native provider.
-    #[cfg(feature = "recording")]
-    pub fn trace_id_calls(&self) -> u64 {
-        self.sink().trace_id_calls.load(Ordering::Relaxed)
     }
 
     /// Return how many span identifiers a recording backend has allocated.
@@ -279,53 +256,5 @@ impl<S: Schema> Backend<S> {
         self.recording
             .as_deref()
             .expect("this backend is bound to the native provider")
-    }
-}
-
-/// A cheap, cloneable reference to a backend.
-///
-/// The process-global backend is borrowed, so cloning a handle for a trace
-/// never touches an atomic. Owned handles exist only with the `recording`
-/// feature, for tests and tooling that need an isolated event stream.
-pub enum Handle<S: Schema> {
-    /// Borrows a backend that outlives every handle.
-    Shared(&'static Backend<S>),
-    /// Shares ownership of a backend with other handles.
-    #[cfg(feature = "recording")]
-    Owned(Arc<Backend<S>>),
-}
-
-impl<S: Schema> Clone for Handle<S> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Shared(backend) => Self::Shared(backend),
-            #[cfg(feature = "recording")]
-            Self::Owned(backend) => Self::Owned(Arc::clone(backend)),
-        }
-    }
-}
-
-impl<S: Schema> Handle<S> {
-    /// Borrow a backend that outlives the handle.
-    pub fn shared(backend: &'static Backend<S>) -> Self {
-        Self::Shared(backend)
-    }
-
-    /// Take shared ownership of a backend.
-    #[cfg(feature = "recording")]
-    pub fn owned(backend: Backend<S>) -> Self {
-        Self::Owned(Arc::new(backend))
-    }
-}
-
-impl<S: Schema> Deref for Handle<S> {
-    type Target = Backend<S>;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Shared(backend) => backend,
-            #[cfg(feature = "recording")]
-            Self::Owned(backend) => backend,
-        }
     }
 }

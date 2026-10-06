@@ -118,7 +118,6 @@ bool moq_trace_moq_object_end_enabled(void);
 void moq_trace_moq_object_end(const struct moq_trace_moq_object_end *event);
 bool moq_trace_moq_object_phase_enabled(void);
 void moq_trace_moq_object_phase(const struct moq_trace_moq_object_phase *event);
-void moq_trace_provider_init(void);
 
 /*
  * Process-wide MoQ identity shared by every facade, in any language.

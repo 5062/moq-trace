@@ -8,7 +8,7 @@ use crate::backend::{Event, Tracepoint};
 /// same dispatch a live relay does.
 fn trace() -> Handle {
     Handle {
-        inner: Some(backend::Handle::owned(backend::Backend::recording())),
+        inner: Some(backend::Backend::recording()),
         transport: quic_trace::Handle::disabled(),
         session_id: None,
         connection_id: None,
@@ -149,12 +149,6 @@ fn disabled_handle_is_noop() {
         .socket(Direction::Rx, None)
         .finish(SocketOutcome::Success, SocketStats::default());
     assert!(events(&handle).is_empty());
-}
-
-#[test]
-fn new_session_id_is_always_allocated() {
-    let handle = Handle::disabled().with_new_session_id();
-    assert!(handle.session_id.is_some());
 }
 
 #[test]
@@ -526,8 +520,7 @@ fn session_and_logical_ids_come_from_the_native_provider() {
     let native = unsafe { ffi::moq_trace_next_session_id() };
     assert!(rust < native && native < next_session_id());
 
-    let rust = next_logical_id();
+    let rust = next_logical_group();
     let native = unsafe { ffi::moq_trace_next_logical_group() };
-    assert!(rust.group() < native && native < next_logical_group());
-    assert_eq!(rust.frame(), 0);
+    assert!(rust < native && native < next_logical_group());
 }

@@ -8,7 +8,7 @@ use crate::backend::{Event, Tracepoint};
 /// same dispatch a live relay does.
 fn trace() -> Handle {
     Handle {
-        inner: Some(backend::Handle::owned(backend::Backend::recording())),
+        inner: Some(backend::Backend::recording()),
     }
 }
 

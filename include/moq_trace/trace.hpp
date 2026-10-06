@@ -6,19 +6,10 @@
 #include <quic_trace/trace.hpp>
 
 #include <cstdint>
-#include <mutex>
 #include <optional>
 #include <utility>
 
 namespace moq_trace {
-
-namespace detail {
-
-inline std::once_flag provider_once;
-
-inline void initialize() { std::call_once(provider_once, moq_trace_provider_init); }
-
-}  // namespace detail
 
 /** Identity shared by ingress and every outbound copy of one logical object. */
 struct LogicalId {
@@ -102,7 +93,7 @@ class ObjectPhase {
   /** Finish the phase with an explicit result. */
   void finish(moq_trace_object_outcome outcome) {
     if (span_id_ == 0) return;
-    finish_at(outcome, quic_trace::detail::now_ns());
+    finish_at(outcome, quic_trace::now_ns());
   }
 
   /** Finish the phase at a timestamp captured at the measured boundary. */
@@ -152,7 +143,6 @@ class Object {
   /** Start an object trace when any object event is enabled. */
   explicit Object(ObjectContext context)
       : context_(context), payload_bytes_(context.payload_bytes) {
-    detail::initialize();
     if (!moq_trace_moq_object_start_enabled() &&
         !moq_trace_moq_object_end_enabled() &&
         !moq_trace_moq_object_phase_enabled()) {
@@ -204,7 +194,7 @@ class Object {
   /** Start a measured object phase. */
   ObjectPhase phase(moq_trace_object_phase value) const {
     if (trace_id_ == 0 || !moq_trace_moq_object_phase_enabled()) return {};
-    return ObjectPhase(trace_id_, value, quic_trace::detail::now_ns());
+    return ObjectPhase(trace_id_, value, quic_trace::now_ns());
   }
 
   /** Start a measured object phase at a previously captured timestamp. */
@@ -224,7 +214,7 @@ class Object {
  private:
   void emit_start() const {
     const struct moq_trace_moq_object_start event{
-        context_.start_ns ? *context_.start_ns : quic_trace::detail::now_ns(),
+        context_.start_ns ? *context_.start_ns : quic_trace::now_ns(),
         trace_id_,
         context_.logical_id.group,
         context_.logical_id.frame,
@@ -246,7 +236,7 @@ class Object {
 
   void emit_end(moq_trace_object_outcome outcome) const {
     const struct moq_trace_moq_object_end event{
-        quic_trace::detail::now_ns(),
+        quic_trace::now_ns(),
         trace_id_,
         static_cast<std::uint8_t>(stream_offset_end_.has_value()),
         stream_offset_end_.value_or(0),

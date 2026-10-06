@@ -6,27 +6,17 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <optional>
 #include <utility>
 
 namespace quic_trace {
 
-namespace detail {
-
-inline std::once_flag provider_once;
-
-inline void initialize() { std::call_once(provider_once, quic_trace_provider_init); }
-
 // Identity and time come from the provider library rather than from this
 // header, so Rust and C++ hooks in one process share the same counters and
 // clock epoch instead of each allocating from its own.
-inline std::uint64_t now_ns() { return quic_trace_now_ns(); }
-
-}  // namespace detail
 
 /** Return a timestamp from the host monotonic clock in nanoseconds. */
-inline std::uint64_t now_ns() { return detail::now_ns(); }
+inline std::uint64_t now_ns() { return quic_trace_now_ns(); }
 
 /** Allocate a process-wide stable transport connection identifier. */
 inline std::uint64_t next_connection_id() { return quic_trace_next_connection_id(); }
@@ -76,7 +66,7 @@ class PacketPhase {
   /** Finish the phase with an explicit result. */
   void finish(quic_trace_packet_outcome outcome) {
     if (span_id_ == 0) return;
-    finish_at(outcome, detail::now_ns());
+    finish_at(outcome, now_ns());
   }
 
   /** Finish the phase at a timestamp captured at the measured boundary. */
@@ -131,7 +121,6 @@ class Packet {
 
   /** Start a packet trace when any packet event is enabled. */
   explicit Packet(PacketContext context) : context_(context) {
-    detail::initialize();
     if (!quic_trace_quic_packet_start_enabled() &&
         !quic_trace_quic_packet_end_enabled() &&
         !quic_trace_quic_packet_phase_enabled() &&
@@ -173,7 +162,7 @@ class Packet {
   /** Start a measured packet phase. */
   PacketPhase phase(quic_trace_packet_phase value) const {
     if (trace_id_ == 0 || !quic_trace_quic_packet_phase_enabled()) return {};
-    return PacketPhase(trace_id_, value, detail::now_ns());
+    return PacketPhase(trace_id_, value, now_ns());
   }
 
   /** Start a measured packet phase at a previously captured timestamp. */
@@ -193,7 +182,7 @@ class Packet {
                     std::uint64_t offset_end, quic_trace_packet_outcome outcome,
                     std::optional<bool> retransmission = std::nullopt) const {
     if (trace_id_ == 0 || !quic_trace_quic_stream_frame_enabled()) return;
-    emit_stream_frame(detail::now_ns(), stream_id, offset_start, offset_end,
+    emit_stream_frame(now_ns(), stream_id, offset_start, offset_end,
                       outcome, retransmission);
   }
 
@@ -217,7 +206,7 @@ class Packet {
   /** Finish the packet with an explicit result. */
   void finish(quic_trace_packet_outcome outcome) {
     if (trace_id_ == 0) return;
-    if (quic_trace_quic_packet_end_enabled()) emit_end(detail::now_ns(), outcome);
+    if (quic_trace_quic_packet_end_enabled()) emit_end(now_ns(), outcome);
     trace_id_ = 0;
   }
 
@@ -236,7 +225,7 @@ class Packet {
  private:
   void emit_start() const {
     const struct quic_trace_quic_packet_start event{
-        context_.start_ns ? *context_.start_ns : detail::now_ns(),
+        context_.start_ns ? *context_.start_ns : now_ns(),
         trace_id_,
         context_.connection_id,
         static_cast<std::uint8_t>(context_.direction),
@@ -321,7 +310,6 @@ class SendBlocked {
   SendBlocked(std::uint64_t connection_id, quic_trace_send_blocked_reason reason,
               std::optional<std::uint64_t> stream_id = std::nullopt)
       : connection_id_(connection_id), stream_id_(stream_id), reason_(reason) {
-    detail::initialize();
     if (!quic_trace_quic_send_blocked_enabled()) return;
     span_id_ = quic_trace_next_span_id();
     emit(QUIC_TRACE_EDGE_START);
@@ -361,7 +349,7 @@ class SendBlocked {
  private:
   void emit(quic_trace_edge edge) const {
     const struct quic_trace_quic_send_blocked event{
-        detail::now_ns(),
+        now_ns(),
         span_id_,
         connection_id_,
         static_cast<std::uint8_t>(stream_id_.has_value()),
@@ -385,7 +373,6 @@ class Socket {
   Socket(quic_trace_direction direction,
          std::optional<std::uint64_t> connection_id = std::nullopt)
       : direction_(direction), connection_id_(connection_id) {
-    detail::initialize();
     if (!quic_trace_udp_socket_start_enabled() &&
         !quic_trace_udp_socket_end_enabled()) return;
     trace_id_ = quic_trace_next_trace_id();
@@ -414,7 +401,7 @@ class Socket {
       trace_id_ = 0;
       return;
     }
-    finish_at(outcome, stats, detail::now_ns());
+    finish_at(outcome, stats, now_ns());
   }
 
   /**
@@ -439,7 +426,7 @@ class Socket {
  private:
   void emit_start() const {
     const struct quic_trace_udp_socket_start event{
-        detail::now_ns(), trace_id_,
+        now_ns(), trace_id_,
         static_cast<std::uint8_t>(connection_id_.has_value()),
         connection_id_.value_or(0), static_cast<std::uint8_t>(direction_)};
     quic_trace_udp_socket_start(&event);
@@ -511,10 +498,9 @@ inline std::uint64_t address_half(const std::array<std::uint8_t, 16>& address,
  */
 inline void connection_path(std::uint64_t connection_id, const PathEndpoint& local,
                             const PathEndpoint& peer) {
-  detail::initialize();
   if (!quic_trace_quic_connection_path_enabled()) return;
   const struct quic_trace_quic_connection_path event{
-      detail::now_ns(),
+      now_ns(),
       connection_id,
       detail::address_half(local.address, 0),
       detail::address_half(local.address, 8),

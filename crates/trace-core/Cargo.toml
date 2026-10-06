@@ -16,5 +16,4 @@ lttng = ["dep:quic-trace-lttng-sys"]
 recording = []
 
 [dependencies]
-libc.workspace = true
 quic-trace-lttng-sys = { workspace = true, optional = true }

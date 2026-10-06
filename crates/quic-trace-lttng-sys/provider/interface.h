@@ -189,7 +189,6 @@ bool quic_trace_udp_socket_start_enabled(void);
 void quic_trace_udp_socket_start(const struct quic_trace_udp_socket_start *event);
 bool quic_trace_udp_socket_end_enabled(void);
 void quic_trace_udp_socket_end(const struct quic_trace_udp_socket_end *event);
-void quic_trace_provider_init(void);
 
 /*
  * Process-wide identity and time shared by every facade, in any language.

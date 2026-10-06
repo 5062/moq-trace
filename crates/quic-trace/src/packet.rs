@@ -188,7 +188,7 @@ impl Handle {
             context: context.clone(),
         });
         PacketTrace(Some(PacketTraceState {
-            backend: inner.clone(),
+            backend: inner,
             trace_id,
             context,
         }))
@@ -254,7 +254,7 @@ impl PacketTrace {
             outcome: None,
         });
         PacketPhaseTrace(Some(PacketPhaseTraceState {
-            backend: state.backend.clone(),
+            backend: state.backend,
             trace_id: state.trace_id,
             span_id,
             start_ns: timestamp_ns,
@@ -343,32 +343,29 @@ impl Drop for PacketTrace {
 }
 
 impl PacketPhaseTrace {
-    fn disabled() -> Self {
+    /// Return a disabled packet phase token.
+    pub fn disabled() -> Self {
         Self(None)
     }
 
     /// Finish the phase with an explicit result.
     pub fn finish(mut self, outcome: PacketOutcome) {
         if let Some(state) = self.0.take() {
-            state.emit_done(outcome);
+            state.emit_done(outcome, None);
         }
     }
 
     /// Finish the phase at a previously captured timestamp.
     pub fn finish_at(mut self, outcome: PacketOutcome, timestamp_ns: u64) {
         if let Some(state) = self.0.take() {
-            state.emit_done_at(outcome, timestamp_ns);
+            state.emit_done(outcome, Some(timestamp_ns));
         }
     }
 }
 
 impl PacketPhaseTraceState {
-    fn emit_done(self, outcome: PacketOutcome) {
-        let timestamp_ns = self.backend.now_ns();
-        self.emit_done_at(outcome, timestamp_ns);
-    }
-
-    fn emit_done_at(self, outcome: PacketOutcome, timestamp_ns: u64) {
+    fn emit_done(self, outcome: PacketOutcome, timestamp_ns: Option<u64>) {
+        let timestamp_ns = timestamp_ns.unwrap_or_else(|| self.backend.now_ns());
         debug_assert!(timestamp_ns >= self.start_ns);
         self.backend.emit(Event::PacketPhase {
             timestamp_ns,
@@ -384,7 +381,7 @@ impl PacketPhaseTraceState {
 impl Drop for PacketPhaseTrace {
     fn drop(&mut self) {
         if let Some(state) = self.0.take() {
-            state.emit_done(PacketOutcome::Abandoned);
+            state.emit_done(PacketOutcome::Abandoned, None);
         }
     }
 }

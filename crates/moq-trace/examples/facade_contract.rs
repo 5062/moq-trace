@@ -13,7 +13,7 @@ fn main() {
     let handle = moq_trace::global();
     let connection = moq_trace::next_connection_id();
     let session = moq_trace::next_session_id();
-    let logical = moq_trace::next_logical_id();
+    let logical = moq_trace::LogicalId::new(moq_trace::next_logical_group(), 0);
     handle.connection_path(
         connection,
         ConnectionPath::new(

@@ -42,13 +42,10 @@ TRACE_PROVIDER_RETAIN __attribute__((used, visibility("default"))) void *const @
 #undef EVENT
 
 /*
- * Tracepoints register from a constructor in the generated events.h. This entry
- * point only gives instrumented code a symbol to reference so the linker keeps
- * the provider object.
- */
-void @PROVIDER@_provider_init(void) {}
-
-/*
+ * Tracepoints register from a constructor in the generated events.h. Every
+ * hook calls the wrappers below, which live in this object, so referencing any
+ * of them keeps the constructor linked.
+ *
  * Every wrapper comes from events.inc for the same reason. The enablement
  * predicate is a plain function for the facade to call, and it reads one state
  * word, so a disabled event never enters the tracepoint.

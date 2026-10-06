@@ -45,9 +45,7 @@ impl SocketStats {
 const SOCKET_TRACEPOINTS: [Tracepoint; 2] = [Tracepoint::SocketStart, Tracepoint::SocketEnd];
 
 /// A UDP socket operation whose completion consumes the token.
-pub struct SocketTrace {
-    state: Option<SocketTraceState>,
-}
+pub struct SocketTrace(Option<SocketTraceState>);
 
 struct SocketTraceState {
     backend: crate::backend::Handle,
@@ -70,23 +68,22 @@ impl Handle {
             direction,
             connection_id,
         });
-        SocketTrace {
-            state: Some(SocketTraceState {
-                backend: inner.clone(),
-                trace_id,
-            }),
-        }
+        SocketTrace(Some(SocketTraceState {
+            backend: inner,
+            trace_id,
+        }))
     }
 }
 
 impl SocketTrace {
-    fn disabled() -> Self {
-        Self { state: None }
+    /// Return a disabled socket trace token.
+    pub fn disabled() -> Self {
+        Self(None)
     }
 
     /// Finish the socket operation with its result and batch measurements.
     pub fn finish(mut self, outcome: SocketOutcome, stats: SocketStats) {
-        if let Some(state) = self.state.take() {
+        if let Some(state) = self.0.take() {
             state.emit_end(outcome, stats, None);
         }
     }
@@ -97,7 +94,7 @@ impl SocketTrace {
     /// and ends both this operation and the packets it carried at that
     /// instant, so the socket event and the packets agree exactly.
     pub fn finish_at(mut self, outcome: SocketOutcome, stats: SocketStats, timestamp_ns: u64) {
-        if let Some(state) = self.state.take() {
+        if let Some(state) = self.0.take() {
             state.emit_end(outcome, stats, Some(timestamp_ns));
         }
     }
@@ -117,7 +114,7 @@ impl SocketTraceState {
 
 impl Drop for SocketTrace {
     fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
+        if let Some(state) = self.0.take() {
             state.emit_end(SocketOutcome::Abandoned, SocketStats::default(), None);
         }
     }

@@ -1,7 +1,7 @@
 /*
  * The MoQ object events this provider declares, in declaration order.
  *
- * interface.c includes this file repeatedly with different definitions of
+ * provider.c.in includes this file repeatedly with different definitions of
  * EVENT to stamp out the linker-retained tracepoint array and the enablement
  * and emission wrappers. A single list means the provider cannot retain an
  * event it does not wrap, or wrap one it does not retain.

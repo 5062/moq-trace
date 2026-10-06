@@ -7,7 +7,7 @@
 use moq_trace::{Direction, LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase};
 
 fn main() {
-    let handle = moq_trace::global().with_new_session_id();
+    let handle = moq_trace::global().with_session_id(moq_trace::next_session_id());
     for index in 0..32u64 {
         let mut object = handle.object(ObjectContext::new(
             Direction::Tx,

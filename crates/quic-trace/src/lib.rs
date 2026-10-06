@@ -67,9 +67,7 @@ pub fn global() -> Handle {
         return Handle::disabled();
     }
     Handle {
-        inner: Some(backend::Handle::shared(
-            GLOBAL.get_or_init(backend::Backend::native),
-        )),
+        inner: Some(GLOBAL.get_or_init(backend::Backend::native)),
     }
 }
 

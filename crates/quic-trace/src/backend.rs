@@ -8,9 +8,7 @@ use crate::{
     ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PhaseEdge,
     SendBlockedReason, SocketOutcome, SocketStats, StreamFrame,
 };
-use trace_core::{
-    Backend as CoreBackend, Handle as CoreHandle, Schema, Tracepoint as CoreTracepoint,
-};
+use trace_core::{Backend as CoreBackend, Schema, Tracepoint as CoreTracepoint};
 
 /// The tracepoints the `quic_trace:*` schema exposes.
 #[derive(Clone, Copy)]
@@ -115,10 +113,6 @@ impl Schema for TransportSchema {
     type Tracepoint = Tracepoint;
     type Event = Event;
 
-    fn initialize() {
-        platform::initialize();
-    }
-
     fn enabled(tracepoint: Tracepoint) -> bool {
         platform::enabled(tracepoint)
     }
@@ -141,8 +135,8 @@ impl Schema for TransportSchema {
     }
 }
 
-/// A cheap, cloneable reference to the process-global transport backend.
-pub(crate) type Handle = CoreHandle<TransportSchema>;
+/// A reference to the process-global transport backend, or a leaked recording one.
+pub(crate) type Handle = &'static Backend;
 
 /// The transport provider of one process.
 pub(crate) type Backend = CoreBackend<TransportSchema>;
@@ -159,10 +153,6 @@ mod platform {
     use trace_core::encode_optional;
 
     use super::*;
-
-    pub(super) fn initialize() {
-        unsafe { ffi::quic_trace_provider_init() };
-    }
 
     pub(super) fn enabled(tracepoint: Tracepoint) -> bool {
         unsafe {
@@ -185,13 +175,50 @@ mod platform {
                 timestamp_ns,
                 trace_id,
                 context,
-            } => packet_start(timestamp_ns, trace_id, &context),
+            } => {
+                let (has_packet_number, packet_number) = encode_optional(context.packet_number);
+                let (has_packet_space, packet_space) =
+                    encode_optional(context.packet_space.map(|value| value as u8));
+                let (has_byte_len, byte_len) = encode_optional(context.byte_len.map(to_u64));
+                unsafe {
+                    ffi::quic_trace_quic_packet_start(&ffi::quic_trace_quic_packet_start {
+                        timestamp_ns,
+                        trace_id,
+                        connection_id: context.connection_id,
+                        direction: context.direction as u8,
+                        has_packet_number,
+                        packet_number,
+                        has_packet_space,
+                        packet_space,
+                        has_byte_len,
+                        byte_len,
+                    });
+                }
+            }
             Event::PacketEnd {
                 timestamp_ns,
                 trace_id,
                 context,
                 outcome,
-            } => packet_end(timestamp_ns, trace_id, &context, outcome),
+            } => {
+                let (has_packet_number, packet_number) = encode_optional(context.packet_number);
+                let (has_packet_space, packet_space) =
+                    encode_optional(context.packet_space.map(|value| value as u8));
+                let (has_byte_len, byte_len) = encode_optional(context.byte_len.map(to_u64));
+                unsafe {
+                    ffi::quic_trace_quic_packet_end(&ffi::quic_trace_quic_packet_end {
+                        timestamp_ns,
+                        trace_id,
+                        has_packet_number,
+                        packet_number,
+                        has_packet_space,
+                        packet_space,
+                        has_byte_len,
+                        byte_len,
+                        outcome: outcome as u8,
+                    });
+                }
+            }
             Event::PacketPhase {
                 timestamp_ns,
                 trace_id,
@@ -199,30 +226,93 @@ mod platform {
                 phase,
                 edge,
                 outcome,
-            } => packet_phase(timestamp_ns, trace_id, span_id, phase, edge, outcome),
+            } => {
+                let (has_outcome, outcome) = encode_optional(outcome.map(|value| value as u8));
+                unsafe {
+                    ffi::quic_trace_quic_packet_phase(&ffi::quic_trace_quic_packet_phase {
+                        timestamp_ns,
+                        trace_id,
+                        span_id,
+                        phase: phase as u8,
+                        edge: edge as u8,
+                        has_outcome,
+                        outcome,
+                    });
+                }
+            }
             Event::StreamFrame {
                 timestamp_ns,
                 trace_id,
                 frame,
                 outcome,
-            } => stream_frame(timestamp_ns, trace_id, frame, outcome),
+            } => {
+                let (has_retransmission, retransmission) =
+                    encode_optional(frame.retransmission.map(u8::from));
+                unsafe {
+                    ffi::quic_trace_quic_stream_frame(&ffi::quic_trace_quic_stream_frame {
+                        timestamp_ns,
+                        trace_id,
+                        stream_id: frame.stream_id,
+                        offset_start: frame.offset_start,
+                        offset_end: frame.offset_end,
+                        outcome: outcome as u8,
+                        has_retransmission,
+                        retransmission,
+                    });
+                }
+            }
             Event::SocketStart {
                 timestamp_ns,
                 trace_id,
                 direction,
                 connection_id,
-            } => socket_start(timestamp_ns, trace_id, direction, connection_id),
+            } => {
+                let (has_connection_id, connection_id) = encode_optional(connection_id);
+                unsafe {
+                    ffi::quic_trace_udp_socket_start(&ffi::quic_trace_udp_socket_start {
+                        timestamp_ns,
+                        trace_id,
+                        has_connection_id,
+                        connection_id,
+                        direction: direction as u8,
+                    });
+                }
+            }
             Event::SocketEnd {
                 timestamp_ns,
                 trace_id,
                 outcome,
                 stats,
-            } => socket_end(timestamp_ns, trace_id, outcome, stats),
+            } => unsafe {
+                ffi::quic_trace_udp_socket_end(&ffi::quic_trace_udp_socket_end {
+                    timestamp_ns,
+                    trace_id,
+                    outcome: outcome as u8,
+                    buffers: to_u64(stats.buffers),
+                    datagrams: to_u64(stats.datagrams),
+                    bytes: to_u64(stats.bytes),
+                });
+            },
             Event::ConnectionPath {
                 timestamp_ns,
                 connection_id,
                 path,
-            } => connection_path(timestamp_ns, connection_id, path),
+            } => {
+                let local = crate::path::address_bits(path.local.ip());
+                let peer = crate::path::address_bits(path.peer.ip());
+                unsafe {
+                    ffi::quic_trace_quic_connection_path(&ffi::quic_trace_quic_connection_path {
+                        timestamp_ns,
+                        connection_id,
+                        local_address_high: (local >> 64) as u64,
+                        local_address_low: local as u64,
+                        local_port: path.local.port(),
+                        peer_address_high: (peer >> 64) as u64,
+                        peer_address_low: peer as u64,
+                        peer_port: path.peer.port(),
+                    });
+                }
+            }
             Event::SendBlocked {
                 timestamp_ns,
                 span_id,
@@ -230,169 +320,20 @@ mod platform {
                 stream_id,
                 reason,
                 edge,
-            } => send_blocked(
-                timestamp_ns,
-                span_id,
-                connection_id,
-                stream_id,
-                reason,
-                edge,
-            ),
-        }
-    }
-
-    fn packet_start(timestamp_ns: u64, trace_id: u64, context: &PacketContext) {
-        unsafe {
-            let (has_packet_number, packet_number) = encode_optional(context.packet_number);
-            let (has_packet_space, packet_space) =
-                encode_optional(context.packet_space.map(|value| value as u8));
-            let (has_byte_len, byte_len) = encode_optional(context.byte_len.map(to_u64));
-            ffi::quic_trace_quic_packet_start(&ffi::quic_trace_quic_packet_start {
-                timestamp_ns,
-                trace_id,
-                connection_id: context.connection_id,
-                direction: context.direction as u8,
-                has_packet_number,
-                packet_number,
-                has_packet_space,
-                packet_space,
-                has_byte_len,
-                byte_len,
-            });
-        }
-    }
-
-    fn packet_end(
-        timestamp_ns: u64,
-        trace_id: u64,
-        context: &PacketContext,
-        outcome: PacketOutcome,
-    ) {
-        unsafe {
-            let (has_packet_number, packet_number) = encode_optional(context.packet_number);
-            let (has_packet_space, packet_space) =
-                encode_optional(context.packet_space.map(|value| value as u8));
-            let (has_byte_len, byte_len) = encode_optional(context.byte_len.map(to_u64));
-            ffi::quic_trace_quic_packet_end(&ffi::quic_trace_quic_packet_end {
-                timestamp_ns,
-                trace_id,
-                has_packet_number,
-                packet_number,
-                has_packet_space,
-                packet_space,
-                has_byte_len,
-                byte_len,
-                outcome: outcome as u8,
-            });
-        }
-    }
-
-    fn packet_phase(
-        timestamp_ns: u64,
-        trace_id: u64,
-        span_id: u64,
-        phase: PacketPhase,
-        edge: PhaseEdge,
-        outcome: Option<PacketOutcome>,
-    ) {
-        unsafe {
-            let (has_outcome, outcome) = encode_optional(outcome.map(|value| value as u8));
-            ffi::quic_trace_quic_packet_phase(&ffi::quic_trace_quic_packet_phase {
-                timestamp_ns,
-                trace_id,
-                span_id,
-                phase: phase as u8,
-                edge: edge as u8,
-                has_outcome,
-                outcome,
-            });
-        }
-    }
-
-    fn stream_frame(timestamp_ns: u64, trace_id: u64, frame: StreamFrame, outcome: PacketOutcome) {
-        unsafe {
-            let (has_retransmission, retransmission) =
-                encode_optional(frame.retransmission.map(u8::from));
-            ffi::quic_trace_quic_stream_frame(&ffi::quic_trace_quic_stream_frame {
-                timestamp_ns,
-                trace_id,
-                stream_id: frame.stream_id,
-                offset_start: frame.offset_start,
-                offset_end: frame.offset_end,
-                outcome: outcome as u8,
-                has_retransmission,
-                retransmission,
-            });
-        }
-    }
-
-    fn send_blocked(
-        timestamp_ns: u64,
-        span_id: u64,
-        connection_id: u64,
-        stream_id: Option<u64>,
-        reason: SendBlockedReason,
-        edge: PhaseEdge,
-    ) {
-        unsafe {
-            let (has_stream_id, stream_id) = encode_optional(stream_id);
-            ffi::quic_trace_quic_send_blocked(&ffi::quic_trace_quic_send_blocked {
-                timestamp_ns,
-                span_id,
-                connection_id,
-                has_stream_id,
-                stream_id,
-                reason: reason as u8,
-                edge: edge as u8,
-            });
-        }
-    }
-
-    fn socket_start(
-        timestamp_ns: u64,
-        trace_id: u64,
-        direction_value: Direction,
-        connection_id: Option<u64>,
-    ) {
-        unsafe {
-            let (has_connection_id, connection_id) = encode_optional(connection_id);
-            ffi::quic_trace_udp_socket_start(&ffi::quic_trace_udp_socket_start {
-                timestamp_ns,
-                trace_id,
-                has_connection_id,
-                connection_id,
-                direction: direction_value as u8,
-            });
-        }
-    }
-
-    fn socket_end(timestamp_ns: u64, trace_id: u64, outcome: SocketOutcome, stats: SocketStats) {
-        unsafe {
-            ffi::quic_trace_udp_socket_end(&ffi::quic_trace_udp_socket_end {
-                timestamp_ns,
-                trace_id,
-                outcome: outcome as u8,
-                buffers: to_u64(stats.buffers),
-                datagrams: to_u64(stats.datagrams),
-                bytes: to_u64(stats.bytes),
-            });
-        }
-    }
-
-    fn connection_path(timestamp_ns: u64, connection_id: u64, path: ConnectionPath) {
-        let local = crate::path::address_bits(path.local.ip());
-        let peer = crate::path::address_bits(path.peer.ip());
-        unsafe {
-            ffi::quic_trace_quic_connection_path(&ffi::quic_trace_quic_connection_path {
-                timestamp_ns,
-                connection_id,
-                local_address_high: (local >> 64) as u64,
-                local_address_low: local as u64,
-                local_port: path.local.port(),
-                peer_address_high: (peer >> 64) as u64,
-                peer_address_low: peer as u64,
-                peer_port: path.peer.port(),
-            });
+            } => {
+                let (has_stream_id, stream_id) = encode_optional(stream_id);
+                unsafe {
+                    ffi::quic_trace_quic_send_blocked(&ffi::quic_trace_quic_send_blocked {
+                        timestamp_ns,
+                        span_id,
+                        connection_id,
+                        has_stream_id,
+                        stream_id,
+                        reason: reason as u8,
+                        edge: edge as u8,
+                    });
+                }
+            }
         }
     }
 
@@ -404,8 +345,6 @@ mod platform {
 #[cfg(not(all(feature = "lttng", target_os = "linux")))]
 mod platform {
     use super::*;
-
-    pub(super) fn initialize() {}
 
     pub(super) fn enabled(_: Tracepoint) -> bool {
         false

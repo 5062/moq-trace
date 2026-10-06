@@ -5,9 +5,7 @@
 //! `provider/interface.h`. Reordering variants changes the wire contract.
 
 use crate::{ObjectContext, ObjectOutcome, ObjectPhase, PhaseEdge};
-use trace_core::{
-    Backend as CoreBackend, Handle as CoreHandle, Schema, Tracepoint as CoreTracepoint,
-};
+use trace_core::{Backend as CoreBackend, Schema, Tracepoint as CoreTracepoint};
 
 /// The tracepoints the `moq_trace:*` schema exposes.
 #[derive(Clone, Copy)]
@@ -69,10 +67,6 @@ impl Schema for ObjectSchema {
     type Tracepoint = Tracepoint;
     type Event = Event;
 
-    fn initialize() {
-        platform::initialize();
-    }
-
     fn enabled(tracepoint: Tracepoint) -> bool {
         platform::enabled(tracepoint)
     }
@@ -90,8 +84,8 @@ impl Schema for ObjectSchema {
     }
 }
 
-/// A cheap, cloneable reference to the process-global object backend.
-pub(crate) type Handle = CoreHandle<ObjectSchema>;
+/// A reference to the process-global object backend, or a leaked recording one.
+pub(crate) type Handle = &'static Backend;
 
 /// The object provider of one process.
 pub(crate) type Backend = CoreBackend<ObjectSchema>;
@@ -108,10 +102,6 @@ mod platform {
     use trace_core::encode_optional;
 
     use super::*;
-
-    pub(super) fn initialize() {
-        unsafe { ffi::moq_trace_provider_init() };
-    }
 
     pub(super) fn enabled(tracepoint: Tracepoint) -> bool {
         unsafe {
@@ -131,20 +121,52 @@ mod platform {
                 session_id,
                 connection_id,
                 context,
-            } => object_start(timestamp_ns, trace_id, session_id, connection_id, &context),
+            } => {
+                let (has_session_id, session_id) = encode_optional(session_id);
+                let (has_connection_id, connection_id) = encode_optional(connection_id);
+                let (has_stream_id, stream_id) = encode_optional(context.stream_id);
+                let (has_stream_offset_start, stream_offset_start) =
+                    encode_optional(context.stream_offset_start);
+                unsafe {
+                    ffi::moq_trace_moq_object_start(&ffi::moq_trace_moq_object_start {
+                        timestamp_ns,
+                        trace_id,
+                        logical_group: context.logical_id.group(),
+                        logical_frame: context.logical_id.frame(),
+                        has_session_id,
+                        session_id,
+                        has_connection_id,
+                        connection_id,
+                        direction: context.direction as u8,
+                        track_alias: context.identity.track_alias,
+                        group_id: context.identity.group_id,
+                        object_id: context.identity.object_id,
+                        has_stream_id,
+                        stream_id,
+                        has_stream_offset_start,
+                        stream_offset_start,
+                    });
+                }
+            }
             Event::End {
                 timestamp_ns,
                 trace_id,
                 stream_offset_end,
                 payload_bytes,
                 outcome,
-            } => object_end(
-                timestamp_ns,
-                trace_id,
-                stream_offset_end,
-                payload_bytes,
-                outcome,
-            ),
+            } => {
+                let (has_stream_offset_end, stream_offset_end) = encode_optional(stream_offset_end);
+                unsafe {
+                    ffi::moq_trace_moq_object_end(&ffi::moq_trace_moq_object_end {
+                        timestamp_ns,
+                        trace_id,
+                        has_stream_offset_end,
+                        stream_offset_end,
+                        payload_bytes,
+                        outcome: outcome as u8,
+                    });
+                }
+            }
             Event::Phase {
                 timestamp_ns,
                 trace_id,
@@ -152,83 +174,20 @@ mod platform {
                 phase,
                 edge,
                 outcome,
-            } => object_phase(timestamp_ns, trace_id, span_id, phase, edge, outcome),
-        }
-    }
-
-    fn object_start(
-        timestamp_ns: u64,
-        trace_id: u64,
-        session_id: Option<u64>,
-        connection_id: Option<u64>,
-        context: &ObjectContext,
-    ) {
-        unsafe {
-            let (has_session_id, session_id) = encode_optional(session_id);
-            let (has_connection_id, connection_id) = encode_optional(connection_id);
-            let (has_stream_id, stream_id) = encode_optional(context.stream_id);
-            let (has_stream_offset_start, stream_offset_start) =
-                encode_optional(context.stream_offset_start);
-            ffi::moq_trace_moq_object_start(&ffi::moq_trace_moq_object_start {
-                timestamp_ns,
-                trace_id,
-                logical_group: context.logical_id.group(),
-                logical_frame: context.logical_id.frame(),
-                has_session_id,
-                session_id,
-                has_connection_id,
-                connection_id,
-                direction: context.direction as u8,
-                track_alias: context.identity.track_alias,
-                group_id: context.identity.group_id,
-                object_id: context.identity.object_id,
-                has_stream_id,
-                stream_id,
-                has_stream_offset_start,
-                stream_offset_start,
-            });
-        }
-    }
-
-    fn object_end(
-        timestamp_ns: u64,
-        trace_id: u64,
-        stream_offset_end: Option<u64>,
-        payload_bytes: u64,
-        outcome: ObjectOutcome,
-    ) {
-        unsafe {
-            let (has_stream_offset_end, stream_offset_end) = encode_optional(stream_offset_end);
-            ffi::moq_trace_moq_object_end(&ffi::moq_trace_moq_object_end {
-                timestamp_ns,
-                trace_id,
-                has_stream_offset_end,
-                stream_offset_end,
-                payload_bytes,
-                outcome: outcome as u8,
-            });
-        }
-    }
-
-    fn object_phase(
-        timestamp_ns: u64,
-        trace_id: u64,
-        span_id: u64,
-        phase: ObjectPhase,
-        edge: PhaseEdge,
-        outcome: Option<ObjectOutcome>,
-    ) {
-        unsafe {
-            let (has_outcome, outcome) = encode_optional(outcome.map(|value| value as u8));
-            ffi::moq_trace_moq_object_phase(&ffi::moq_trace_moq_object_phase {
-                timestamp_ns,
-                trace_id,
-                span_id,
-                phase: phase as u8,
-                edge: edge as u8,
-                has_outcome,
-                outcome,
-            });
+            } => {
+                let (has_outcome, outcome) = encode_optional(outcome.map(|value| value as u8));
+                unsafe {
+                    ffi::moq_trace_moq_object_phase(&ffi::moq_trace_moq_object_phase {
+                        timestamp_ns,
+                        trace_id,
+                        span_id,
+                        phase: phase as u8,
+                        edge: edge as u8,
+                        has_outcome,
+                        outcome,
+                    });
+                }
+            }
         }
     }
 }
@@ -236,8 +195,6 @@ mod platform {
 #[cfg(not(all(feature = "lttng", target_os = "linux")))]
 mod platform {
     use super::*;
-
-    pub(super) fn initialize() {}
 
     pub(super) fn enabled(_: Tracepoint) -> bool {
         false

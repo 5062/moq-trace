@@ -6,8 +6,6 @@
 //! provider is linked and nothing can be emitted, so Rust keeps counters of its
 //! own.
 
-use crate::LogicalId;
-
 /// Allocate a process-wide session identifier shared by every facade.
 #[inline]
 pub fn next_session_id() -> u64 {
@@ -19,16 +17,10 @@ pub fn next_session_id() -> u64 {
 /// The analysis pairs an ingress object with its outbound copies by logical
 /// identity, so a group must never be reused within a process. Allocating it
 /// here rather than inventing one keeps it unique across Rust and C++ hooks. A
-/// relay that numbers frames itself pairs this with [`LogicalId::new`].
+/// relay pairs this with a frame ordinal through [`crate::LogicalId::new`].
 #[inline]
 pub fn next_logical_group() -> u64 {
     source::next_logical_group()
-}
-
-/// Allocate a process-wide logical group instance, starting at frame zero.
-#[inline]
-pub fn next_logical_id() -> LogicalId {
-    LogicalId::new(next_logical_group(), 0)
 }
 
 #[cfg(all(feature = "lttng", target_os = "linux"))]

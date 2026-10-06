@@ -57,7 +57,7 @@ impl Handle {
             return SendBlockedTrace(None);
         }
         let state = SendBlockedState {
-            backend: inner.clone(),
+            backend: inner,
             span_id: inner.next_span_id(),
             connection_id,
             stream_id,

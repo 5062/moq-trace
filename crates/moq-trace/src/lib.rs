@@ -15,7 +15,7 @@ pub use trace_core::now_ns;
 mod backend;
 
 mod ids;
-pub use ids::{next_logical_group, next_logical_id, next_session_id};
+pub use ids::{next_logical_group, next_session_id};
 
 mod object;
 pub use object::{
@@ -52,12 +52,6 @@ impl Handle {
     /// Return a clone that stamps object events with this transport connection ID.
     pub fn with_connection_id(mut self, connection_id: u64) -> Self {
         self.connection_id = Some(connection_id);
-        self
-    }
-
-    /// Return a clone that stamps object events with the next process-wide session ID.
-    pub fn with_new_session_id(mut self) -> Self {
-        self.session_id = Some(next_session_id());
         self
     }
 
@@ -98,8 +92,7 @@ static GLOBAL: OnceLock<backend::Backend> = OnceLock::new();
 /// process-wide trace identifiers the transport facade allocates.
 pub fn global() -> Handle {
     let transport = quic_trace::global();
-    let inner = backend::available()
-        .then(|| backend::Handle::shared(GLOBAL.get_or_init(backend::Backend::native)));
+    let inner = backend::available().then(|| GLOBAL.get_or_init(backend::Backend::native));
     Handle {
         inner,
         transport,

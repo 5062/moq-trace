@@ -272,18 +272,7 @@ impl ObjectTrace {
 
     /// Start a measured object lifecycle phase.
     pub fn phase(&mut self, phase: ObjectPhase) -> ObjectPhaseTrace<'_> {
-        let state = self.0.as_ref().and_then(|state| {
-            if !state.backend.enabled(Tracepoint::Phase) {
-                return None;
-            }
-            let span_id = state.backend.next_span_id();
-            state.emit_phase(span_id, phase, PhaseEdge::Start, None);
-            Some((span_id, phase))
-        });
-        ObjectPhaseTrace {
-            object: self,
-            state,
-        }
+        self.start_phase(phase, None)
     }
 
     /// Start an object phase at a timestamp captured earlier.
@@ -292,11 +281,20 @@ impl ObjectTrace {
     /// other event. A wait that began elsewhere, such as
     /// [`ObjectPhase::DeliveryWait`], starts this way.
     pub fn phase_at(&mut self, phase: ObjectPhase, start_ns: u64) -> ObjectPhaseTrace<'_> {
+        self.start_phase(phase, Some(start_ns))
+    }
+
+    /// Start a phase at `start_ns`, or at the current time when it is absent.
+    ///
+    /// The clock is read only after enablement is checked, so a disabled phase
+    /// costs no clock read.
+    fn start_phase(&mut self, phase: ObjectPhase, start_ns: Option<u64>) -> ObjectPhaseTrace<'_> {
         let state = self.0.as_ref().and_then(|state| {
             if !state.backend.enabled(Tracepoint::Phase) {
                 return None;
             }
             let span_id = state.backend.next_span_id();
+            let start_ns = start_ns.unwrap_or_else(|| state.backend.now_ns());
             state.emit_phase_at(span_id, phase, PhaseEdge::Start, None, start_ns);
             Some((span_id, phase))
         });
@@ -364,7 +362,7 @@ impl ObjectTrace {
                 return future.as_mut().poll(cx);
             };
             let start_ns = state.backend.now_ns();
-            let scope = CallScope::enter(&state.backend);
+            let scope = CallScope::enter(state.backend);
             let poll = future.as_mut().poll(cx);
             let calls = scope.exit();
             let end_ns = state.backend.now_ns();
@@ -458,9 +456,9 @@ struct CallScope {
 }
 
 impl CallScope {
-    fn enter(backend: &crate::backend::Handle) -> Self {
+    fn enter(backend: crate::backend::Handle) -> Self {
         let active = ActivePoll {
-            backend: backend.clone(),
+            backend,
             calls: Calls::default(),
             in_call: false,
         };
@@ -542,16 +540,6 @@ impl<F: Future> Future for TransportCall<F> {
 }
 
 impl ObjectTraceState {
-    fn emit_phase(
-        &self,
-        span_id: u64,
-        phase: ObjectPhase,
-        edge: PhaseEdge,
-        outcome: Option<ObjectOutcome>,
-    ) {
-        self.emit_phase_at(span_id, phase, edge, outcome, self.backend.now_ns());
-    }
-
     fn emit_phase_at(
         &self,
         span_id: u64,
@@ -652,7 +640,7 @@ impl Handle {
             context: context.clone(),
         });
         ObjectTrace(Some(ObjectTraceState {
-            backend: inner.clone(),
+            backend: inner,
             trace_id,
             payload_bytes: context.payload_bytes,
             stream_offset_end: None,
