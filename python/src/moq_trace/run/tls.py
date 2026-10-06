@@ -21,9 +21,7 @@ KEY = "relay.key"
 def needs_certificate(config: ExperimentConfig) -> bool:
     """Report whether the relay arguments name the certificate or its key."""
 
-    return config.relay_args is not None and any(
-        placeholder in argument for argument in config.relay_args for placeholder in ("{certificate}", "{key}")
-    )
+    return any(placeholder in argument for argument in config.relay_args for placeholder in ("{certificate}", "{key}"))
 
 
 def generate_certificate(output: pathlib.Path) -> None:

@@ -214,11 +214,12 @@ class Process:
     async def hold(self, seconds: float) -> None:
         """Require the process to keep running for `seconds`."""
 
-        done, _ = await asyncio.wait({self.exited}, timeout=seconds)
-        if done:
+        if await self._settled(seconds):
             raise CaptureError(f"{self.name} exited with status {self.returncode} during startup")
 
     async def _settled(self, timeout: float) -> bool:
+        """Wait up to `timeout` for the process to exit, reporting whether it did."""
+
         done, _ = await asyncio.wait({self.exited}, timeout=timeout)
         return bool(done)
 

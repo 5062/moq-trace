@@ -79,7 +79,13 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(mock.patch.object(placement, "RemoteHost", FakeRemote))
 
     def _config(self, **overrides) -> ExperimentConfig:
-        fields = {"output": self.root / "run", "warmup_seconds": 0, "duration_seconds": 0.2, "cooldown_seconds": 0}
+        fields = {
+            "output": self.root / "run",
+            "relay_args": (),
+            "warmup_seconds": 0,
+            "duration_seconds": 0.2,
+            "cooldown_seconds": 0,
+        }
         fields.update(overrides)
         return ExperimentConfig(**fields)
 
@@ -146,7 +152,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(where.directory(where.subscriber).startswith(str(self.root / "peer")))
 
     async def test_a_remote_relay_is_traced_on_its_host_and_copied_back(self) -> None:
-        config = self._config(hosts=Hosts(relay=self._remote("relay", binary="/opt/relay")), qlog=True)
+        config = self._config(hosts=Hosts(relay=self._remote("relay")), qlog=True)
         with mock.patch.object(capture, "LttngSession", autospec=True) as session_class:
             relay = ("sh", "-c", "trap 'exit 0' INT; echo \"$QLOGDIR\"; echo listening; while :; do sleep 0.02; done")
             where, result = await self._capture(config, command_set(relay=relay))
@@ -220,7 +226,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 4)
 
     async def test_building_runs_once_per_host_and_checkout(self) -> None:
-        relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay", binary="bin/relay", workdir="/tmp/runs")
+        relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay", workdir="/tmp/runs")
         peer = HostConfig(ssh="me@peer.example", checkout="/srv/moq-trace", workdir="/tmp/runs")
         config = self._config(relay_build="make relay", hosts=Hosts(relay=relay, publisher=peer, subscriber=peer))
         with mock.patch.object(FakeRemote, "build", autospec=True) as build:
@@ -232,12 +238,12 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_a_remote_relay_without_a_build_command_is_rejected(self) -> None:
-        relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay", binary="bin/relay")
+        relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay")
         with self.assertRaisesRegex(CaptureError, "no build command for the relay"):
             await placement_for(self._config(hosts=Hosts(relay=relay))).build()
 
     async def test_every_host_is_connected_once(self) -> None:
-        relay = HostConfig(ssh="me@relay.example", binary="/opt/relay")
+        relay = HostConfig(ssh="me@relay.example")
         peer = HostConfig(ssh="me@peer.example")
         config = self._config(hosts=Hosts(relay=relay, publisher=peer, subscriber=peer))
         with mock.patch.object(FakeRemote, "connect", autospec=True) as connect:

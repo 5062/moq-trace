@@ -109,9 +109,10 @@ both `moq_trace:*` and `quic_trace:*`, analyze an existing CTF directory, and
 render figures from the resulting DuckDB artifact. The CTF reader accepts only
 the current provider event schemas.
 
-An experiment may replace the default relay arguments with a `relay_args` TOML
-array. Its entries can use `{port}`, `{output}`, `{certificate}`, and `{key}`;
-certificate placeholders trigger generation of a throwaway TLS pair. Relays
+An experiment names the relay's whole command line in a `relay_args` TOML
+array, since the runner knows no relay's arguments. Its entries can use
+`{port}`, `{protocol}`, `{output}`, `{certificate}`, and `{key}`; certificate
+placeholders trigger generation of a throwaway TLS pair. Relays
 without a readiness log marker can set `relay_ready_log = ""` and use
 `relay_startup_seconds`. `moq-trace run --output` overrides the configured run
 directory without changing the checked-in experiment profile.
@@ -175,8 +176,9 @@ The default commands enable flakes themselves, so a host whose Nix leaves them
 off still builds.
 `build` overrides the command, and an empty `build` uses the existing binary.
 A remote relay builds from `--checkout` for that relay when given, then its
-host's `checkout`, then the profile's path. `binary` overrides where a role's
-binary is.
+host's `checkout`, then the profile's path, and the profile's relative `relay_bin`
+resolves against that checkout. `binary` overrides where a peer's binary is; the
+relay's is always `relay_bin`.
 
 Only the relay's host is traced. The LTTng session, the packet capture, qlog,
 and the clock offset the network figures need are all taken there and copied

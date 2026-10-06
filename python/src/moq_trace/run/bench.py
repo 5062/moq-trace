@@ -54,7 +54,8 @@ _ProfileFile = pydantic.create_model(
     __config__=pydantic.ConfigDict(extra="forbid"),
     checkout=(pathlib.Path, ...),
     relay_bin=(pathlib.Path, ...),
-    **{key: _optional(key) for key in sorted(LAUNCH_KEYS - {"relay_bin"})},
+    relay_args=(ExperimentConfig.model_fields["relay_args"].annotation, ...),
+    **{key: _optional(key) for key in sorted(LAUNCH_KEYS - {"relay_bin", "relay_args"})},
 )
 
 
@@ -124,12 +125,9 @@ def experiment_config(
         root = (checkout or profile.checkout).expanduser().resolve()
         launch["relay_bin"] = root / launch["relay_bin"]
     else:
+        # `relay_bin` stays relative, for the relay host to resolve against this checkout.
         remote_checkout = str(checkout) if checkout is not None else hosts.relay.checkout or str(profile.checkout)
-        relay = hosts.relay.model_copy(
-            update={"checkout": remote_checkout, "binary": hosts.relay.binary or str(launch.pop("relay_bin"))}
-        )
-        launch.pop("relay_bin", None)
-        hosts = hosts.model_copy(update={"relay": relay})
+        hosts = hosts.model_copy(update={"relay": hosts.relay.model_copy(update={"checkout": remote_checkout})})
     port = settings.get("port", ExperimentConfig.model_fields["port"].default)
     if launch.get("relay_url") is not None:
         launch["relay_url"] = launch["relay_url"].format(port=port)

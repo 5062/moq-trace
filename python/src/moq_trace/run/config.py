@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 import shutil
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from ..metadata import ComparisonDimension, TransportProfile
 
@@ -21,9 +21,10 @@ class HostConfig(StrictModel):
 
     Every path is a path on that host, and a relative path or one starting with
     `~/` resolves against the remote home. When `checkout` is set, `build` runs
-    in it before each run, and a relative `binary` resolves against it. A role
-    has a default for both, so a host usually names only `ssh` and `checkout`.
-    An empty `build` skips building.
+    in it before each run, and a relative binary path resolves against it. A
+    role has a default for both, so a host usually names only `ssh` and
+    `checkout`. An empty `build` skips building. `binary` names a peer's binary;
+    the relay's is the experiment's `relay_bin` wherever the relay runs.
     """
 
     ssh: str
@@ -63,8 +64,15 @@ class ExperimentConfig(StrictModel):
     model_config = ConfigDict(validate_default=True)
 
     output: pathlib.Path
+    # Declared before `relay_bin`, whose validator reads it to tell where the relay runs.
+    hosts: Hosts = Field(default_factory=Hosts)
+    # A relative path resolves on the relay's host: against the controller's working
+    # directory for a local relay, and against `hosts.relay.checkout`, or else the
+    # remote home, for a remote one. A bare name is looked up on `PATH` there.
     relay_bin: pathlib.Path = pathlib.Path("moq-relay")
-    relay_args: tuple[str, ...] | None = None
+    # The relay's whole argument list, so the runner knows no relay's command line.
+    # Entries may name `{port}`, `{protocol}`, `{output}`, `{certificate}`, and `{key}`.
+    relay_args: tuple[str, ...]
     relay_ready_log: str = "listening"
     relay_startup_seconds: float = Field(default=0.5, ge=0)
     relay_graceful_stop: bool = True
@@ -82,7 +90,6 @@ class ExperimentConfig(StrictModel):
     # controller, whose address the runner cannot know; otherwise it defaults to
     # the relay host's address.
     relay_url: str | None = None
-    hosts: Hosts = Field(default_factory=Hosts)
     relay_cpu: int | None = Field(default=None, ge=0, description="Pin each relay to this CPU.")
     subscribers: int = Field(default=1, gt=0, description="Subscriber sessions, one subscription each.")
     object_size: int = Field(default=16_384, gt=0, description="Bytes per object.")
@@ -113,9 +120,15 @@ class ExperimentConfig(StrictModel):
 
     @field_validator("relay_bin", "bench_bin")
     @classmethod
-    def resolve_local_binary(cls, value: pathlib.Path) -> pathlib.Path:
-        """Resolve local binaries before child processes change directory."""
+    def resolve_local_binary(cls, value: pathlib.Path, info: ValidationInfo) -> pathlib.Path:
+        """Resolve local binaries before child processes change directory.
 
+        A remote relay's binary is left as written, for its host to resolve.
+        """
+
+        hosts = info.data.get("hosts")
+        if info.field_name == "relay_bin" and hosts is not None and hosts.relay is not None:
+            return value
         if value.parent == pathlib.Path("."):
             installed = shutil.which(str(value))
             if installed is not None:
@@ -124,14 +137,14 @@ class ExperimentConfig(StrictModel):
 
     @model_validator(mode="after")
     def remote_relay_is_reachable(self) -> "ExperimentConfig":
-        """Require a relay address every remote peer can dial, and a remote relay binary."""
+        """Require a relay address every remote peer can dial, and one name for the relay binary."""
 
         relay = self.hosts.relay
         remote_peers = [host for host in (self.hosts.publisher, self.hosts.subscriber) if host is not None]
         if relay is None and remote_peers and self.relay_url is None:
             raise ValueError("relay_url is required when a peer runs on another host than a local relay")
-        if relay is not None and relay.binary is None:
-            raise ValueError("hosts.relay.binary is required; bench fills it from the relay profile")
+        if relay is not None and relay.binary is not None:
+            raise ValueError("hosts.relay.binary is not used; set relay_bin, which a remote relay resolves on its host")
         return self
 
 

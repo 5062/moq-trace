@@ -1,8 +1,16 @@
 # https://github.com/5062/moq/tree/moq-trace
 # Build: `just trace-build`
-# The runner's default relay arguments are this relay's own CLI, so none are set here
+#
+# The relay generates its own certificate, and anyone may publish or subscribe.
 checkout = "~/moq-dev-moq"
 relay_bin = "target/release/moq-relay"
+relay_args = [
+  "--server-bind", "[::]:{port}",
+  "--server-backend", "quinn",
+  "--server-version", "{protocol}",
+  "--tls-generate", "localhost",
+  "--auth-public", "",
+]
 # Run in the checkout on a remote relay host before each run.
 relay_build = "nix --extra-experimental-features 'nix-command flakes' develop --command just trace-build"
 transport_profile = "quinn"

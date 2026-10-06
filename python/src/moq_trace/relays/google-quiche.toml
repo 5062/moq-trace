@@ -16,7 +16,6 @@ relay_args = [
   "--v=1",
 ]
 relay_ready_log = ""
-relay_startup_seconds = 0.5
 relay_graceful_stop = false
 relay_local_host = "127.0.0.1"
 # Run in the checkout on a remote relay host before each run. The traced build

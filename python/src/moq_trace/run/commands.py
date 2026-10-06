@@ -21,8 +21,7 @@ def _relay_url(config: ExperimentConfig, placement: Placement, peer: Host) -> st
         return f"https://{config.relay_local_host}:{config.port}"
     if config.relay_url is not None:
         return config.relay_url
-    if config.hosts.relay is None:
-        raise CaptureError("relay_url is required when a peer runs on another host than a local relay")
+    # The configuration requires `relay_url` for a remote peer of a local relay.
     return f"https://{config.hosts.relay.reachable_address}:{config.port}"
 
 
@@ -51,33 +50,18 @@ def _peer(config: ExperimentConfig, placement: Placement, role: str) -> list[str
 
 
 def _relay(config: ExperimentConfig, placement: Placement) -> list[str]:
-    binary = placement.relay_binary()
-    if config.relay_args is None:
-        relay = [
-            binary,
-            "--server-bind",
-            f"[::]:{config.port}",
-            "--server-backend",
-            "quinn",
-            "--server-version",
-            PROTOCOL,
-            "--tls-generate",
-            "localhost",
-            "--auth-public",
-            "",
-        ]
-    else:
-        directory = placement.directory(placement.relay)
-        values = {
-            "port": str(config.port),
-            "output": directory,
-            "certificate": f"{directory}/relay.crt",
-            "key": f"{directory}/relay.key",
-        }
-        try:
-            relay = [binary, *(argument.format_map(values) for argument in config.relay_args)]
-        except KeyError as error:
-            raise CaptureError(f"unknown relay argument placeholder: {error.args[0]}") from error
+    directory = placement.directory(placement.relay)
+    values = {
+        "port": str(config.port),
+        "protocol": PROTOCOL,
+        "output": directory,
+        "certificate": f"{directory}/relay.crt",
+        "key": f"{directory}/relay.key",
+    }
+    try:
+        relay = [placement.relay_binary(), *(argument.format_map(values) for argument in config.relay_args)]
+    except KeyError as error:
+        raise CaptureError(f"unknown relay argument placeholder: {error.args[0]}") from error
     if config.relay_cpu is not None:
         relay[:0] = ["taskset", "-c", str(config.relay_cpu)]
     return relay

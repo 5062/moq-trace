@@ -16,7 +16,9 @@ from moq_trace.run.bench import RelayProfile, experiment_config, load_profile, p
 
 
 def _profile(**launch) -> RelayProfile:
-    return RelayProfile(name="relay", checkout=pathlib.Path("/opt/relay"), launch={"relay_bin": "bin/relay", **launch})
+    return RelayProfile(
+        name="relay", checkout=pathlib.Path("/opt/relay"), launch={"relay_bin": "bin/relay", "relay_args": (), **launch}
+    )
 
 
 class BenchTests(unittest.TestCase):
@@ -27,6 +29,7 @@ class BenchTests(unittest.TestCase):
         for name in profiles():
             config = experiment_config(load_profile(name), pathlib.Path("run"), {})
             self.assertTrue(config.relay_bin.is_absolute(), name)
+            self.assertTrue(config.relay_args, name)
 
     def test_relay_binary_resolves_against_the_checkout(self) -> None:
         config = experiment_config(_profile(), pathlib.Path("run"), {})
@@ -39,7 +42,7 @@ class BenchTests(unittest.TestCase):
         settings = {"hosts": {"relay": {"ssh": "me@relay.example"}}}
 
         config = experiment_config(_profile(relay_build="make"), pathlib.Path("run"), settings)
-        self.assertEqual((config.hosts.relay.checkout, config.hosts.relay.binary), ("/opt/relay", "bin/relay"))
+        self.assertEqual((config.hosts.relay.checkout, config.relay_bin), ("/opt/relay", pathlib.Path("bin/relay")))
         self.assertEqual(config.relay_build, "make")
 
         config = experiment_config(_profile(), pathlib.Path("run"), settings, pathlib.Path("~/other"))
@@ -66,7 +69,7 @@ class BenchTests(unittest.TestCase):
     def test_profiles_may_not_set_the_workload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             (pathlib.Path(directory) / "rogue.toml").write_text(
-                'checkout = "/opt/relay"\nrelay_bin = "relay"\nsubscribers = 8\n'
+                'checkout = "/opt/relay"\nrelay_bin = "relay"\nrelay_args = []\nsubscribers = 8\n'
             )
             with mock.patch.object(
                 bench, "_profile_files", return_value={"rogue": pathlib.Path(directory) / "rogue.toml"}

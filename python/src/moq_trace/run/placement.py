@@ -53,11 +53,10 @@ class Placement:
 
         return getattr(self, role)
 
-    @staticmethod
-    def spec(config: ExperimentConfig, role: str) -> HostConfig | None:
+    def spec(self, role: str) -> HostConfig | None:
         """The configuration of the host `role` runs on, or `None` on the controller."""
 
-        return getattr(config.hosts, role)
+        return getattr(self.config.hosts, role)
 
     def directory(self, host: Host) -> str:
         """The run directory on `host`."""
@@ -75,12 +74,12 @@ class Placement:
         spec = self.config.hosts.relay
         if spec is None:
             return str(self.config.relay_bin)
-        return self.relay.binary(spec.binary or "moq-relay", spec.checkout)
+        return self.relay.binary(str(self.config.relay_bin), spec.checkout)
 
     def bench_binary(self, role: str) -> str:
         """The peer binary on the host a peer role runs on."""
 
-        spec = self.spec(self.config, role)
+        spec = self.spec(role)
         if spec is None:
             return str(self.config.bench_bin)
         default = BENCH_BINARY if spec.checkout is not None else "moq-bench"
@@ -107,7 +106,7 @@ class Placement:
 
         built = set()
         for role in ROLES:
-            spec = self.spec(self.config, role)
+            spec = self.spec(role)
             if spec is None or spec.checkout is None:
                 continue
             host = self.host(role)

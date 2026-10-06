@@ -93,7 +93,7 @@ async def _capture(config: ExperimentConfig, command: CommandSet, placement: Pla
         await subscriber.stop(True)
         await publisher.stop(True)
         await relay.stop(config.relay_graceful_stop)
-        return await capture.finish(relay.pid)
+        return await capture.finish()
 
 
 async def _binaries(placement: Placement) -> Binaries:

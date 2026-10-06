@@ -85,6 +85,7 @@ class CaptureSession:
         self.session: LttngSession | None = None
         self.tcpdump: Process | None = None
         self.tracked: list[int] = []
+        self.relay_pid = 0
 
     async def __aenter__(self) -> CaptureSession:
         await self.cleanup.__aenter__()
@@ -144,9 +145,10 @@ class CaptureSession:
             _log.info("waiting for the relay's trace providers, then starting the trace")
             await self.session.wait_for_provider(relay_pid)
             await self.session.start([relay_pid])
+        self.relay_pid = relay_pid
         self.tracked.append(relay_pid)
 
-    async def finish(self, relay_pid: int) -> Capture:
+    async def finish(self) -> Capture:
         """Finalize and collect recording files after workload processes stop."""
 
         if self.tcpdump is not None:
@@ -169,7 +171,7 @@ class CaptureSession:
         manifest = await _network_manifest(self.config, self.output, self.relay, self.clock, roles)
         return Capture(
             trace=None if self.session is None else self.output / "trace",
-            relay_pid=relay_pid,
+            relay_pid=self.relay_pid,
             pids=tuple(self.tracked),
             network=manifest,
         )
