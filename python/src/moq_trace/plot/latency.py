@@ -10,37 +10,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 from .breakdown import _draw_phase_cdfs
-from .common import PlotRun, _format_us, _metrics, _object_spans, _save, _values_us
-
-
-def _draw_distribution(
-    ecdf: Axes,
-    ccdf: Axes | None,
-    values_us: Sequence[float],
-    label: str,
-    index: int,
-) -> None:
-    """Draw one sorted sample set as an ECDF and, optionally, its tail CCDF."""
-
-    count = len(values_us)
-    p50 = values_us[int(0.50 * (count - 1))]
-    p99 = values_us[int(0.99 * (count - 1))]
-    color = f"C{index}"
-    ecdf.ecdf(
-        values_us,
-        color=color,
-        label=f"{label}: p50 {_format_us(p50)}, p99 {_format_us(p99)}, max {_format_us(values_us[-1])} µs (n={count})",
-    )
-    ecdf.plot([p50], [0.5], marker="o", color=color)
-    if ccdf is not None:
-        # The survival function steps from 1 down to 1/n, so the slowest sample
-        # stays visible on the log axis instead of dropping to zero.
-        ccdf.step(
-            values_us,
-            [1 - rank / count for rank in range(count)],
-            where="post",
-            color=color,
-        )
+from .common import PlotRun, _draw_distribution, _metrics, _object_spans, _save, _values_us
 
 
 def _decorate_distribution(ecdf: Axes, ccdf: Axes | None, minimum_count: int) -> None:

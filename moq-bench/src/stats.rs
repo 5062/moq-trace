@@ -12,7 +12,6 @@ pub struct Stats {
     connections: AtomicU64,
     frames_sent: AtomicU64,
     bytes_sent: AtomicU64,
-    groups_sent: AtomicU64,
     frames_recv: AtomicU64,
     bytes_recv: AtomicU64,
     groups_recv: AtomicU64,
@@ -46,11 +45,6 @@ impl Stats {
     pub fn frame_sent(&self, bytes: usize) {
         self.frames_sent.fetch_add(1, Ordering::Relaxed);
         self.bytes_sent.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-
-    /// Record one started group.
-    pub fn group_sent(&self) {
-        self.groups_sent.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one received frame of `bytes` bytes.

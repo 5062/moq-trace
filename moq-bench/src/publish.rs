@@ -60,7 +60,6 @@ pub async fn produce(
             group.write_frame(Timestamp::now(), zeros.clone())?;
         }
 
-        stats.group_sent();
         group.finish()?;
         sequence += 1;
     }

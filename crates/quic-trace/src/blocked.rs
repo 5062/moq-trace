@@ -80,10 +80,8 @@ impl SendBlockedTrace {
     }
 
     /// End the interval now, when the connection can send again.
-    pub fn finish(mut self) {
-        if let Some(state) = self.0.take() {
-            state.emit(PhaseEdge::Done, state.backend.now_ns());
-        }
+    pub fn finish(self) {
+        drop(self);
     }
 }
 

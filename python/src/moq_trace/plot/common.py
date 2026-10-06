@@ -29,6 +29,36 @@ def _format_us(value: float) -> str:
     return f"{value:.0f}" if value >= 1_000 else f"{value:.3g}"
 
 
+def _draw_distribution(
+    ecdf: Axes,
+    ccdf: Axes | None,
+    values_us: Sequence[float],
+    label: str,
+    index: int,
+) -> None:
+    """Draw one sorted sample set as an ECDF and, optionally, its tail CCDF."""
+
+    count = len(values_us)
+    p50 = values_us[int(0.50 * (count - 1))]
+    p99 = values_us[int(0.99 * (count - 1))]
+    color = f"C{index}"
+    ecdf.ecdf(
+        values_us,
+        color=color,
+        label=f"{label}: p50 {_format_us(p50)}, p99 {_format_us(p99)}, max {_format_us(values_us[-1])} µs (n={count})",
+    )
+    ecdf.plot([p50], [0.5], marker="o", color=color)
+    if ccdf is not None:
+        # The survival function steps from 1 down to 1/n, so the slowest sample
+        # stays visible on the log axis instead of dropping to zero.
+        ccdf.step(
+            values_us,
+            [1 - rank / count for rank in range(count)],
+            where="post",
+            color=color,
+        )
+
+
 def _plain_log(axis: Axis) -> None:
     """Label a log time axis with plain numbers instead of powers of ten."""
 
@@ -135,9 +165,6 @@ def _cdf_panels(
     no metric has any. A metric in `signed` may be negative, so its panel marks
     zero and labels its axis with the given text instead of starting at zero.
     """
-
-    # Imported here because the latency module imports this one.
-    from .latency import _draw_distribution
 
     if not runs:
         raise ValueError("a distribution figure requires at least one run")
