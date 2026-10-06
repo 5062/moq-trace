@@ -25,6 +25,12 @@ else:
 # them in this order. Both clocks are narrowed to signed nanoseconds, so a
 # timestamp that does not fit fails while decoding instead of while deriving
 # spans from it.
+#
+# `ctf_timestamp_ns` is the instant LTTng recorded the event, and `timestamp_ns`
+# the instant the hook says it happened, which a hook may capture earlier and
+# emit later. Both are read from the host monotonic clock in nanoseconds without
+# the Unix-epoch offset LTTng stores beside its clock, so their difference is how
+# long the hook held the event before emitting it.
 CONTEXT_FIELDS = (
     pa.field("pid", pa.uint64()),
     pa.field("tid", pa.uint64()),
@@ -124,6 +130,12 @@ SCHEMAS = {
     ),
 }
 
+# The clock LTTng-UST stamps events with by default: CLOCK_MONOTONIC counted in
+# nanoseconds, the clock the providers read for `timestamp_ns`. A session using a
+# clock plugin records another clock, whose values cannot be compared.
+_CLOCK_NAME = "monotonic"
+_CLOCK_FREQUENCY = 1_000_000_000
+
 # The events each provider emits. The providers and this analyzer are versioned
 # together, so an event a provider emits but this table lacks is an error.
 PROVIDER_EVENTS = {
@@ -180,8 +192,14 @@ class _Decoder:
         self.name = name
         self.event_name = event_class.name
         stream_class = event_class.stream_class
-        if stream_class.default_clock_class is None:
+        clock_class = stream_class.default_clock_class
+        if clock_class is None:
             raise CtfError(f"{self.event_name} events have no clock snapshot")
+        if clock_class.name != _CLOCK_NAME or clock_class.frequency != _CLOCK_FREQUENCY:
+            raise CtfError(
+                f"{self.event_name} events are stamped by clock {clock_class.name!r} at {clock_class.frequency} Hz; "
+                f"the analyzer reads only LTTng's default {_CLOCK_NAME!r} clock in nanoseconds"
+            )
 
         payload_class = event_class.payload_field_class
         members = set() if payload_class is None else set(payload_class)
@@ -235,9 +253,10 @@ class _Decoder:
         """Append one event directly to its typed batch's column buffers."""
 
         payload = event.payload_field
+        emitted = message.default_clock_snapshot.value
         columns[0].append(pid)
         columns[1].append(tid)
-        columns[2].append(message.default_clock_snapshot.ns_from_origin)
+        columns[2].append(emitted)
         for index, (field, presence, labels) in enumerate(self.fields, start=3):
             column = columns[index]
             if presence is not None and not int(payload[presence]):
@@ -245,6 +264,16 @@ class _Decoder:
                 continue
             value = int(payload[field])
             column.append(value if labels is None else labels[value])
+        # A hook emits an event no earlier than the instant it stamped, so an
+        # event recorded before its own timestamp means the provider and LTTng
+        # read different clocks, and no duration that mixes them means anything.
+        # `timestamp_ns` is the first payload column and never optional.
+        timestamp = columns[3][-1]
+        if emitted < timestamp:
+            raise CtfError(
+                f"{self.event_name} from VPID {pid} was recorded at {emitted} ns, before its timestamp "
+                f"{timestamp} ns; the provider and LTTng must both read CLOCK_MONOTONIC"
+            )
 
 
 def _decoder(event_class) -> _Decoder | None:

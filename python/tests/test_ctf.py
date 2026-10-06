@@ -9,7 +9,7 @@ SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 
 import trace_source  # noqa: E402
-from trace_source import Enum, Event  # noqa: E402
+from trace_source import Clock, Enum, Event  # noqa: E402
 
 from moq_trace.decode import ctf  # noqa: E402
 
@@ -59,6 +59,23 @@ class CtfDecodeTests(unittest.TestCase):
                 ]
             },
         )
+
+    def test_clock_is_read_without_the_unix_epoch_offset(self) -> None:
+        """The recorded instant shares the monotonic epoch of the payload timestamp."""
+
+        rows = ctf._batches(trace_source.messages([socket_start()], Clock(offset_seconds=1_700_000_000)), None, 10)
+        (_, batch), *_ = rows
+        self.assertEqual(batch.column("ctf_timestamp_ns").to_pylist(), [7])
+
+    def test_rejects_a_clock_other_than_lttng_monotonic(self) -> None:
+        for clock in (Clock(name="realtime"), Clock(frequency=1_000_000)):
+            with self.subTest(clock=clock), self.assertRaisesRegex(ctf.CtfError, "analyzer reads only"):
+                list(ctf._batches(trace_source.messages([socket_start()], clock), None, 10))
+
+    def test_rejects_an_event_recorded_before_its_timestamp(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "udp_socket_start from VPID 42 was recorded at 7 ns, before"):
+            self.decode([socket_start(timestamp_ns=8)])
+        self.assertEqual(self.decode([socket_start(timestamp_ns=7)])["udp_socket_start"][0]["timestamp_ns"], 7)
 
     def test_decodes_connection_paths(self) -> None:
         payload = {
@@ -140,7 +157,7 @@ class CtfDecodeTests(unittest.TestCase):
             self.decode([Event("lttng_ust_statedump:procname", {"procname": trace_source.Text("relay")})])
 
     def test_bounds_batches_and_keeps_event_order(self) -> None:
-        events = [socket_start(trace_id, timestamp=trace_id) for trace_id in range(5)]
+        events = [socket_start(trace_id, timestamp=10 + trace_id) for trace_id in range(5)]
         batches = list(ctf._batches(trace_source.messages(events), None, 2))
         self.assertEqual([batch.num_rows for _, batch in batches], [2, 2, 1])
         self.assertEqual(

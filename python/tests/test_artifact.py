@@ -184,7 +184,7 @@ class ArtifactTests(unittest.TestCase):
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
             with open_artifact(output) as artifact:
-                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (7,))
+                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (8,))
                 self.assertEqual(artifact.connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,)
@@ -198,6 +198,18 @@ class ArtifactTests(unittest.TestCase):
                     artifact.connection.execute("SELECT count(*) FROM duckdb_views() WHERE NOT internal").fetchone(),
                     (0,),
                 )
+
+    def test_emission_delays_report_the_longest_hold_per_event(self):
+        with fixture() as trace:
+            for trace_id, timestamp, emitted in ((90, 1_000, 1_000), (91, 2_000, 2_050), (92, 3_000, 3_020)):
+                trace.insert("udp_socket_start", trace_id=trace_id, timestamp_ns=timestamp, ctf_timestamp_ns=emitted)
+            trace.prepare_model()
+            self.assertEqual(
+                trace.connection.execute(
+                    "SELECT events, max_ns FROM model.emission_delays WHERE event = 'udp_socket_start'"
+                ).fetchone(),
+                (3, 50),
+            )
 
     def test_frame_grain_keeps_disjoint_ranges_and_completion_prefix(self):
         with fixture() as trace:
@@ -301,13 +313,13 @@ class ArtifactTests(unittest.TestCase):
             ctf._batch("udp_socket_end", [[value] for value in row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
-        for version in (6, 8):
+        for version in (7, 9):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "analysis.duckdb"
                 with duckdb.connect(str(output)) as connection:
                     write_metadata(connection, run_metadata())
                     connection.execute("UPDATE metadata SET schema_version = ?", [version])
-                expected = f"schema version {version}, .* reads only 7; .*new output path"
+                expected = f"schema version {version}, .* reads only 8; .*new output path"
                 with self.assertRaisesRegex(TraceError, expected):
                     with open_artifact(output):
                         pass

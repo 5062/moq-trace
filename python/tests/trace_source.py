@@ -62,10 +62,20 @@ def _context(item: Event) -> tuple[bool, bool]:
     return (item.vpid is not None, item.vtid is not None)
 
 
-def messages(items: list[Event | Discarded]):
+@dataclasses.dataclass(frozen=True)
+class Clock:
+    """The clock class every stream uses, LTTng's default unless a test overrides it."""
+
+    name: str = "monotonic"
+    frequency: int = 1_000_000_000
+    # LTTng stores the Unix time at which its monotonic clock read zero here.
+    offset_seconds: int = 0
+
+
+def messages(items: list[Event | Discarded], clock: Clock = Clock()):
     """Return a Babeltrace message iterator over the given items, in order."""
 
-    return bt2.TraceCollectionMessageIterator(bt2.ComponentSpec(_Source, obj=items))
+    return bt2.TraceCollectionMessageIterator(bt2.ComponentSpec(_Source, obj=(items, clock)))
 
 
 def _labels(items: list[Event | Discarded]) -> dict[tuple[str, str], dict[str, int]]:
@@ -129,9 +139,12 @@ if bt2 is not None:
             # The `ctf.fs` source runs under MIP 1, which exposes the trace UID.
             return [[1, 1]]
 
-        def __init__(self, config, params, items) -> None:
+        def __init__(self, config, params, source) -> None:
+            items, clock = source
             trace_class = self._create_trace_class()
-            clock_class = self._create_clock_class(frequency=1_000_000_000)
+            clock_class = self._create_clock_class(
+                name=clock.name, frequency=clock.frequency, offset=bt2.ClockClassOffset(clock.offset_seconds)
+            )
             labels = _labels(items)
             stream_classes = {}
             event_classes = {}

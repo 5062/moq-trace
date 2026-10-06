@@ -79,6 +79,16 @@ CREATE TABLE model.send_blocked (
     PRIMARY KEY (span_id)
 );
 
+-- How long hooks held each event type between the instant it stamped and the
+-- instant LTTng recorded it. Most hooks emit at once; a hook that stamps a send
+-- or receive and emits once the batch is known shows here as a long delay.
+CREATE TABLE model.emission_delays (
+    event VARCHAR NOT NULL,
+    events UBIGINT NOT NULL,
+    max_ns BIGINT NOT NULL,
+    PRIMARY KEY (event)
+);
+
 -- The steady-state window, filled once it is selected. `origin_ns` is the
 -- instant every `elapsed_ns` is measured from.
 CREATE TABLE model.window (

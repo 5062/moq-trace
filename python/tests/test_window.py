@@ -26,8 +26,8 @@ class WindowAndProcessTests(ModelCase):
 
     def test_analysis_accepts_unused_incomplete_socket_operations(self) -> None:
         self.object_start(1, "rx", 1)
-        self.insert("udp_socket_start", trace_id=99)
-        self.insert("udp_socket_start", trace_id=99)
+        self.insert("udp_socket_start", trace_id=99, ctf_timestamp_ns=1, timestamp_ns=1)
+        self.insert("udp_socket_start", trace_id=99, ctf_timestamp_ns=2, timestamp_ns=2)
         self.prepare_model()
 
     def unfinished_object(self, trace_id: int, timestamp_ns: int) -> None:

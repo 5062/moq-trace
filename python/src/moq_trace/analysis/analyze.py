@@ -155,6 +155,14 @@ def _validate_raw(connection: duckdb.DuckDBPyConnection) -> None:
     sql.check(connection, "checks/raw")
     connection.execute(sql.read("model/schema"))
     connection.execute(sql.read("model/populate"))
+    # Built from the decoder's event list, so a new event cannot be left out.
+    delays = " UNION ALL ".join(
+        f"SELECT '{name}' AS event, ctf_timestamp_ns - timestamp_ns AS delay_ns FROM {name}" for name in ctf.SCHEMAS
+    )
+    connection.execute(
+        f"INSERT INTO model.emission_delays SELECT event, count(*), max(delay_ns) FROM ({delays}) "
+        "GROUP BY event ORDER BY event"
+    )
     phases.register(connection)
     sql.check(connection, "checks/model")
 

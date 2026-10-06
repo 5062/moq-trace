@@ -16,7 +16,7 @@ from . import sql
 
 # The on-disk schema version this tool writes and reads. An artifact of any other
 # version is rebuilt rather than migrated.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # The metadata schema each artifact kind must satisfy. A kind is an on-disk
 # identity rather than an internal detail, so metadata is validated when it is
