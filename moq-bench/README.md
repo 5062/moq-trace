@@ -30,7 +30,9 @@ The peers are a fixture and a baseline, never a comparison row.
   and receives through one session, exercising both object directions.
 - **Subscriber fan-out.** One client with `--connections N --broadcasts 0
   --subscribe 1` opens `N` sessions that each subscribe once, so a relay emits `N`
-  copies of every group without the runner needing `N` hosts.
+  copies of every group without the runner needing `N` hosts. Each session binds its
+  own QUIC endpoint and UDP port, so the relay sees `N` distinct peers rather than one
+  socket, and `--client-bind` must leave the port at 0 when `N` is above 1.
 
 The peers are built from `moq-net`, so the client's MoQ codec is moq-dev's
 implementation. That is what makes it a usable constant, and it is also why a result

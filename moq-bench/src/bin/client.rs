@@ -5,7 +5,9 @@
 //! path. Every knob is a scalar rather than a range: the client is the constant side
 //! of a cross-implementation measurement, so its offered load has to be the same in
 //! every run. `--connections` opens several such sessions from one process, which is
-//! how a run gets several independent subscribers without several peers.
+//! how a run gets several independent subscribers without several peers. Each session
+//! binds its own QUIC endpoint, so it has its own UDP port and endpoint driver just as
+//! a separate peer would.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -85,7 +87,8 @@ struct Session {
     broadcasts: u64,
     subscribe: u64,
     shape: Shape,
-    client: moq_native::Client,
+    /// Initialized per session, so sessions never share a socket or endpoint driver.
+    config: moq_native::ClientConfig,
     url: url::Url,
     stats: Arc<Stats>,
 }
@@ -102,9 +105,16 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--client-connect is required"))?;
 
+    // A shared endpoint would funnel every session through one socket and one driver
+    // task, which a relay sees as a single 4-tuple and which caps fan-out on the
+    // client side. Every session therefore binds its own, and a fixed port could only
+    // be bound once.
+    anyhow::ensure!(
+        args.connections == 1 || args.client.bind.port() == 0,
+        "--client-bind needs port 0 when --connections is above 1"
+    );
     let mut config = args.client.clone();
     config.version = versions().iter().copied().collect();
-    let client = config.init()?;
 
     let stats = Arc::new(Stats::default());
     tokio::spawn(stats.clone().report(args.report));
@@ -123,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
             broadcasts: args.broadcasts,
             subscribe: args.subscribe,
             shape: args.shape,
-            client: client.clone(),
+            config: config.clone(),
             url: url.clone(),
             stats: stats.clone(),
         };
@@ -166,10 +176,12 @@ async fn drive(session: Session) -> anyhow::Result<()> {
         broadcasts,
         subscribe,
         shape,
-        client,
+        config,
         url,
         stats,
     } = session;
+
+    let client = config.init()?;
 
     // Two origins: one holds what this session publishes, the other is filled with
     // what the peer announces and is where subscriptions are drawn from.
