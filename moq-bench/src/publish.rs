@@ -36,9 +36,11 @@ pub async fn produce(
 
     let mut sequence = 0;
     loop {
-        let mut group = track.append_group()?;
-
+        // The group opens only once its keyframe is due. Opening it before the tick
+        // would hold an empty group, and possibly its stream, open for a whole period,
+        // which inflates every lifecycle measured from the group's creation.
         ticker.tick().await;
+        let mut group = track.append_group()?;
         let header = Header {
             broadcast: path.clone(),
             group: sequence,
