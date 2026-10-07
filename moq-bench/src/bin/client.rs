@@ -198,7 +198,7 @@ async fn drive(session: Session) -> anyhow::Result<()> {
         let track = broadcast.create_track(TRACK, None)?;
         let stats = stats.clone();
         tokio::spawn(async move {
-            if let Err(err) = publish::produce(path.clone(), shape, track, stats).await {
+            if let Err(err) = publish::produce(shape, track, stats).await {
                 tracing::warn!(%path, %err, "publisher ended");
             }
         });

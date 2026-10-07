@@ -1,22 +1,21 @@
 //! Synthetic group production.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use moq_net::bytes::Bytes;
 use moq_net::{Timestamp, track};
 
 use crate::Shape;
-use crate::object::Header;
+use crate::object;
 use crate::stats::Stats;
 
 /// Produce frames on one track until the process exits.
 ///
-/// Each group opens with the JSON keyframe describing the shape, then carries
+/// Each group opens with the keyframe describing the shape, then carries
 /// `group_size` zeroed frames. The loop never returns: a track that stopped
 /// producing should still stay published, and the caller holds it open instead.
 pub async fn produce(
-    path: String,
     shape: Shape,
     mut track: track::Producer,
     stats: Arc<Stats>,
@@ -27,6 +26,9 @@ pub async fn produce(
         return std::future::pending::<anyhow::Result<()>>().await;
     }
 
+    // Both frames are fixed for the track, so every group clones them by reference
+    // and the loop does no encoding or allocation of its own.
+    let keyframe = object::encode(&shape);
     let zeros = Bytes::from(vec![0u8; shape.frame_size as usize]);
     let period = Duration::from_secs_f64(1.0 / shape.fps as f64);
     let mut ticker = tokio::time::interval(period);
@@ -34,27 +36,14 @@ pub async fn produce(
     // so a scheduling hiccup cannot inflate the offered load.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let mut sequence = 0;
     loop {
         // The group opens only once its keyframe is due. Opening it before the tick
         // would hold an empty group, and possibly its stream, open for a whole period,
         // which inflates every lifecycle measured from the group's creation.
         ticker.tick().await;
         let mut group = track.append_group()?;
-        let header = Header {
-            broadcast: path.clone(),
-            group: sequence,
-            fps: shape.fps,
-            frame_size: shape.frame_size,
-            group_size: shape.group_size,
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        };
-        let keyframe = header.encode(shape.frame_size)?;
         stats.frame_sent(keyframe.len());
-        group.write_frame(Timestamp::now(), keyframe)?;
+        group.write_frame(Timestamp::now(), keyframe.clone())?;
 
         for _ in 0..shape.group_size {
             ticker.tick().await;
@@ -63,6 +52,5 @@ pub async fn produce(
         }
 
         group.finish()?;
-        sequence += 1;
     }
 }

@@ -50,16 +50,21 @@ pub fn versions() -> Versions {
 
 /// The synthetic object shape a publisher emits.
 ///
-/// Every frame in a group is exactly `frame_size` bytes, the JSON keyframe
-/// included, so object size stays a clean independent variable across runs.
+/// Every frame in a group is exactly `frame_size` bytes, the keyframe included,
+/// so object size stays a clean independent variable across runs.
 #[derive(clap::Args, Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct Shape {
     /// Frames emitted per second per track. Zero publishes the track but stays idle.
     #[arg(long, env = "MOQ_BENCH_FPS", default_value_t = Shape::default().fps)]
     pub fps: u64,
-    /// Bytes per frame.
-    #[arg(long, env = "MOQ_BENCH_FRAME_SIZE", default_value_t = Shape::default().frame_size)]
+    /// Bytes per frame. At least the keyframe header, so the keyframe fits in one frame.
+    #[arg(
+        long,
+        env = "MOQ_BENCH_FRAME_SIZE",
+        default_value_t = Shape::default().frame_size,
+        value_parser = clap::value_parser!(u64).range(object::HEADER_LEN as u64..)
+    )]
     pub frame_size: u64,
     /// Zeroed frames per group following the keyframe. May be zero.
     #[arg(long, env = "MOQ_BENCH_GROUP_SIZE", default_value_t = Shape::default().group_size)]

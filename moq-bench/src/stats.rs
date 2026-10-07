@@ -15,6 +15,7 @@ pub struct Stats {
     frames_recv: AtomicU64,
     bytes_recv: AtomicU64,
     groups_recv: AtomicU64,
+    groups_short: AtomicU64,
     subscriptions: AtomicU64,
     mismatches: AtomicU64,
 }
@@ -27,6 +28,7 @@ struct Counters {
     frames_recv: u64,
     bytes_recv: u64,
     groups_recv: u64,
+    groups_short: u64,
     mismatches: u64,
 }
 
@@ -58,8 +60,19 @@ impl Stats {
         self.groups_recv.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a frame whose length disagrees with the size its keyframe declared,
-    /// which means the object was truncated or re-framed somewhere on the path.
+    /// Record a received group that arrived without its keyframe or with fewer
+    /// frames than its keyframe declared.
+    ///
+    /// A relay that joins a group partway or drops a late one produces these, and
+    /// so does the end of a run, so they are relay policy or teardown rather than a
+    /// broken path.
+    pub fn group_short(&self) {
+        self.groups_short.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a group with a frame whose length disagrees with the size its
+    /// keyframe declared, or with more frames than it declared, which means objects
+    /// were truncated or re-framed somewhere on the path.
     pub fn mismatch(&self) {
         self.mismatches.fetch_add(1, Ordering::Relaxed);
     }
@@ -96,6 +109,7 @@ impl Stats {
                 send_mbps = format!("{send_mbps:.2}"),
                 recv_mbps = format!("{recv_mbps:.2}"),
                 groups_recv = current.groups_recv,
+                groups_short = current.groups_short,
                 mismatches,
                 "stats"
             );
@@ -109,6 +123,7 @@ impl Stats {
             frames_recv: self.frames_recv.load(Ordering::Relaxed),
             bytes_recv: self.bytes_recv.load(Ordering::Relaxed),
             groups_recv: self.groups_recv.load(Ordering::Relaxed),
+            groups_short: self.groups_short.load(Ordering::Relaxed),
             mismatches: self.mismatches.load(Ordering::Relaxed),
         }
     }

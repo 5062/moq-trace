@@ -1347,8 +1347,6 @@ dependencies = [
  "moq-native",
  "moq-net",
  "rustls",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "url",

@@ -35,8 +35,6 @@ moq-native = { git = "https://github.com/5062/moq", branch = "moq-trace", defaul
 ] }
 moq-net = { git = "https://github.com/5062/moq", branch = "moq-trace" }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 url = "2"

@@ -82,18 +82,31 @@ evenly over a window so a many-session client does not connect as one burst.
 
 The reporter logs `connections` and `subscriptions` as gauges of live sessions and
 live subscriptions, alongside the throughput pair, the frame rates, `groups_recv`,
-and `mismatches`. A runner waits for `connections=<N>` before it opens a window and
+`groups_short`, and `mismatches`. A runner waits for `connections=<N>` before it opens a window and
 for `subscriptions=<N>` before it measures, which are the same observables
 `rs/moq-bench` logs, so the same runner can drive either binary.
 
 ## Shape
 
-Every frame in a group is exactly `--frame-size` bytes, the JSON keyframe included.
-A subscriber parses the keyframe back and counts any frame whose length disagrees
-with the size it declared, which catches truncation or re-framing anywhere on the
-path without either peer knowing how the other was configured. The reporter logs
-those as `mismatches`, so a run with a non-zero count has a broken peer or a broken
-path, not a slow one.
+Every frame in a group is exactly `--frame-size` bytes, the keyframe included, so
+`--frame-size` must be at least the 32-byte keyframe header. The keyframe is a
+binary header of the magic `moqbench` followed by `frame_size`, `group_size`, and
+`fps` as little-endian `u64`s, zero-padded to the frame size. It carries only the
+shape, which is fixed for a track, so a publisher builds it once and every group
+shares it. Group sequence and path are already on the wire, and timing is in the
+trace.
+
+A subscriber reads the header back and checks every frame of the group against it,
+without either peer knowing how the other was configured:
+
+- `mismatches` counts groups with a frame whose length disagrees with the declared
+  size, or with more frames than declared. That catches truncation or re-framing
+  anywhere on the path, so a run with a non-zero count has a broken peer or a
+  broken path, not a slow one.
+- `groups_short` counts groups that arrived without their keyframe or with fewer
+  frames than declared. A relay produces these by joining a group partway or by
+  dropping a late one, and teardown cuts the last group short, so they describe
+  relay policy and the end of a run rather than a broken path.
 
 `--group-size 0` makes each group a single keyframe. `--fps 0` keeps a track
 published and idle, which is how a run isolates the control plane from the data
@@ -102,7 +115,7 @@ path.
 ## Layout
 
 - `src/lib.rs` pins the version set and the object shape.
-- `src/object.rs` is the keyframe both peers write and read.
+- `src/object.rs` is the binary keyframe both peers write and read.
 - `src/publish.rs` and `src/subscribe.rs` are the two data-path loops.
 - `src/bin/server.rs` and `src/bin/client.rs` are the peers.
 
