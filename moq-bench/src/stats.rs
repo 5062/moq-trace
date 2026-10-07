@@ -85,11 +85,19 @@ impl Stats {
 
     /// Log a counter line every `interval` until the task is dropped.
     pub async fn report(self: Arc<Self>, interval: Duration) {
+        // A fixed schedule keeps report times from drifting by the time each report
+        // takes. A stalled report skips the ticks it missed rather than firing them in
+        // a burst, and every rate divides by the time actually elapsed.
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick completes at once and would report an empty interval.
+        ticker.tick().await;
+
         let mut previous = self.counters();
         let mut last = Instant::now();
 
         loop {
-            tokio::time::sleep(interval).await;
+            ticker.tick().await;
 
             let elapsed = last.elapsed().as_secs_f64();
             last = Instant::now();
