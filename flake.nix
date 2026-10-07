@@ -57,7 +57,7 @@
             rustPlatform.bindgenHook
             util-linux
             (writeShellScriptBin "moq-trace" ''
-              exec ${python}/bin/python -m moq_trace.cli "$@"
+              exec ${python}/bin/python -m moq_trace.run.cli "$@"
             '')
           ];
           shellHook = ''

@@ -3,6 +3,7 @@
 default: check
 
 check: tracepoints
+    moq-trace --help >/dev/null
     cargo test -p moq-trace --all-features
     cargo test -p quic-trace --all-features
     cargo build --example facade_contract -p moq-trace --all-features
