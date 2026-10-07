@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import pathlib
 import sys
 import tempfile
@@ -116,6 +117,9 @@ class LocalHostTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(CaptureError, f"failed with status 2; see {log}"):
             await self.host.build(str(self.directory), "echo compiling; exit 2", log)
         self.assertEqual(log.read_text(), "compiling\n")
+
+    async def test_the_cpu_probe_reports_this_process_affinity(self) -> None:
+        self.assertEqual(await self.host.cpus(), frozenset(os.sched_getaffinity(0)))
 
     async def test_the_clock_probe_reports_the_realtime_offset(self) -> None:
         clock = await self.host.clock()

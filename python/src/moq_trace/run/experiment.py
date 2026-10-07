@@ -140,7 +140,7 @@ async def run(config: ExperimentConfig, pool: SshPool) -> pathlib.Path:
     await placement.build()
     if tls.needs_certificate(config):
         tls.generate_certificate(output)
-    command = commands(config, placement)
+    command = commands(config, placement, await placement.peer_cpus())
     capture = await _capture(config, command, placement)
     if capture.trace is None:
         return output

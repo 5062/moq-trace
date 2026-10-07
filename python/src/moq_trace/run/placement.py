@@ -85,6 +85,27 @@ class Placement:
         default = BENCH_BINARY if spec.checkout is not None else "moq-bench"
         return self.host(role).binary(spec.binary or default, spec.checkout)
 
+    async def peer_cpus(self) -> tuple[int, ...] | None:
+        """The CPUs a peer on the relay's host runs on, or `None` to leave peers unpinned.
+
+        A peer's runtime starts a worker per CPU, so on a pinned relay's host the
+        scheduler would run peer threads on the relay's CPU and charge their
+        preemption to the relay's packet lifecycles. Peers there run on every other
+        CPU the host allows instead. Peers on other hosts, and every peer of an
+        unpinned relay, are left alone.
+        """
+
+        cpu = self.config.relay_cpu
+        if cpu is None or all(self.host(role) is not self.relay for role in ("publisher", "subscriber")):
+            return None
+        allowed = await self.relay.cpus()
+        if cpu not in allowed:
+            raise CaptureError(f"relay_cpu {cpu} is not a CPU {self.relay.name} allows: {sorted(allowed)}")
+        others = tuple(sorted(allowed - {cpu}))
+        if not others:
+            raise CaptureError(f"{self.relay.name} has no CPU besides relay_cpu {cpu} for the peers on it")
+        return others
+
     async def connect(self) -> None:
         """Connect to every host once before anything slow starts.
 

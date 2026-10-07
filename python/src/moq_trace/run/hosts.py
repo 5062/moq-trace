@@ -64,6 +64,11 @@ print(json.dumps({
 """
 
 
+# Reports the CPUs a process started on a host may run on, which a cgroup cpuset
+# or an inherited affinity can narrow below the CPUs the host has online.
+_CPU_PROBE = "import os; print(*sorted(os.sched_getaffinity(0)))"
+
+
 @dataclasses.dataclass(frozen=True)
 class Clock:
     """A host's realtime-minus-monotonic offset and its loopback interfaces.
@@ -356,6 +361,11 @@ class Host(abc.ABC):
             return (await self.run(f"sha256sum {shlex.quote(path)}")).split()[0]
         except (CaptureError, IndexError):
             return None
+
+    async def cpus(self) -> frozenset[int]:
+        """The CPUs a process started on this host may run on."""
+
+        return frozenset(map(int, (await self.run(f"{shlex.quote(self.python)} -c {shlex.quote(_CPU_PROBE)}")).split()))
 
     async def clock(self) -> Clock:
         """This host's realtime-minus-monotonic offset and loopback interface indexes."""

@@ -90,6 +90,8 @@ class ExperimentConfig(StrictModel):
     # controller, whose address the runner cannot know; otherwise it defaults to
     # the relay host's address.
     relay_url: str | None = None
+    # Peers placed on the relay's host then run on every other CPU it allows, so they
+    # never preempt the relay on its own CPU.
     relay_cpu: int | None = Field(default=None, ge=0, description="Pin each relay to this CPU.")
     subscribers: int = Field(default=1, gt=0, description="Subscriber sessions, one subscription each.")
     object_size: int = Field(default=16_384, gt=0, description="Bytes per object.")

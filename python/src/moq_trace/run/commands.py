@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from ..errors import CaptureError
 from ..metadata import CommandSet
 from .config import ExperimentConfig
@@ -25,8 +27,23 @@ def _relay_url(config: ExperimentConfig, placement: Placement, peer: Host) -> st
     return f"https://{config.hosts.relay.reachable_address}:{config.port}"
 
 
-def _peer(config: ExperimentConfig, placement: Placement, role: str) -> list[str]:
+def _cpu_list(cpus: Sequence[int]) -> str:
+    """Write sorted CPUs as a `taskset -c` list, folding consecutive runs into ranges."""
+
+    runs: list[list[int]] = []
+    for cpu in cpus:
+        if runs and cpu == runs[-1][-1] + 1:
+            runs[-1].append(cpu)
+        else:
+            runs.append([cpu])
+    return ",".join(str(run[0]) if len(run) == 1 else f"{run[0]}-{run[-1]}" for run in runs)
+
+
+def _peer(config: ExperimentConfig, placement: Placement, role: str, cpus: Sequence[int] | None) -> list[str]:
+    # Only a peer sharing the relay's host can contend for the relay's CPU.
+    pin = ["taskset", "-c", _cpu_list(cpus)] if cpus and placement.host(role) is placement.relay else []
     return [
+        *pin,
         placement.bench_binary(role),
         "--client-connect",
         _relay_url(config, placement, placement.host(role)),
@@ -67,12 +84,15 @@ def _relay(config: ExperimentConfig, placement: Placement) -> list[str]:
     return relay
 
 
-def commands(config: ExperimentConfig, placement: Placement) -> CommandSet:
-    """Construct exact argv arrays, each as it runs on its role's host, without a shell."""
+def commands(config: ExperimentConfig, placement: Placement, peer_cpus: Sequence[int] | None = None) -> CommandSet:
+    """Construct exact argv arrays, each as it runs on its role's host, without a shell.
 
-    publisher = _peer(config, placement, "publisher")
+    `peer_cpus`, from `Placement.peer_cpus`, confines the peers on the relay's host.
+    """
+
+    publisher = _peer(config, placement, "publisher", peer_cpus)
     publisher.extend(["--name", "relay-latency", "--connections", "1", "--broadcasts", "1", "--subscribe", "0"])
-    subscriber = _peer(config, placement, "subscriber")
+    subscriber = _peer(config, placement, "subscriber", peer_cpus)
     # One session per subscriber, each taking a single subscription, so the relay
     # emits `subscribers` copies of every group for the analysis to compare against.
     subscriber.extend(

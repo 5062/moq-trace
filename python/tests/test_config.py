@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import re
 import sys
@@ -168,6 +169,39 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(command.publisher[command.publisher.index("--group-size") + 1], "29")
         self.assertNotIn("--duration", command.subscriber)
         self.assertNotIn("--duration", command.publisher)
+
+    def test_only_peers_on_the_relay_host_are_pinned_off_its_cpu(self) -> None:
+        relay = HostConfig(ssh="me@relay.example", workdir="/tmp/runs")
+        peer = HostConfig(ssh="me@peer.example", binary="/usr/bin/moq-bench", workdir="/tmp/runs")
+        config = ExperimentConfig(
+            output=pathlib.Path("run"),
+            relay_args=(),
+            relay_cpu=2,
+            hosts=Hosts(relay=relay, publisher=relay, subscriber=peer),
+        )
+
+        command = commands(config, placement_for(config), (0, 1, 3, 4, 5, 7))
+
+        self.assertEqual(command.relay[:3], ("taskset", "-c", "2"))
+        self.assertEqual(command.publisher[:3], ("taskset", "-c", "0-1,3-5,7"))
+        self.assertEqual(command.subscriber[0], "/usr/bin/moq-bench")
+
+    def test_peer_cpus_exclude_a_pinned_relay_cpu_on_its_host(self) -> None:
+        def peer_cpus(allowed: set[int], **overrides: object) -> tuple[int, ...] | None:
+            config = ExperimentConfig(output=pathlib.Path("run"), relay_args=(), **overrides)
+            placement = placement_for(config)
+            with mock.patch.object(type(placement.relay), "cpus", mock.AsyncMock(return_value=frozenset(allowed))):
+                return asyncio.run(placement.peer_cpus())
+
+        self.assertEqual(peer_cpus({0, 1, 2, 3}, relay_cpu=1), (0, 2, 3))
+        self.assertIsNone(peer_cpus({0, 1, 2, 3}))
+        remote = HostConfig(ssh="me@peer.example", binary="/usr/bin/moq-bench")
+        separate = Hosts(publisher=remote, subscriber=remote)
+        self.assertIsNone(peer_cpus({0, 1}, relay_cpu=1, hosts=separate, relay_url="https://relay:4443"))
+        with self.assertRaisesRegex(CaptureError, "relay_cpu 4 is not a CPU"):
+            peer_cpus({0, 1}, relay_cpu=4)
+        with self.assertRaisesRegex(CaptureError, "no CPU besides relay_cpu 0"):
+            peer_cpus({0}, relay_cpu=0)
 
     def test_custom_relay_arguments_expand_run_paths(self) -> None:
         config = ExperimentConfig(
