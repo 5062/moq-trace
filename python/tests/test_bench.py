@@ -25,7 +25,7 @@ class BenchTests(unittest.TestCase):
     """Exercise relay profiles and the bench command through stable interfaces."""
 
     def test_every_shipped_profile_builds_an_experiment(self) -> None:
-        self.assertEqual(profiles(), ("cloudflare-moq-rs", "google-quiche", "moq-dev-moq"))
+        self.assertEqual(profiles(), ("cloudflare-moq-rs", "facebook-moxygen", "google-quiche", "moq-dev-moq"))
         for name in profiles():
             config = experiment_config(load_profile(name), pathlib.Path("run"), {})
             self.assertTrue(config.relay_bin.is_absolute(), name)

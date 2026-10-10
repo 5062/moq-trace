@@ -1,0 +1,28 @@
+# https://github.com/5062/moxygen/tree/moq-trace
+# Build: `nix develop --command moq_trace/build.sh` with MOQ_TRACE_PREFIX set.
+#
+# The relay logs no readiness marker at its default verbosity, so the runner
+# waits a fixed startup delay. It binds IPv4 and IPv6 and stops cleanly on
+# SIGINT. `-endpoint /` serves WebTransport at the path-less URL the runner
+# dials, `-versions 16` offers only the bench peers' draft, and
+# `-max_cached_tracks 0` disables the relay cache, which the other relays lack
+# (`-enable_cache` is never read). The relay does not announce a namespace back
+# to the session that published it, so a workload that subscribes to its own
+# broadcast receives nothing.
+checkout = "~/facebook-moxygen"
+relay_bin = "_build/moxygen/relay/moqrelayserver"
+relay_args = [
+  "-port", "{port}",
+  "-cert", "{certificate}",
+  "-key", "{key}",
+  "-endpoint", "/",
+  "-versions", "16",
+  "-max_cached_tracks", "0",
+]
+relay_ready_log = ""
+relay_startup_seconds = 1.0
+# Run in the checkout on a remote relay host before each run. The toolkit is
+# installed from its checkout first, so the relay never compiles against an
+# install older than the event contract the analysis reads.
+relay_build = "(cd ../moq-trace && nix --extra-experimental-features 'nix-command flakes' develop --command just install) && MOQ_TRACE_PREFIX=$(cd ../moq-trace && pwd)/target/install nix --extra-experimental-features 'nix-command flakes' develop --command moq_trace/build.sh"
+transport_profile = "generic"
