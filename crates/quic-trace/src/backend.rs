@@ -31,6 +31,18 @@ pub(crate) enum Tracepoint {
     SendBlocked,
 }
 
+/// Every tracepoint of the schema.
+pub(crate) const ALL_TRACEPOINTS: [Tracepoint; 8] = [
+    Tracepoint::PacketStart,
+    Tracepoint::PacketPhase,
+    Tracepoint::StreamFrame,
+    Tracepoint::PacketEnd,
+    Tracepoint::SocketStart,
+    Tracepoint::SocketEnd,
+    Tracepoint::ConnectionPath,
+    Tracepoint::SendBlocked,
+];
+
 impl CoreTracepoint for Tracepoint {
     fn index(self) -> u32 {
         self as u32

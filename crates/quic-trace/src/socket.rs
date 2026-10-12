@@ -19,6 +19,35 @@ pub enum SocketOutcome {
     Abandoned,
 }
 
+impl SocketOutcome {
+    /// Describe a completed socket system call from its `errno`, or 0 for success.
+    ///
+    /// The outcome is the system call's own result, before any error policy of
+    /// the stack, so the same kernel result records the same outcome on every
+    /// stack. `EAGAIN` and `EWOULDBLOCK` would block and `ECONNRESET` is a reset.
+    /// Everything else is an error, `ENOBUFS` included, even where a stack
+    /// retries it like `EAGAIN`.
+    pub fn from_errno(errno: i32) -> Self {
+        if errno == 0 {
+            return Self::Success;
+        }
+        Self::from_io_error(&std::io::Error::from_raw_os_error(errno))
+    }
+
+    /// Describe a failed socket system call from the error it returned.
+    ///
+    /// An error that carries an OS code is classified by that code, the same
+    /// way [`SocketOutcome::from_errno`] and the C++ facade's
+    /// `quic_trace::socket_outcome` classify it.
+    pub fn from_io_error(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::WouldBlock => Self::WouldBlock,
+            std::io::ErrorKind::ConnectionReset => Self::ConnectionReset,
+            _ => Self::Error,
+        }
+    }
+}
+
 /// Batch measurements returned by one UDP socket operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SocketStats {

@@ -24,6 +24,9 @@ pub use blocked::{SendBlockedReason, SendBlockedTrace};
 mod path;
 pub use path::ConnectionPath;
 
+mod send;
+pub use send::PendingSend;
+
 /// Event direction at the local transport interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Direction {
@@ -56,6 +59,17 @@ impl Handle {
     /// Create a handle that never emits events.
     pub fn disabled() -> Self {
         Self::default()
+    }
+
+    /// Return whether any transport event would be recorded now.
+    ///
+    /// A stack that captures timestamps of its own before it knows which
+    /// lifecycle they belong to, such as the completion of a receive system
+    /// call, checks this first so an untraced build reads no clock.
+    pub fn is_enabled(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.any_enabled(&backend::ALL_TRACEPOINTS))
     }
 }
 

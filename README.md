@@ -82,11 +82,26 @@ Object phases measure processing, not waiting. Run any phase that awaits I/O
 through `ObjectTrace::measure`, which records each poll that does work and
 leaves time spent pending outside every phase.
 
+Object phases that make received data readable, such as creating an object or
+committing payload bytes, run through `ObjectTrace::publish`. The relay's model
+holds a `moq_trace::Wake` across each consumer wake it runs, and `publish`
+records those wakes as `notify` and the rest of the step as its own phase. It is
+the Rust counterpart of the C++ `FanOut` below, for relays that wake
+asynchronous consumers instead of calling them.
+
 A transport allocates each connection's identity with `next_connection_id`
 (`quic_trace::next_connection_id()` in C++) and stamps it on that connection's
 packet, socket, and object events. The counter never reuses a value. Do not use
 an address-derived ID such as Quinn's `stable_id`: a later connection can reuse
 the address, and the analysis joins by connection ID without a time bound.
+
+A transport depends on `quic-trace` alone, never on the MoQ facade. Its
+`PendingSend` holds the TX packets one send carries in their `send_queue` phase
+and ends them at the send's completion, and `SocketOutcome::from_errno` and
+`SocketOutcome::from_io_error` classify a socket system call's result. The C++
+header offers the same as `quic_trace::PendingSend` and
+`quic_trace::socket_outcome`, plus `PathEndpoint::from_sockaddr`, so every stack
+records the same kernel result and the same send lifecycle the same way.
 
 ## C++ instrumentation
 

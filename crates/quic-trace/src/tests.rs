@@ -140,6 +140,93 @@ fn queue_phases_bound_the_packet_lifecycle() {
 }
 
 #[test]
+fn pending_send_ends_every_packet_and_its_queue_with_the_send() {
+    let handle = trace();
+    let mut first = PendingSend::new();
+    first.push(handle.packet(PacketContext::new(Direction::Tx, 7)));
+    let mut coalesced = PendingSend::new();
+    coalesced.push(handle.packet(PacketContext::new(Direction::Tx, 7)));
+    first.append(&mut coalesced);
+    assert!(coalesced.is_empty());
+    let completion = now_ns() + 1_000;
+    first.dropped(completion);
+
+    let events = events(&handle);
+    let queues = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::PacketPhase {
+                    phase: PacketPhase::SendQueue,
+                    edge: PhaseEdge::Done,
+                    outcome: Some(PacketOutcome::Dropped),
+                    ..
+                }
+            )
+        })
+        .count();
+    let ends = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::PacketEnd {
+                    outcome: PacketOutcome::Dropped,
+                    timestamp_ns,
+                    ..
+                } if *timestamp_ns == completion
+            )
+        })
+        .count();
+    assert_eq!((queues, ends), (2, 2));
+}
+
+#[test]
+fn pending_send_holds_no_untraced_packet() {
+    let mut pending = PendingSend::new();
+    pending.push(PacketTrace::disabled());
+    pending.push(Handle::disabled().packet(PacketContext::new(Direction::Tx, 7)));
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn socket_outcome_describes_the_system_call_not_the_stack_policy() {
+    assert_eq!(SocketOutcome::from_errno(0), SocketOutcome::Success);
+    assert_eq!(SocketOutcome::from_errno(libc_errno::EAGAIN), SocketOutcome::WouldBlock);
+    assert_eq!(
+        SocketOutcome::from_errno(libc_errno::ECONNRESET),
+        SocketOutcome::ConnectionReset
+    );
+    assert_eq!(SocketOutcome::from_errno(libc_errno::ENOBUFS), SocketOutcome::Error);
+    assert_eq!(SocketOutcome::from_errno(libc_errno::EMSGSIZE), SocketOutcome::Error);
+    assert_eq!(
+        SocketOutcome::from_io_error(&std::io::ErrorKind::WouldBlock.into()),
+        SocketOutcome::WouldBlock
+    );
+}
+
+/// The Linux errno values the outcome mapping is pinned against.
+mod libc_errno {
+    pub const EAGAIN: i32 = 11;
+    pub const ENOBUFS: i32 = 105;
+    pub const ECONNRESET: i32 = 104;
+    pub const EMSGSIZE: i32 = 90;
+}
+
+#[test]
+fn handle_reports_whether_any_transport_event_is_enabled() {
+    assert!(!Handle::disabled().is_enabled());
+    let handle = trace();
+    assert!(handle.is_enabled());
+    let recording = recording(&handle);
+    recording.enable_only(Tracepoint::SocketEnd);
+    assert!(handle.is_enabled());
+    recording.set_enabled(Tracepoint::SocketEnd, false);
+    assert!(!handle.is_enabled());
+}
+
+#[test]
 fn connection_path_encodes_addresses_as_ipv6() {
     use std::net::SocketAddr;
 

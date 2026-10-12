@@ -17,6 +17,9 @@ mod backend;
 mod ids;
 pub use ids::{next_logical_group, next_session_id};
 
+mod wake;
+pub use wake::Wake;
+
 mod object;
 pub use object::{
     LogicalId, ObjectContext, ObjectIdentity, ObjectOutcome, ObjectPhase, ObjectPhaseTrace,

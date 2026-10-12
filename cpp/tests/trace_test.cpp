@@ -15,7 +15,12 @@ extern "C" std::uint64_t __wrap_quic_trace_now_ns(void) {
   return __real_quic_trace_now_ns();
 }
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include <cassert>
+#include <cerrno>
+#include <cstring>
 #include <type_traits>
 
 int main() {
@@ -93,4 +98,51 @@ int main() {
   if (!quic_trace_quic_connection_path_enabled()) {
     assert(clock_reads == before_path);
   }
+
+  // Socket addresses convert to the same endpoints as the explicit forms.
+  sockaddr_in v4_address{};
+  v4_address.sin_family = AF_INET;
+  v4_address.sin_port = htons(4443);
+  v4_address.sin_addr.s_addr = htonl(0x0a000001);
+  const auto from_v4 = quic_trace::PathEndpoint::from_sockaddr(
+      reinterpret_cast<const sockaddr*>(&v4_address));
+  assert(from_v4.address == mapped.address && from_v4.port == 4443);
+  sockaddr_in6 v6_address{};
+  v6_address.sin6_family = AF_INET6;
+  v6_address.sin6_port = htons(50266);
+  std::memcpy(&v6_address.sin6_addr, v6.data(), v6.size());
+  const auto from_v6 = quic_trace::PathEndpoint::from_sockaddr(
+      reinterpret_cast<const sockaddr*>(&v6_address));
+  assert(from_v6.address == peer.address && from_v6.port == 50266);
+  sockaddr unspecified{};
+  unspecified.sa_family = AF_UNSPEC;
+  const auto unknown = quic_trace::PathEndpoint::from_sockaddr(&unspecified);
+  const std::array<std::uint8_t, 16> unspecified_address{};
+  assert(unknown.address == unspecified_address && unknown.port == 0);
+
+  // The outcome is the system call's own result, before any stack policy.
+  assert(quic_trace::socket_outcome(0) == QUIC_TRACE_SOCKET_OUTCOME_SUCCESS);
+  assert(quic_trace::socket_outcome(EAGAIN) == QUIC_TRACE_SOCKET_OUTCOME_WOULD_BLOCK);
+  assert(quic_trace::socket_outcome(ECONNRESET) ==
+         QUIC_TRACE_SOCKET_OUTCOME_CONNECTION_RESET);
+  assert(quic_trace::socket_outcome(ENOBUFS) == QUIC_TRACE_SOCKET_OUTCOME_ERROR);
+
+  // A pending send holds only traced packets, and ends them with its outcome.
+  static_assert(!std::is_copy_constructible_v<quic_trace::PendingSend>);
+  quic_trace::PendingSend pending;
+  quic_trace::PacketContext pending_context;
+  pending_context.connection_id = 7;
+  pending_context.direction = QUIC_TRACE_DIRECTION_TX;
+  quic_trace::Packet pending_packet(pending_context);
+  const bool traced = pending_packet.traced();
+  pending.add(std::move(pending_packet));
+  pending.add(quic_trace::Packet());
+  assert(pending.empty() == !traced);
+  quic_trace::PendingSend coalesced;
+  coalesced.append(std::move(pending));
+  assert(pending.empty());
+  const auto before_dropped = clock_reads;
+  coalesced.dropped(quic_trace::now_ns());
+  assert(coalesced.empty());
+  if (!traced) assert(clock_reads == before_dropped + 1);
 }

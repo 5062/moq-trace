@@ -3,11 +3,18 @@
 
 #include <quic_trace/interface.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace quic_trace {
 
@@ -150,6 +157,9 @@ class Packet {
   /** Record abandonment when the packet leaves scope unfinished. */
   ~Packet() { abandon(); }
 
+  /** Return whether this packet records anything. */
+  bool traced() const { return trace_id_ != 0; }
+
   /** Record a packet number discovered after processing begins. */
   void set_number(std::uint64_t value) { context_.packet_number = value; }
 
@@ -279,6 +289,71 @@ class Packet {
   PacketContext context_;
 };
 
+/**
+ * The TX packets one send carries, waiting until that send returns.
+ *
+ * A TX packet's lifecycle ends when the send system call that accepts its
+ * datagram returns, so each packet waits in its `send_queue` phase from the end
+ * of encryption until then. A stack adds each packet as it finishes encrypting,
+ * moves the batch along with the bytes through any coalescing or write-blocked
+ * queue, and ends every packet at the send's completion.
+ *
+ * Destroying the batch records every packet still in it as abandoned: one that
+ * was never sent, or one handed to a writer that sends it later without saying
+ * when.
+ */
+class PendingSend {
+ public:
+  PendingSend() = default;
+  PendingSend(PendingSend&&) = default;
+  PendingSend& operator=(PendingSend&&) = default;
+  PendingSend(const PendingSend&) = delete;
+  PendingSend& operator=(const PendingSend&) = delete;
+
+  /**
+   * Hold a packet whose encryption just ended, starting its `send_queue` phase.
+   *
+   * A disabled packet is not held, so a batch of untraced packets stays empty.
+   */
+  void add(Packet packet) {
+    if (!packet.traced()) return;
+    PacketPhase queue = packet.phase(QUIC_TRACE_PACKET_PHASE_SEND_QUEUE);
+    packets_.emplace_back(std::move(packet), std::move(queue));
+  }
+
+  /** Take every packet of `other`, as when packets coalesce into one datagram. */
+  void append(PendingSend&& other) {
+    for (auto& entry : other.packets_) packets_.push_back(std::move(entry));
+    other.packets_.clear();
+  }
+
+  /** Return whether the batch holds no traced packet. */
+  bool empty() const { return packets_.empty(); }
+
+  /** End every packet at `at_ns`, when the send that accepted them returned. */
+  void sent(std::uint64_t at_ns) { finish_at(QUIC_TRACE_PACKET_OUTCOME_SUCCESS, at_ns); }
+
+  /**
+   * End every packet as dropped at `at_ns`, when the send that failed returned.
+   *
+   * A send the kernel rejected never put the packets on the wire, whatever the
+   * stack then does with the error.
+   */
+  void dropped(std::uint64_t at_ns) { finish_at(QUIC_TRACE_PACKET_OUTCOME_DROPPED, at_ns); }
+
+  /** End every packet, and its `send_queue` phase, with `outcome` at `at_ns`. */
+  void finish_at(quic_trace_packet_outcome outcome, std::uint64_t at_ns) {
+    for (auto& [packet, queue] : packets_) {
+      queue.finish_at(outcome, at_ns);
+      packet.finish_at(outcome, at_ns);
+    }
+    packets_.clear();
+  }
+
+ private:
+  std::vector<std::pair<Packet, PacketPhase>> packets_;
+};
+
 /** Batch measurements produced by one UDP socket operation. */
 struct SocketStats {
   /** Number of buffers processed by the operation. */
@@ -288,6 +363,22 @@ struct SocketStats {
   /** Total bytes represented by those buffers. */
   std::uint64_t bytes = 0;
 };
+
+/**
+ * Describe a completed socket system call from its `errno`, or 0 for success.
+ *
+ * The outcome is the system call's own result, before any error policy of the
+ * stack, so the same kernel result records the same outcome on every stack and
+ * in the Rust facade's `SocketOutcome::from_errno`. `EAGAIN` and `EWOULDBLOCK`
+ * would block and `ECONNRESET` is a reset. Everything else is an error,
+ * `ENOBUFS` included, even where a stack retries it like `EAGAIN`.
+ */
+inline quic_trace_socket_outcome socket_outcome(int error) {
+  if (error == 0) return QUIC_TRACE_SOCKET_OUTCOME_SUCCESS;
+  if (error == EAGAIN || error == EWOULDBLOCK) return QUIC_TRACE_SOCKET_OUTCOME_WOULD_BLOCK;
+  if (error == ECONNRESET) return QUIC_TRACE_SOCKET_OUTCOME_CONNECTION_RESET;
+  return QUIC_TRACE_SOCKET_OUTCOME_ERROR;
+}
 
 /**
  * An interval in which a connection cannot send, ended by `finish()` or scope.
@@ -471,6 +562,30 @@ struct PathEndpoint {
     endpoint.address = address;
     endpoint.port = port;
     return endpoint;
+  }
+
+  /**
+   * Describe an endpoint from a socket address.
+   *
+   * An address of another family, such as one the stack never resolved, is
+   * recorded as the unspecified IPv6 address with port 0.
+   */
+  static PathEndpoint from_sockaddr(const sockaddr* address) {
+    if (address != nullptr && address->sa_family == AF_INET) {
+      sockaddr_in v4;
+      std::memcpy(&v4, address, sizeof(v4));
+      std::array<std::uint8_t, 4> bytes;
+      std::memcpy(bytes.data(), &v4.sin_addr, bytes.size());
+      return ipv4(bytes, ntohs(v4.sin_port));
+    }
+    if (address != nullptr && address->sa_family == AF_INET6) {
+      sockaddr_in6 v6;
+      std::memcpy(&v6, address, sizeof(v6));
+      std::array<std::uint8_t, 16> bytes;
+      std::memcpy(bytes.data(), &v6.sin6_addr, bytes.size());
+      return ipv6(bytes, ntohs(v6.sin6_port));
+    }
+    return {};
   }
 };
 

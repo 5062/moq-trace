@@ -44,14 +44,14 @@ url = "2"
 # them or it silently builds a different Quinn and web-transport than the relays.
 # The revisions match rs/trace.toml in the moq repository.
 [patch.crates-io]
-moq-trace = { path = "../crates/moq-trace" }
-quinn = { git = "https://github.com/5062/quinn", rev = "76c4d143906186dc790c00a0df5582ae26592f36" }
-quinn-proto = { git = "https://github.com/5062/quinn", rev = "76c4d143906186dc790c00a0df5582ae26592f36" }
-web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
-web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "bf84a684d69ea255d315cc62eac5dce02600d830" }
+quic-trace = { path = "../crates/quic-trace" }
+quinn = { git = "https://github.com/5062/quinn", rev = "9a8a50e49a9e4091cf2acea2d0dc7d8a9dd73492" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "9a8a50e49a9e4091cf2acea2d0dc7d8a9dd73492" }
+web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "eea76bc39afacc65364dc3cd258d0b7bd98836f7" }
+web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "eea76bc39afacc65364dc3cd258d0b7bd98836f7" }
 
-# moq-net takes moq-trace from git while the Quinn fork takes it from crates.io.
-# Both must resolve to this checkout, or MoQ and transport hooks link two separate
-# facades with unrelated identifier spaces.
+# moq-net takes moq-trace from git while the Quinn fork takes quic-trace from
+# crates.io. Both must resolve to this checkout, or MoQ and transport hooks link
+# two separate facades with unrelated identifier spaces.
 [patch."https://github.com/5062/moq-trace"]
 moq-trace = { path = "../crates/moq-trace" }

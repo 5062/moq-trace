@@ -524,3 +524,129 @@ fn session_and_logical_ids_come_from_the_native_provider() {
     let native = unsafe { ffi::moq_trace_next_logical_group() };
     assert!(rust < native && native < next_logical_group());
 }
+
+/// Wake the consumers of a model, as a relay's modification guard does.
+fn wake_consumers() {
+    let _wake = Wake::begin();
+    std::hint::black_box(());
+}
+
+#[test]
+// Only a build that can emit times wakes.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn publish_records_each_wake_as_notify_between_step_occurrences() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result = object.publish(ObjectPhase::Create, || {
+        wake_consumers();
+        wake_consumers();
+        Ok::<_, ()>(3)
+    });
+    assert_eq!(result, Ok(3));
+    object.finish(ObjectOutcome::Success);
+
+    let phases: Vec<_> = named_occurrences(&events(&handle))
+        .into_iter()
+        .map(|occurrence| occurrence.0)
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            ObjectPhase::Create,
+            ObjectPhase::Notify,
+            ObjectPhase::Create,
+            ObjectPhase::Notify,
+            ObjectPhase::Create,
+        ]
+    );
+    let occurrences = named_occurrences(&events(&handle));
+    for pair in occurrences.windows(2) {
+        assert!(pair[0].2 <= pair[1].1, "{pair:?} must not overlap");
+    }
+}
+
+#[test]
+fn publish_marks_the_last_occurrence_failed_on_error() {
+    let handle = trace();
+    let mut object = handle.object(context());
+    let result = object.publish(ObjectPhase::FrameCommit, || Err::<(), _>("closed"));
+    assert_eq!(result, Err("closed"));
+    object.finish(ObjectOutcome::Failed);
+    let done: Vec<_> = events(&handle)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Phase {
+                phase: ObjectPhase::FrameCommit,
+                edge: PhaseEdge::Done,
+                outcome,
+                ..
+            } => outcome,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(done, [ObjectOutcome::Failed]);
+}
+
+#[test]
+fn publish_without_phase_tracing_only_runs_the_step() {
+    let handle = trace();
+    let recording = recording(&handle);
+    recording.enable_only(Tracepoint::Start);
+    let mut object = handle.object(context());
+    let clock_reads = recording.clock_reads();
+    let result = object.publish(ObjectPhase::Create, || {
+        wake_consumers();
+        Ok::<_, ()>(())
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(recording.clock_reads(), clock_reads);
+    drop(object);
+}
+
+#[test]
+fn a_wake_outside_publish_reads_no_clock() {
+    let handle = trace();
+    let recording = recording(&handle);
+    let clock_reads = recording.clock_reads();
+    wake_consumers();
+    assert_eq!(recording.clock_reads(), clock_reads);
+    assert!(events(&handle).is_empty());
+}
+
+#[test]
+// Only a build that can emit times wakes.
+#[cfg(all(feature = "lttng", target_os = "linux"))]
+fn a_nested_publish_keeps_its_wakes_apart() {
+    let handle = trace();
+    let mut outer = handle.object(context());
+    let mut inner = handle.object(context());
+    outer
+        .publish(ObjectPhase::Create, || {
+            inner.publish(ObjectPhase::Create, || {
+                wake_consumers();
+                Ok::<_, ()>(())
+            })
+        })
+        .unwrap();
+    let outer_id = {
+        outer.finish(ObjectOutcome::Success);
+        inner.finish(ObjectOutcome::Success);
+        trace_id(&events(&handle)[0])
+    };
+    let notifies: Vec<_> = events(&handle)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Phase {
+                    phase: ObjectPhase::Notify,
+                    edge: PhaseEdge::Start,
+                    ..
+                }
+            )
+        })
+        .map(|event| trace_id(&event))
+        .collect();
+    assert_eq!(notifies.len(), 1);
+    assert_ne!(notifies[0], outer_id, "the wake belongs to the inner object");
+}

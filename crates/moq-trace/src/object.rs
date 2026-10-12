@@ -405,6 +405,51 @@ impl ObjectTrace {
         .await
     }
 
+    /// Run a step that makes received data readable in the relay model.
+    ///
+    /// A relay model wakes its waiting consumers inside such a step, usually as
+    /// a modification guard drops. Each wake the model times with a
+    /// [`crate::Wake`] is recorded as [`ObjectPhase::Notify`], and the rest of
+    /// the step as `phase`, so the step becomes alternating occurrences that
+    /// never overlap. The last occurrence carries the step's outcome. Phases are
+    /// emitted after the step returns, so emission adds nothing to the measured
+    /// intervals. An object that records no phases runs the step untimed.
+    ///
+    /// This is the Rust counterpart of the C++ facade's `FanOut`: Rust relays
+    /// wake asynchronous consumers instead of calling them, so the shared work
+    /// is the wakes themselves.
+    pub fn publish<T, E>(
+        &mut self,
+        phase: ObjectPhase,
+        step: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let Some(backend) = self
+            .0
+            .as_ref()
+            .filter(|state| state.backend.enabled(Tracepoint::Phase))
+            .map(|state| state.backend)
+        else {
+            return step();
+        };
+        let start_ns = backend.now_ns();
+        let (result, wakes) = crate::wake::observe(backend, step);
+        let end_ns = backend.now_ns();
+        let mut cursor = start_ns;
+        for &(wake_start, wake_end) in wakes.intervals() {
+            self.phase_at(phase, cursor)
+                .finish_at(ObjectOutcome::Success, wake_start);
+            self.phase_at(ObjectPhase::Notify, wake_start)
+                .finish_at(ObjectOutcome::Success, wake_end);
+            cursor = wake_end;
+        }
+        let outcome = match result {
+            Ok(_) => ObjectOutcome::Success,
+            Err(_) => ObjectOutcome::Failed,
+        };
+        self.phase_at(phase, cursor).finish_at(outcome, end_ns);
+        result
+    }
+
     /// Finish the object interval with the latest metadata and result.
     pub fn finish(mut self, outcome: ObjectOutcome) {
         let Some(state) = self.0.take() else {
@@ -423,23 +468,37 @@ const CALL_CAPACITY: usize = 8;
 /// Calls beyond the capacity extend the last interval to the end of the latest
 /// one, so the intervals cover every call and never overlap, at the cost of
 /// also covering the MoQ work between the merged calls.
-#[derive(Default)]
-struct Calls {
-    intervals: [(u64, u64); CALL_CAPACITY],
+type Calls = Intervals<CALL_CAPACITY>;
+
+/// Up to `N` intervals recorded in order, as `(start, end)` clock readings.
+///
+/// Intervals beyond the capacity extend the last one to the end of the latest,
+/// so the intervals always cover everything recorded and never overlap.
+pub(crate) struct Intervals<const N: usize> {
+    intervals: [(u64, u64); N],
     len: usize,
 }
 
-impl Calls {
-    fn intervals(&self) -> &[(u64, u64)] {
+impl<const N: usize> Default for Intervals<N> {
+    fn default() -> Self {
+        Self {
+            intervals: [(0, 0); N],
+            len: 0,
+        }
+    }
+}
+
+impl<const N: usize> Intervals<N> {
+    pub(crate) fn intervals(&self) -> &[(u64, u64)] {
         &self.intervals[..self.len]
     }
 
-    fn push(&mut self, start_ns: u64, end_ns: u64) {
-        if self.len < CALL_CAPACITY {
+    pub(crate) fn push(&mut self, start_ns: u64, end_ns: u64) {
+        if self.len < N {
             self.intervals[self.len] = (start_ns, end_ns);
             self.len += 1;
         } else {
-            self.intervals[CALL_CAPACITY - 1].1 = end_ns;
+            self.intervals[N - 1].1 = end_ns;
         }
     }
 }

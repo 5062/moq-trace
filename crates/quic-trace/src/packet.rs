@@ -201,6 +201,11 @@ impl PacketTrace {
         Self(None)
     }
 
+    /// Return whether this token records anything.
+    pub(crate) fn is_traced(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Record the packet number discovered during RX processing.
     pub fn set_number(&mut self, number: u64) {
         if let Some(state) = &mut self.0 {
