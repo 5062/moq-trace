@@ -39,7 +39,10 @@ enum moq_trace_object_phase {
 	MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE,
 	MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE,
 	/* RX: wake or enumerate the consumers of a newly readable object. This is
-	 * the fan-out work shared by every copy, recorded on the inbound object. */
+	 * the fan-out work shared by every copy, recorded on the inbound object. A
+	 * relay that calls its consumers synchronously records the loop that calls
+	 * them, minus each copy's work from the start of its lifecycle until its
+	 * consumer returns. */
 	MOQ_TRACE_OBJECT_PHASE_NOTIFY,
 	/* TX wait: from the instant the relay made the object readable until this
 	 * copy's CLONE starts. It can start before the copy's lifecycle does. */
@@ -67,8 +70,9 @@ enum moq_trace_object_outcome {
 	MOQ_TRACE_OBJECT_OUTCOME_ABANDONED,
 	/* A delivery deadline passed before the object was delivered. */
 	MOQ_TRACE_OBJECT_OUTCOME_EXPIRED,
-	/* Relay policy discarded the object: it fell outside a subscription's
-	 * window, or the cache evicted it before a reader got to it. */
+	/* Relay policy discarded the object after its copy started: the cache
+	 * evicted it, a reader lagged past it, or the subscription's window shrank
+	 * under it. An object outside the window never starts a copy. */
 	MOQ_TRACE_OBJECT_OUTCOME_DROPPED,
 	/* The stream carrying the object was reset or stopped before it finished. */
 	MOQ_TRACE_OBJECT_OUTCOME_RESET,

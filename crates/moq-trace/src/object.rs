@@ -87,6 +87,13 @@ pub enum ObjectPhase {
     /// two, so it records that call as [`ObjectPhase::FrameCommit`] and emits
     /// no `Notify`. A relay that wakes consumers per chunk may record one
     /// occurrence per chunk.
+    ///
+    /// A relay that calls its consumers synchronously runs every outbound copy
+    /// inside the loop that notifies them. It records that loop as `Notify`,
+    /// minus each copy's own work from the start of the copy's lifecycle until
+    /// its consumer returns, so the loop becomes alternating occurrences that
+    /// never overlap a copy. The C++ facade's `FanOut` and `CopyWork` scopes
+    /// record it this way.
     Notify,
     /// Wait from the instant the relay made the object readable until this
     /// copy's [`ObjectPhase::Clone`] starts.
@@ -136,8 +143,12 @@ pub enum ObjectOutcome {
     Abandoned,
     /// A delivery deadline passed before the object was delivered.
     Expired,
-    /// Relay policy discarded the object: it fell outside a subscription's
-    /// window, or the cache evicted it before a reader got to it.
+    /// Relay policy discarded the object after its copy started: the cache
+    /// evicted it, a reader lagged past it, or the subscription's window shrank
+    /// under it.
+    ///
+    /// An object that falls outside a subscription's window never starts a copy,
+    /// so it has no lifecycle to end.
     Dropped,
     /// The stream carrying the object was reset or stopped before it finished.
     Reset,

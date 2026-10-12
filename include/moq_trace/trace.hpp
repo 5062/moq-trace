@@ -5,6 +5,9 @@
 
 #include <quic_trace/trace.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -258,6 +261,173 @@ class Object {
 
 /** Allocate a process-wide session identifier shared with Rust hooks. */
 inline std::uint64_t next_session_id() { return moq_trace_next_session_id(); }
+
+/**
+ * The NOTIFY intervals of one synchronous fan-out on the trace clock.
+ *
+ * A relay that calls its consumers synchronously runs every outbound copy
+ * inside the loop that notifies them. NOTIFY covers that loop, and each copy's
+ * own work, from the start of its lifecycle until its consumer returns, is
+ * excluded because it belongs to the copy. The value is copyable, so a relay
+ * that starts the inbound object's trace only after the fan-out can carry the
+ * intervals to it and record them there.
+ *
+ * Excluded intervals beyond the capacity merge into the last one, so they still
+ * cover every copy and never overlap, at the cost of also excluding the notify
+ * work between the merged copies.
+ */
+class FanOutSpans {
+ public:
+  /** Excluded intervals held before later ones merge into the last. */
+  static constexpr std::size_t kCapacity = 8;
+
+  /** Create spans that record nothing. */
+  FanOutSpans() = default;
+
+  /** Start spans at a timestamp captured where the fan-out began. */
+  explicit FanOutSpans(std::uint64_t start_ns) : start_ns_(start_ns) {}
+
+  /** Return when the fan-out began, if it was timed. */
+  std::optional<std::uint64_t> start_ns() const { return start_ns_; }
+
+  /** Exclude a copy's work, clamped to follow earlier exclusions. */
+  void exclude(std::uint64_t start_ns, std::uint64_t end_ns) {
+    if (!start_ns_ || end_ns_) return;
+    std::uint64_t floor = *start_ns_;
+    if (len_ > 0) floor = std::max(floor, excluded_[len_ - 1].second);
+    start_ns = std::max(start_ns, floor);
+    if (end_ns <= start_ns) return;
+    if (len_ < kCapacity) {
+      excluded_[len_++] = {start_ns, end_ns};
+    } else {
+      excluded_[kCapacity - 1].second = end_ns;
+    }
+  }
+
+  /** End the fan-out at a timestamp captured where its loop returned. */
+  void close(std::uint64_t end_ns) {
+    if (start_ns_ && !end_ns_) end_ns_ = end_ns;
+  }
+
+  /** Call `visit(start_ns, end_ns)` for each non-empty NOTIFY interval. */
+  template <typename Visit>
+  void for_each_notify(Visit&& visit) const {
+    if (!start_ns_ || !end_ns_) return;
+    std::uint64_t cursor = *start_ns_;
+    for (std::size_t i = 0; i < len_; ++i) {
+      const auto [excluded_start, excluded_end] = excluded_[i];
+      if (excluded_start >= *end_ns_) break;
+      if (excluded_start > cursor) visit(cursor, excluded_start);
+      cursor = std::max(cursor, excluded_end);
+    }
+    if (*end_ns_ > cursor) visit(cursor, *end_ns_);
+  }
+
+  /** Compare the recorded fan-out, including its excluded intervals. */
+  bool operator==(const FanOutSpans& other) const {
+    if (start_ns_ != other.start_ns_ || end_ns_ != other.end_ns_ ||
+        len_ != other.len_) {
+      return false;
+    }
+    return std::equal(excluded_.begin(), excluded_.begin() + len_,
+                      other.excluded_.begin());
+  }
+
+  /** Compare the recorded fan-out, including its excluded intervals. */
+  bool operator!=(const FanOutSpans& other) const { return !(*this == other); }
+
+  /** Record the NOTIFY intervals on the inbound object they fanned out. */
+  void record(const Object& inbound) const {
+    if (!inbound.records_phases()) return;
+    for_each_notify([&](std::uint64_t start_ns, std::uint64_t end_ns) {
+      inbound.phase_at(MOQ_TRACE_OBJECT_PHASE_NOTIFY, start_ns)
+          .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, end_ns);
+    });
+  }
+
+ private:
+  std::optional<std::uint64_t> start_ns_;
+  std::optional<std::uint64_t> end_ns_;
+  std::array<std::pair<std::uint64_t, std::uint64_t>, kCapacity> excluded_{};
+  std::size_t len_ = 0;
+};
+
+/**
+ * Times a synchronous fan-out on this thread while it is in scope.
+ *
+ * It reads no clock unless object phases are enabled. Scopes nest: an inner
+ * fan-out, such as one an in-process relay hop starts inside a copy, collects
+ * its own exclusions, and the outer one resumes when it ends.
+ */
+class FanOut {
+ public:
+  /** Start timing a fan-out, when object phases are enabled. */
+  FanOut() {
+    if (!moq_trace_moq_object_phase_enabled()) return;
+    spans_ = FanOutSpans(quic_trace::now_ns());
+    previous_ = std::exchange(active_, this);
+    timing_ = true;
+  }
+
+  FanOut(const FanOut&) = delete;
+  FanOut& operator=(const FanOut&) = delete;
+
+  /** Stop timing when the scope ends without an explicit end. */
+  ~FanOut() { end(); }
+
+  /** Stop timing and return the spans. Later calls return the same spans. */
+  const FanOutSpans& end() {
+    if (timing_) {
+      spans_.close(quic_trace::now_ns());
+      active_ = previous_;
+      timing_ = false;
+    }
+    return spans_;
+  }
+
+  /** Return whether a fan-out is being timed on this thread. */
+  static bool active() { return active_ != nullptr; }
+
+  /** Exclude a copy's work from the fan-out timed on this thread, if any. */
+  static void exclude(std::uint64_t start_ns, std::uint64_t end_ns) {
+    if (active_ != nullptr) active_->spans_.exclude(start_ns, end_ns);
+  }
+
+ private:
+  inline static thread_local FanOut* active_ = nullptr;
+  FanOut* previous_ = nullptr;
+  FanOutSpans spans_;
+  bool timing_ = false;
+};
+
+/**
+ * Excludes one copy's synchronous work from the fan-out timed on this thread.
+ *
+ * Place it where the consumer handles the copy. The work starts at `begin`,
+ * normally the copy lifecycle's start, and ends when the scope does. Outside a
+ * fan-out it reads no clock.
+ */
+class CopyWork {
+ public:
+  /** Create a scope that excludes nothing until it begins. */
+  CopyWork() = default;
+
+  CopyWork(const CopyWork&) = delete;
+  CopyWork& operator=(const CopyWork&) = delete;
+
+  /** Exclude the work from its start until now. */
+  ~CopyWork() {
+    if (start_ns_) FanOut::exclude(*start_ns_, quic_trace::now_ns());
+  }
+
+  /** Mark where the copy's work began, unless an earlier start is marked. */
+  void begin(std::uint64_t start_ns) {
+    if (!start_ns_ && FanOut::active()) start_ns_ = start_ns;
+  }
+
+ private:
+  std::optional<std::uint64_t> start_ns_;
+};
 
 }  // namespace moq_trace
 

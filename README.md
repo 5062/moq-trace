@@ -50,6 +50,21 @@ than inventing them.
 Scope IDs by the captured process when combining traces from multiple hosts or
 processes.
 
+## Which objects are traced
+
+Every relay applies the same rules, so object counts compare across them:
+
+- An inbound object starts a lifecycle when its first header byte is readable,
+  and every outbound copy of it starts one more. An object that no traced
+  inbound lifecycle produced, such as one the relay publishes itself, has no
+  traced copies, because analysis pairs every copy with exactly one inbound
+  lifecycle.
+- A status object, such as an end of group, is an object: it gets an inbound
+  lifecycle, and an outbound one for each copy the relay forwards.
+- An object outside a subscription's window starts no copy. `dropped` is for a
+  copy that started and that relay policy then discarded: cache eviction, a
+  lagging reader, or a window that shrank under it.
+
 ## Rust instrumentation
 
 Enable the `lttng` feature in an instrumented relay:
@@ -85,6 +100,11 @@ target_link_libraries(relay PRIVATE moq_trace::cpp)
 Include `<moq_trace/trace.hpp>` for scoped MoQ objects and
 `<quic_trace/trace.hpp>` for transport events. The C++ types are move-only and
 emit the same provider schemas as the Rust facade.
+
+A relay that calls its consumers synchronously times the fan-out with
+`moq_trace::FanOut` around the loop that calls them and `moq_trace::CopyWork`
+where each consumer handles its copy. The resulting `FanOutSpans` record `notify`
+on the inbound object, excluding the copies' own work.
 
 Non-CMake consumers can use the installed pkg-config package, which supplies
 both providers, their headers, LTTng-UST, and the provider-retention linker
