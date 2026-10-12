@@ -45,8 +45,8 @@ url = "2"
 # The revisions match rs/trace.toml in the moq repository.
 [patch.crates-io]
 quic-trace = { path = "../crates/quic-trace" }
-quinn = { git = "https://github.com/5062/quinn", rev = "9a8a50e49a9e4091cf2acea2d0dc7d8a9dd73492" }
-quinn-proto = { git = "https://github.com/5062/quinn", rev = "9a8a50e49a9e4091cf2acea2d0dc7d8a9dd73492" }
+quinn = { git = "https://github.com/5062/quinn", rev = "04bdddabd8fe91e049d5334fdb7597604255d9d9" }
+quinn-proto = { git = "https://github.com/5062/quinn", rev = "04bdddabd8fe91e049d5334fdb7597604255d9d9" }
 web-transport-quinn = { git = "https://github.com/5062/web-transport", rev = "eea76bc39afacc65364dc3cd258d0b7bd98836f7" }
 web-transport-trait = { git = "https://github.com/5062/web-transport", rev = "eea76bc39afacc65364dc3cd258d0b7bd98836f7" }
 

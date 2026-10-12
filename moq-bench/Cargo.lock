@@ -1215,8 +1215,9 @@ dependencies = [
 [[package]]
 name = "kio"
 version = "0.4.4"
-source = "git+https://github.com/5062/moq?branch=moq-trace#44765fbdf3cc74f401da36db29eb346b7e8ce8dd"
+source = "git+https://github.com/5062/moq?branch=moq-trace#b319cadcaffb71550e947abe1c06d96094b52d11"
 dependencies = [
+ "moq-trace",
  "smallvec",
 ]
 
@@ -1355,7 +1356,7 @@ dependencies = [
 [[package]]
 name = "moq-native"
 version = "0.18.3"
-source = "git+https://github.com/5062/moq?branch=moq-trace#44765fbdf3cc74f401da36db29eb346b7e8ce8dd"
+source = "git+https://github.com/5062/moq?branch=moq-trace#b319cadcaffb71550e947abe1c06d96094b52d11"
 dependencies = [
  "clap",
  "futures",
@@ -1392,7 +1393,7 @@ dependencies = [
 [[package]]
 name = "moq-net"
 version = "0.1.18"
-source = "git+https://github.com/5062/moq?branch=moq-trace#44765fbdf3cc74f401da36db29eb346b7e8ce8dd"
+source = "git+https://github.com/5062/moq?branch=moq-trace#b319cadcaffb71550e947abe1c06d96094b52d11"
 dependencies = [
  "bytes",
  "futures",
@@ -1759,12 +1760,12 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/5062/quinn?rev=76c4d143906186dc790c00a0df5582ae26592f36#76c4d143906186dc790c00a0df5582ae26592f36"
+source = "git+https://github.com/5062/quinn?rev=04bdddabd8fe91e049d5334fdb7597604255d9d9#04bdddabd8fe91e049d5334fdb7597604255d9d9"
 dependencies = [
  "bytes",
  "cfg_aliases",
- "moq-trace",
  "pin-project-lite",
+ "quic-trace",
  "quinn-proto",
  "quinn-udp",
  "rustc-hash",
@@ -1779,14 +1780,14 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/5062/quinn?rev=76c4d143906186dc790c00a0df5582ae26592f36#76c4d143906186dc790c00a0df5582ae26592f36"
+source = "git+https://github.com/5062/quinn?rev=04bdddabd8fe91e049d5334fdb7597604255d9d9#04bdddabd8fe91e049d5334fdb7597604255d9d9"
 dependencies = [
  "aws-lc-rs",
  "bytes",
  "fastbloom",
  "getrandom 0.4.3",
  "lru-slab",
- "moq-trace",
+ "quic-trace",
  "rand",
  "rand_pcg",
  "ring",
@@ -1804,12 +1805,12 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/5062/quinn?rev=76c4d143906186dc790c00a0df5582ae26592f36#76c4d143906186dc790c00a0df5582ae26592f36"
+source = "git+https://github.com/5062/quinn?rev=04bdddabd8fe91e049d5334fdb7597604255d9d9#04bdddabd8fe91e049d5334fdb7597604255d9d9"
 dependencies = [
  "cfg_aliases",
  "libc",
- "moq-trace",
  "once_cell",
+ "quic-trace",
  "socket2",
  "tracing",
  "windows-sys 0.61.2",
@@ -2898,7 +2899,7 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.6.1"
-source = "git+https://github.com/5062/web-transport?rev=bf84a684d69ea255d315cc62eac5dce02600d830#bf84a684d69ea255d315cc62eac5dce02600d830"
+source = "git+https://github.com/5062/web-transport?rev=eea76bc39afacc65364dc3cd258d0b7bd98836f7#eea76bc39afacc65364dc3cd258d0b7bd98836f7"
 dependencies = [
  "bytes",
  "http",
@@ -2925,7 +2926,7 @@ dependencies = [
 [[package]]
 name = "web-transport-quinn"
 version = "0.11.11"
-source = "git+https://github.com/5062/web-transport?rev=bf84a684d69ea255d315cc62eac5dce02600d830#bf84a684d69ea255d315cc62eac5dce02600d830"
+source = "git+https://github.com/5062/web-transport?rev=eea76bc39afacc65364dc3cd258d0b7bd98836f7#eea76bc39afacc65364dc3cd258d0b7bd98836f7"
 dependencies = [
  "bytes",
  "futures",
@@ -2944,7 +2945,7 @@ dependencies = [
 [[package]]
 name = "web-transport-trait"
 version = "0.3.7"
-source = "git+https://github.com/5062/web-transport?rev=bf84a684d69ea255d315cc62eac5dce02600d830#bf84a684d69ea255d315cc62eac5dce02600d830"
+source = "git+https://github.com/5062/web-transport?rev=eea76bc39afacc65364dc3cd258d0b7bd98836f7#eea76bc39afacc65364dc3cd258d0b7bd98836f7"
 dependencies = [
  "bytes",
 ]
