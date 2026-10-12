@@ -8,7 +8,9 @@
 # `-max_cached_tracks 0` disables the relay cache, which the other relays lack
 # (`-enable_cache` is never read). The relay does not announce a namespace back
 # to the session that published it, so a workload that subscribes to its own
-# broadcast receives nothing.
+# broadcast receives nothing. `-recvmmsg` reads datagrams with mvfst's own
+# recvmmsg call, the read path whose system call mvfst's trace hooks bracket;
+# folly's read callback hides the call, so its packets get no RX trace.
 checkout = "~/facebook-moxygen"
 relay_bin = "_build/moxygen/relay/moqrelayserver"
 relay_args = [
@@ -18,6 +20,7 @@ relay_args = [
   "-endpoint", "/",
   "-versions", "16",
   "-max_cached_tracks", "0",
+  "-recvmmsg",
 ]
 relay_ready_log = ""
 relay_startup_seconds = 1.0
