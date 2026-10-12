@@ -1215,7 +1215,7 @@ dependencies = [
 [[package]]
 name = "kio"
 version = "0.4.4"
-source = "git+https://github.com/5062/moq?branch=moq-trace#08b3636c577b8839c381acba111c49fb4e4c0dc5"
+source = "git+https://github.com/5062/moq?branch=moq-trace#44765fbdf3cc74f401da36db29eb346b7e8ce8dd"
 dependencies = [
  "smallvec",
 ]
@@ -1355,7 +1355,7 @@ dependencies = [
 [[package]]
 name = "moq-native"
 version = "0.18.3"
-source = "git+https://github.com/5062/moq?branch=moq-trace#08b3636c577b8839c381acba111c49fb4e4c0dc5"
+source = "git+https://github.com/5062/moq?branch=moq-trace#44765fbdf3cc74f401da36db29eb346b7e8ce8dd"
 dependencies = [
  "clap",
  "futures",
@@ -1392,7 +1392,7 @@ dependencies = [
 [[package]]
 name = "moq-net"
 version = "0.1.18"
-source = "git+https://github.com/5062/moq?branch=moq-trace#08b3636c577b8839c381acba111c49fb4e4c0dc5"
+source = "git+https://github.com/5062/moq?branch=moq-trace#44765fbdf3cc74f401da36db29eb346b7e8ce8dd"
 dependencies = [
  "bytes",
  "futures",
@@ -1759,7 +1759,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/5062/quinn?rev=faa9098df64de16cb3d3d33b5795bfe9014c9dec#faa9098df64de16cb3d3d33b5795bfe9014c9dec"
+source = "git+https://github.com/5062/quinn?rev=76c4d143906186dc790c00a0df5582ae26592f36#76c4d143906186dc790c00a0df5582ae26592f36"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1779,7 +1779,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/5062/quinn?rev=faa9098df64de16cb3d3d33b5795bfe9014c9dec#faa9098df64de16cb3d3d33b5795bfe9014c9dec"
+source = "git+https://github.com/5062/quinn?rev=76c4d143906186dc790c00a0df5582ae26592f36#76c4d143906186dc790c00a0df5582ae26592f36"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1804,7 +1804,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/5062/quinn?rev=faa9098df64de16cb3d3d33b5795bfe9014c9dec#faa9098df64de16cb3d3d33b5795bfe9014c9dec"
+source = "git+https://github.com/5062/quinn?rev=76c4d143906186dc790c00a0df5582ae26592f36#76c4d143906186dc790c00a0df5582ae26592f36"
 dependencies = [
  "cfg_aliases",
  "libc",
