@@ -8,6 +8,7 @@ every implementation negotiates, and how the peers are built and found.
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import tomllib
 
 from pydantic import ValidationError
@@ -29,9 +30,39 @@ class Suite(StrictModel):
     bench_bin: pathlib.Path | None = None
     # Run in a remote peer host's checkout before each run.
     bench_build: str | None = None
+    # The git repository this file is in, as remote hosts clone it. When set, every
+    # remote host's `checkout` is brought to the controller's commit before a run.
+    repository: str | None = None
+    # The submodules every remote checkout needs; a profile adds its relay's own.
+    submodules: tuple[str, ...] = ()
     # The file's directory, which the relative paths above and relative profile
     # checkouts resolve against. Set by `load`, never by the file.
     root: pathlib.Path = pathlib.Path(".")
+
+
+def revision(suite: Suite) -> str:
+    """The commit the suite's checkout is at, which remote hosts are brought to.
+
+    Uncommitted changes to tracked files, the submodules' included, would make
+    the hosts build different code than this checkout, so they are refused.
+    """
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(suite.root), *args], check=True, capture_output=True, text=True
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as error:
+            detail = getattr(error, "stderr", "") or error
+            raise ValueError(f"cannot read the commit of {suite.root}: {detail}") from error
+
+    changed = git("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked").splitlines()
+    if changed:
+        listed = ", ".join(line[3:] for line in changed[:5]) + (", ..." if len(changed) > 5 else "")
+        raise ValueError(
+            f"{suite.root} has uncommitted changes ({listed}); remote hosts check out commits, so commit and push first"
+        )
+    return git("rev-parse", "HEAD").strip()
 
 
 def load(path: pathlib.Path | None = None) -> Suite:

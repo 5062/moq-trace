@@ -23,6 +23,7 @@ from ..errors import ExperimentError
 from ..metadata import ComparisonDimension
 from .config import ExperimentConfig, Hosts
 from .suite import Suite
+from .suite import revision as suite_revision
 
 _log = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ _ProfileFile = pydantic.create_model(
     "_ProfileFile",
     __config__=pydantic.ConfigDict(extra="forbid"),
     checkout=(pathlib.Path, ...),
+    submodules=(tuple[str, ...], ()),
     relay_bin=(pathlib.Path, ...),
     relay_args=(ExperimentConfig.model_fields["relay_args"].annotation, ...),
     **{key: _optional(key) for key in sorted(LAUNCH_KEYS - {"relay_bin", "relay_args"})},
@@ -68,13 +70,14 @@ class RelayProfile:
     `launch` holds `ExperimentConfig` keys, with `relay_bin` relative to the
     checkout and `relay_url` allowed to name the `{port}` placeholder. A relative
     `checkout` resolves against `root` on the controller, and against the relay
-    host's `checkout` on a remote relay host.
+    host's `checkout` on a remote relay host, which also initializes `submodules`.
     """
 
     name: str
     checkout: pathlib.Path
     launch: Mapping[str, Any]
     root: pathlib.Path
+    submodules: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -147,8 +150,10 @@ def load_profile(suite: Suite, name: str) -> RelayProfile:
         document = _ProfileFile.model_validate(tomllib.loads(entry.read_text()))
     except (tomllib.TOMLDecodeError, pydantic.ValidationError) as error:
         raise ValueError(f"relay profile {name} is invalid: {error}") from error
-    launch = document.model_dump(exclude={"checkout"}, exclude_unset=True)
-    return RelayProfile(name=name, checkout=document.checkout, launch=launch, root=suite.root)
+    launch = document.model_dump(exclude={"checkout", "submodules"}, exclude_unset=True)
+    return RelayProfile(
+        name=name, checkout=document.checkout, launch=launch, root=suite.root, submodules=document.submodules
+    )
 
 
 def _remote_checkout(profile: RelayProfile, host_checkout: str | None) -> str:
@@ -183,6 +188,10 @@ def experiment_config(
     else:
         # `relay_bin` stays relative, for the relay host to resolve against this checkout.
         remote_checkout = str(checkout) if checkout is not None else _remote_checkout(profile, hosts.relay.checkout)
+        if settings.get("sync") is not None and checkout is None and remote_checkout != str(profile.checkout):
+            # The relay's checkout is in the host's copy of the suite, which syncs.
+            relay = {"relay_root": hosts.relay.checkout, "relay_submodules": profile.submodules}
+            settings = {**settings, "sync": {**settings["sync"], **relay}}
         hosts = hosts.model_copy(update={"relay": hosts.relay.model_copy(update={"checkout": remote_checkout})})
     port = settings.get("port", ExperimentConfig.model_fields["port"].default)
     if launch.get("relay_url") is not None:
@@ -227,6 +236,15 @@ async def bench(
     # The suite's protocol and peers are every run's, and explicit settings win.
     defaults = {"protocol": suite.protocol, "bench_bin": suite.bench_bin, "bench_build": suite.bench_build}
     settings = {**{key: value for key, value in defaults.items() if value is not None}, **settings}
+    # Remote hosts with a checkout are brought to this checkout's commit, once it is known to be clean.
+    hosts = Hosts.model_validate(settings.get("hosts") or {})
+    roles = (hosts.relay, hosts.publisher, hosts.subscriber)
+    if suite.repository is not None and any(spec and spec.checkout for spec in roles) and "sync" not in settings:
+        settings["sync"] = {
+            "repository": suite.repository,
+            "revision": suite_revision(suite),
+            "submodules": suite.submodules,
+        }
     checkouts = checkouts or {}
     unknown = sorted(set(checkouts) - set(relays))
     if unknown:

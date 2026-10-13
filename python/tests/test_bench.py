@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import pathlib
 import tempfile
 import unittest
@@ -72,6 +73,49 @@ class BenchTests(unittest.TestCase):
             with self.subTest(checkout=checkout):
                 config = experiment_config(_profile(checkout), pathlib.Path("run"), settings)
                 self.assertEqual(config.hosts.relay.checkout, expected)
+
+    def test_a_synced_relay_host_syncs_the_suite_its_checkout_is_in(self) -> None:
+        sync = {"repository": "https://example.com/ws.git", "revision": "a" * 40, "submodules": ("toolkit",)}
+        settings = {**SETTINGS, "sync": sync, "hosts": {"relay": {"ssh": "me@relay.example", "checkout": "~/ws"}}}
+        profile = dataclasses.replace(_profile("relays/relay"), submodules=("relays/relay",))
+
+        config = experiment_config(profile, pathlib.Path("run"), settings)
+        self.assertEqual((config.sync.relay_root, config.sync.relay_submodules), ("~/ws", ("relays/relay",)))
+        self.assertEqual(config.sync.submodules, ("toolkit",))
+
+        # A relay checkout outside the host's copy of the suite is not synced.
+        for config in (
+            experiment_config(_profile("/opt/relay"), pathlib.Path("run"), settings),
+            experiment_config(profile, pathlib.Path("run"), settings, pathlib.Path("~/other")),
+        ):
+            self.assertIsNone(config.sync.relay_root)
+
+    def test_remote_checkouts_sync_to_the_suites_commit(self) -> None:
+        remote = SUITE.model_copy(update={"repository": "https://example.com/ws.git", "submodules": ("toolkit",)})
+        peer = {"ssh": "me@peer.example", "checkout": "~/ws"}
+
+        async def run(config, _pool):
+            return config.output
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch("moq_trace.run.experiment.run", side_effect=run) as runner,
+            mock.patch.object(bench, "suite_revision", return_value="b" * 40) as revision,
+        ):
+            root = pathlib.Path(directory)
+            (root / "a/bin/alpha").parent.mkdir(parents=True)
+            (root / "a/bin/alpha").touch()
+            settings = {"render": False, "relay_url": "https://relay:4443", "hosts": {"subscriber": peer}}
+            asyncio.run(bench.bench(remote, ["alpha"], root / "out", settings, {"alpha": root / "a"}))
+            asyncio.run(bench.bench(SUITE, ["alpha"], root / "out2", settings, {"alpha": root / "a"}))
+            asyncio.run(bench.bench(remote, ["alpha"], root / "out3", {"render": False}, {"alpha": root / "a"}))
+
+        synced, unsynced, local = (call.args[0].sync for call in runner.call_args_list)
+        self.assertEqual((synced.revision, synced.submodules), ("b" * 40, ("toolkit",)))
+        # Without a repository, or without a remote checkout, nothing syncs.
+        self.assertIsNone(unsynced)
+        self.assertIsNone(local)
+        revision.assert_called_once_with(remote)
 
     def test_relay_url_follows_the_shared_port(self) -> None:
         profile = _profile(relay_url="https://127.0.0.1:{port}")

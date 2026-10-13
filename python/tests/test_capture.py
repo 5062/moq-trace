@@ -12,7 +12,7 @@ from moq_trace.errors import CaptureError
 from moq_trace.manifest import MANIFEST, read_manifest
 from moq_trace.metadata import CommandSet
 from moq_trace.run import capture, experiment, hosts, local, lttng, placement, tcpdump
-from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts
+from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts, Sync
 from moq_trace.run.experiment import ExperimentError
 
 
@@ -220,6 +220,51 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ExperimentError, "publisher exited with status 0 during the workload"):
             await self._capture(config, command_set(publisher=publisher))
         self.assertLess(time.monotonic() - started, 4)
+
+    async def test_each_remote_checkout_syncs_once_with_its_roles_submodules(self) -> None:
+        relay = HostConfig(ssh="me@relay.example", checkout="/srv/ws/relays/quiche", workdir="/tmp/runs")
+        shared = HostConfig(ssh="me@relay.example", checkout="/srv/ws", workdir="/tmp/runs")
+        peer = HostConfig(ssh="me@peer.example", checkout="/srv/ws", workdir="/tmp/runs")
+        sync = Sync(
+            repository="https://example.com/ws.git",
+            revision="a" * 40,
+            submodules=("toolkit",),
+            relay_submodules=("relays/quiche", "toolkit"),
+            relay_root="/srv/ws",
+        )
+        config = self._config(sync=sync, hosts=Hosts(relay=relay, publisher=shared, subscriber=peer))
+        with mock.patch.object(FakeRemote, "build", autospec=True) as build:
+            await placement_for(config).sync()
+
+        synced = {(call.args[0].name, call.args[1]): call.args[2].splitlines()[-2] for call in build.await_args_list}
+        # The publisher shares the relay's host and checkout, so that host syncs
+        # once with the relay's submodules as well as its own.
+        self.assertEqual(
+            synced,
+            {
+                ("me@relay.example", "/srv/ws"): "git submodule update --init --recursive -- toolkit relays/quiche",
+                ("me@peer.example", "/srv/ws"): "git submodule update --init --recursive -- toolkit",
+            },
+        )
+        self.assertEqual({call.kwargs["what"] for call in build.await_args_list}, {"checkout"})
+
+    async def test_a_relay_outside_the_synced_checkout_is_left_alone(self) -> None:
+        relay = HostConfig(ssh="me@relay.example", checkout="/opt/relay", workdir="/tmp/runs")
+        sync = Sync(repository="https://example.com/ws.git", revision="a" * 40)
+        config = self._config(sync=sync, hosts=Hosts(relay=relay))
+        with mock.patch.object(FakeRemote, "build", autospec=True) as build:
+            await placement_for(config).sync()
+            await placement_for(self._config(hosts=Hosts(relay=relay))).sync()
+        build.assert_not_awaited()
+
+    async def test_a_failed_checkout_says_to_push(self) -> None:
+        peer = HostConfig(ssh="me@peer.example", checkout="/srv/ws", workdir="/tmp/runs")
+        sync = Sync(repository="https://example.com/ws.git", revision="a" * 40)
+        config = self._config(sync=sync, hosts=Hosts(publisher=peer), relay_url="https://relay:4443")
+        failure = CaptureError("checkout on me@peer.example failed with status 128; see sync.log")
+        with mock.patch.object(FakeRemote, "build", autospec=True, side_effect=failure):
+            with self.assertRaisesRegex(CaptureError, "status 128; see sync.log. .*so push them first"):
+                await placement_for(config).sync()
 
     async def test_building_runs_once_per_host_and_checkout(self) -> None:
         relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay", workdir="/tmp/runs")

@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
+import shlex
 import time
 import uuid
 
 from ..errors import CaptureError
-from .config import ExperimentConfig, HostConfig
+from .config import ExperimentConfig, HostConfig, Sync
 from .hosts import Host
 from .local import LocalHost
 from .ssh import RemoteHost, SshPool
@@ -20,6 +21,30 @@ ROLES = ("relay", "publisher", "subscriber")
 
 # The reference peers' binary, relative to a peer host's checkout.
 BENCH_BINARY = "moq-bench/target/release/moq-bench"
+
+
+def sync_script(sync: Sync, submodules: list[str]) -> str:
+    """Bring the working directory to `sync.revision`, cloning it first when empty.
+
+    Runs in the checkout, which `Host.start` creates. A checkout with local changes
+    fails the checkout rather than losing them, and only `submodules` are
+    initialized, recursively, so a host never fetches a relay it does not run.
+    """
+
+    revision = shlex.quote(sync.revision)
+    lines = [
+        "set -e",
+        f"[ -e .git ] || git clone --quiet --no-checkout {shlex.quote(sync.repository)} .",
+        f"git cat-file -e {revision}^{{commit}} 2>/dev/null || git fetch --quiet origin {revision}",
+        f"git -c advice.detachedHead=false checkout --quiet --detach {revision}",
+    ]
+    if submodules:
+        lines += [
+            "git submodule sync --quiet --recursive",
+            f"git submodule update --init --recursive -- {shlex.join(submodules)}",
+        ]
+    lines.append("git log -1 --format='at %h %s'")
+    return "\n".join(lines)
 
 
 class Placement:
@@ -114,6 +139,35 @@ class Placement:
         for host in hosts:
             _log.info("connecting to %s", host.name)
         await asyncio.gather(*(host.connect() for host in hosts))
+
+    async def sync(self) -> None:
+        """Bring each remote host's checkout to the configured commit, once per host and checkout.
+
+        A host that several roles share initializes the submodules all of them need.
+        """
+
+        sync = self.config.sync
+        if sync is None:
+            return
+        targets: dict[tuple[Host, str], list[str]] = {}
+        for role in ROLES:
+            spec = self.spec(role)
+            root = None if spec is None else sync.relay_root if role == "relay" else spec.checkout
+            if root is None:
+                continue
+            submodules = targets.setdefault((self.host(role), self.host(role).path(root)), [])
+            extra = sync.relay_submodules if role == "relay" else ()
+            submodules.extend(path for path in (*sync.submodules, *extra) if path not in submodules)
+        for (host, checkout), submodules in targets.items():
+            log = self.output / f"sync-{host.name.replace('/', '_')}.log"
+            _log.info("checking out %s on %s in %s (log: %s)", sync.revision[:12], host.name, checkout, log)
+            try:
+                await host.build(checkout, sync_script(sync, submodules), log, what="checkout")
+            except CaptureError as error:
+                raise CaptureError(
+                    f"{error}. A host fetches the commit and its submodules' commits from their remotes, "
+                    "so push them first"
+                ) from error
 
     async def build(self) -> None:
         """Build each remote role's binary in its checkout, once per host and checkout.

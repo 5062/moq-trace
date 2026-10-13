@@ -135,6 +135,7 @@ async def run(config: ExperimentConfig, pool: SshPool) -> pathlib.Path:
     _log.info("run directory: %s", output)
     placement = Placement(config, output, pool)
     await placement.connect()
+    await placement.sync()
     await placement.build()
     if tls.needs_certificate(config):
         tls.generate_certificate(output)

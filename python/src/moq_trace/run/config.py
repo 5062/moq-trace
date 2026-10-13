@@ -48,6 +48,24 @@ class HostConfig(StrictModel):
         return self.address or self.ssh.rpartition("@")[2]
 
 
+class Sync(StrictModel):
+    """One git commit that every remote host's `checkout` is brought to before a run.
+
+    A missing checkout is cloned from `repository`, and an existing one fetches
+    and checks out `revision`, so the hosts build what the controller has
+    committed. Only the listed submodules are initialized: `submodules` on every
+    host, and `relay_submodules` too on the relay's. The relay's host syncs
+    `relay_root`, its copy of the repository the relay's checkout is in, and
+    without one it is left alone.
+    """
+
+    repository: str
+    revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    submodules: tuple[str, ...] = ()
+    relay_submodules: tuple[str, ...] = ()
+    relay_root: str | None = None
+
+
 class Hosts(StrictModel):
     """Where each role runs. A role without a host runs on the controller."""
 
@@ -88,6 +106,8 @@ class ExperimentConfig(StrictModel):
     relay_build: str | None = None
     # Run in a remote peer host's checkout before each run.
     bench_build: str | None = None
+    # Brings every remote host's checkout to one commit before it builds.
+    sync: Sync | None = None
     # The address a peer on the relay's own host dials. A relay that listens on
     # IPv4 only needs `127.0.0.1`, because `localhost` may resolve to IPv6 first.
     relay_local_host: str = "localhost"

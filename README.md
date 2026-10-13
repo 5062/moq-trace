@@ -246,6 +246,24 @@ profile's relative `relay_bin` resolves against the relay's checkout. A peer's
 binary is `moq-bench/target/release/moq-bench` in its host's `checkout`, and
 `binary` overrides it; the relay's is always `relay_bin`.
 
+When the suite names its git `repository`, a bench brings every remote host's
+`checkout` to the controller's commit before it builds, so the hosts need no
+setup beyond ssh, git, and Nix. A missing checkout is cloned, an existing one
+fetches and checks out the commit, and only the suite's `submodules` are
+initialized, plus a relay's own `submodules` on the relay's host:
+
+```toml
+repository = "https://github.com/5062/moq-workspace.git"
+submodules = ["moq-trace", "deps/quinn"]   # every host
+```
+
+The hosts fetch from the remotes, so commit and push the checkout and its
+submodules first; a bench refuses to start while tracked files have uncommitted
+changes, and a host's checkout fails rather than overwrite changes made on the
+host. A `run` configuration syncs the same way through a `[sync]` table with
+`repository`, `revision`, `submodules`, and, for the relay's host,
+`relay_root` and `relay_submodules`.
+
 Only the relay's host is traced. The LTTng session, the packet capture, qlog,
 and the clock offset the network figures need are all taken there and copied
 back, so the analysis and figures are the same as for a local run, and no

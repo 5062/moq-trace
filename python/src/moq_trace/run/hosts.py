@@ -347,15 +347,15 @@ class Host(abc.ABC):
         await process._begin()
         return process
 
-    async def build(self, checkout: str, command: str, log: pathlib.Path) -> None:
+    async def build(self, checkout: str, command: str, log: pathlib.Path, what: str = "build") -> None:
         """Run a build command in a checkout, showing its output as it arrives.
 
         A first build can take many minutes, so its output is logged line by line
-        rather than only kept in the log file.
+        rather than only kept in the log file. `what` names the step in messages.
         """
 
         process = await self.start(
-            f"build on {self.name}",
+            f"{what} on {self.name}",
             ["sh", "-c", command],
             checkout,
             log,
@@ -363,7 +363,7 @@ class Host(abc.ABC):
         )
         status = await process.wait()
         if status != 0:
-            raise CaptureError(f"build on {self.name} failed with status {status}; see {log}")
+            raise CaptureError(f"{what} on {self.name} failed with status {status}; see {log}")
 
     async def sha256(self, path: str) -> str | None:
         """Hash a file on this host, or return `None` when it cannot be read."""
