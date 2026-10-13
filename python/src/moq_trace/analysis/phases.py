@@ -28,7 +28,8 @@ class Phase:
     label: str
     #: Whether figures draw the phase as a step of its own. The RX `application`
     #: phase is the MoQ work of a stack that runs MoQ inside packet processing,
-    #: which the object phases already show.
+    #: which the object phases already show. Transport calls are summarized by
+    #: the MoQ work figure, and notify stays measured in the work totals.
     drawn: bool = True
     #: Whether the phase is a wait rather than work. Work totals leave waits
     #: out. Many packets wait in one queue at once, so the object timeline leaves
@@ -48,10 +49,10 @@ OBJECT_PHASES = (
     Phase("object", "rx", "frame_commit", "Frame commit"),
     # Time inside the transport API, nested in the phase that called it. The
     # same phase exists in both directions, as the object it belongs to does.
-    Phase("object", "rx", "transport_call", "Transport call", nested=True),
+    Phase("object", "rx", "transport_call", "Transport call", drawn=False, nested=True),
     # The fan-out work every copy shares, so it is charged once, to the inbound
     # object. A relay that wakes consumers inside its commit call emits none.
-    Phase("object", "rx", "notify", "Notify"),
+    Phase("object", "rx", "notify", "Notify", drawn=False),
     # From the instant the relay made the object readable until this copy's
     # clone starts: waking the consumer and the scheduler delay before it runs.
     Phase("object", "tx", "delivery_wait", "Delivery wait", wait=True),
@@ -60,7 +61,7 @@ OBJECT_PHASES = (
     Phase("object", "tx", "payload_write", "Payload write"),
     # A write that could not proceed, until the relay resumed writing.
     Phase("object", "tx", "write_blocked", "Write blocked", wait=True),
-    Phase("object", "tx", "transport_call", "Transport call", nested=True),
+    Phase("object", "tx", "transport_call", "Transport call", drawn=False, nested=True),
 )
 
 PACKET_PHASES = (
