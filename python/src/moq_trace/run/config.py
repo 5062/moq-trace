@@ -73,16 +73,21 @@ class ExperimentConfig(StrictModel):
     # The relay's whole argument list, so the runner knows no relay's command line.
     # Entries may name `{port}`, `{protocol}`, `{output}`, `{certificate}`, and `{key}`.
     relay_args: tuple[str, ...]
+    # The MoQ version the peers offer and `{protocol}` names to the relay. A bench
+    # takes it from its suite, so every implementation negotiates the same one.
+    protocol: str
     relay_ready_log: str = "listening"
     relay_startup_seconds: float = Field(default=0.5, ge=0)
     relay_graceful_stop: bool = True
-    # Defaults to the reference peers, which are the constant side of a measurement.
-    # `just moq-bench-build` writes it, and a run from the toolkit root picks it up.
+    # Defaults to the reference peers, which are the constant side of a measurement,
+    # as a checkout that holds them builds them.
     bench_bin: pathlib.Path = Field(
         default=pathlib.Path("moq-bench/target/release/moq-bench"), description="Workload peer binary."
     )
     # Run in the relay's checkout on a remote relay host before each run.
     relay_build: str | None = None
+    # Run in a remote peer host's checkout before each run.
+    bench_build: str | None = None
     # The address a peer on the relay's own host dials. A relay that listens on
     # IPv4 only needs `127.0.0.1`, because `localhost` may resolve to IPv6 first.
     relay_local_host: str = "localhost"

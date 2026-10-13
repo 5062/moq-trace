@@ -1,8 +1,9 @@
 """Run one workload against several relay implementations.
 
-Each relay is described by a profile under `relays/`: where its checkout lives
-and how to launch its binary. A profile may set launch keys only, so every relay
-in one invocation runs the workload the caller chose and nothing else.
+Each relay is described by a profile in the suite's `profiles` directory: where
+its checkout lives and how to launch its binary. A profile may set launch keys
+only, so every relay in one invocation runs the workload the caller chose and
+nothing else.
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime
-import importlib.resources
 import logging
 import pathlib
 import tomllib
@@ -22,6 +22,7 @@ import pydantic
 from ..errors import ExperimentError
 from ..metadata import ComparisonDimension
 from .config import ExperimentConfig, Hosts
+from .suite import Suite
 
 _log = logging.getLogger(__name__)
 
@@ -65,12 +66,15 @@ class RelayProfile:
     """How to launch one relay implementation from its checkout.
 
     `launch` holds `ExperimentConfig` keys, with `relay_bin` relative to the
-    checkout and `relay_url` allowed to name the `{port}` placeholder.
+    checkout and `relay_url` allowed to name the `{port}` placeholder. A relative
+    `checkout` resolves against `root` on the controller, and against the relay
+    host's `checkout` on a remote relay host.
     """
 
     name: str
     checkout: pathlib.Path
     launch: Mapping[str, Any]
+    root: pathlib.Path
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,29 +123,41 @@ class BenchResult:
     error: str | None = None
 
 
-def _profile_files() -> dict[str, Any]:
-    directory = importlib.resources.files("moq_trace") / "relays"
-    return {entry.name.removesuffix(".toml"): entry for entry in directory.iterdir() if entry.name.endswith(".toml")}
+def _profile_files(suite: Suite) -> dict[str, pathlib.Path]:
+    try:
+        entries = list(suite.profiles.iterdir())
+    except OSError as error:
+        raise ValueError(f"cannot read the relay profiles in {suite.profiles}: {error}") from error
+    return {entry.name.removesuffix(".toml"): entry for entry in entries if entry.name.endswith(".toml")}
 
 
-def profiles() -> tuple[str, ...]:
-    """Names of the relay profiles shipped with the toolkit."""
+def profiles(suite: Suite) -> tuple[str, ...]:
+    """Names of the suite's relay profiles."""
 
-    return tuple(sorted(_profile_files()))
+    return tuple(sorted(_profile_files(suite)))
 
 
-def load_profile(name: str) -> RelayProfile:
-    """Read and check one shipped relay profile."""
+def load_profile(suite: Suite, name: str) -> RelayProfile:
+    """Read and check one of the suite's relay profiles."""
 
-    entry = _profile_files().get(name)
+    entry = _profile_files(suite).get(name)
     if entry is None:
-        raise ValueError(f"unknown relay {name!r}; available: {', '.join(profiles())}")
+        raise ValueError(f"unknown relay {name!r}; available: {', '.join(profiles(suite))}")
     try:
         document = _ProfileFile.model_validate(tomllib.loads(entry.read_text()))
     except (tomllib.TOMLDecodeError, pydantic.ValidationError) as error:
         raise ValueError(f"relay profile {name} is invalid: {error}") from error
     launch = document.model_dump(exclude={"checkout"}, exclude_unset=True)
-    return RelayProfile(name=name, checkout=document.checkout, launch=launch)
+    return RelayProfile(name=name, checkout=document.checkout, launch=launch, root=suite.root)
+
+
+def _remote_checkout(profile: RelayProfile, host_checkout: str | None) -> str:
+    """The profile's checkout on a remote relay host, which resolves `~/` itself."""
+
+    checkout = str(profile.checkout)
+    if host_checkout is None or profile.checkout.is_absolute() or checkout.startswith("~"):
+        return checkout
+    return f"{host_checkout.rstrip('/')}/{checkout}"
 
 
 def experiment_config(
@@ -152,19 +168,21 @@ def experiment_config(
 ) -> ExperimentConfig:
     """Combine one relay's launch keys with the shared workload settings.
 
-    A remote relay host builds and runs the relay from a checkout on that host:
-    `checkout` when given, then the host's own `checkout`, then the profile's
-    path, which assumes the host lays its checkouts out like the controller.
+    The relay runs from `checkout` when given, and otherwise from the profile's.
+    A relative profile checkout resolves against the suite's directory on the
+    controller, and on a remote relay host against the host's own `checkout`,
+    which names that host's copy of the suite, or else the remote home.
     """
 
     launch = dict(profile.launch)
     hosts = Hosts.model_validate(settings.get("hosts") or {})
     if hosts.relay is None:
-        root = (checkout or profile.checkout).expanduser().resolve()
+        root = checkout.expanduser() if checkout is not None else profile.root / profile.checkout.expanduser()
+        root = root.resolve()
         launch["relay_bin"] = root / launch["relay_bin"]
     else:
         # `relay_bin` stays relative, for the relay host to resolve against this checkout.
-        remote_checkout = str(checkout) if checkout is not None else hosts.relay.checkout or str(profile.checkout)
+        remote_checkout = str(checkout) if checkout is not None else _remote_checkout(profile, hosts.relay.checkout)
         hosts = hosts.model_copy(update={"relay": hosts.relay.model_copy(update={"checkout": remote_checkout})})
     port = settings.get("port", ExperimentConfig.model_fields["port"].default)
     if launch.get("relay_url") is not None:
@@ -180,13 +198,14 @@ def default_output() -> pathlib.Path:
 
 
 async def bench(
+    suite: Suite,
     relays: Sequence[str],
     output: pathlib.Path,
     settings: Mapping[str, Any],
     checkouts: Mapping[str, pathlib.Path] | None = None,
     sweep: Sweep | None = None,
 ) -> list[BenchResult]:
-    """Run the same workload against each relay in turn, at each value of `sweep`.
+    """Run the same workload against each of the suite's relays in turn, at each value of `sweep`.
 
     Without a sweep each relay runs once in `output / relay`, and the relays are
     compared in `output`. A sweep runs every relay at each of its values in
@@ -199,12 +218,15 @@ async def bench(
     """
 
     # Deferred like the CLI's own imports: the runner pulls in the analysis stack,
-    # which listing profiles for `--help` does not need.
+    # which parsing the command line does not need.
     from ..analysis.comparison import snapshot_bench
     from ..plot.render import render
     from .experiment import run
     from .ssh import SshPool
 
+    # The suite's protocol and peers are every run's, and explicit settings win.
+    defaults = {"protocol": suite.protocol, "bench_bin": suite.bench_bin, "bench_build": suite.bench_build}
+    settings = {**{key: value for key, value in defaults.items() if value is not None}, **settings}
     checkouts = checkouts or {}
     unknown = sorted(set(checkouts) - set(relays))
     if unknown:
@@ -214,7 +236,7 @@ async def bench(
     values: tuple[int | None, ...] = (None,) if sweep is None else sweep.values
     runs = []
     for name in relays:
-        profile = load_profile(name)
+        profile = load_profile(suite, name)
         for value in values:
             directory = output / name if sweep is None else output / name / sweep.directory(value)
             overrides = {} if sweep is None else {sweep.dimension: value}

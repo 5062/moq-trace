@@ -15,7 +15,7 @@ from ..metadata import Binaries, CommandSet, Window, Workload
 from ..plot.render import render
 from . import tls
 from .capture import Capture, CaptureSession
-from .commands import PROTOCOL, commands
+from .commands import commands
 from .config import ExperimentConfig
 from .hosts import Process
 from .placement import Placement
@@ -164,7 +164,7 @@ async def run(config: ExperimentConfig, pool: SshPool) -> pathlib.Path:
         expected_pids=capture.pids,
         pid=capture.relay_pid,
         transport_profile=config.transport_profile,
-        protocol=PROTOCOL,
+        protocol=config.protocol,
         relay_cpu=config.relay_cpu,
         binaries=binaries,
         commands=command,

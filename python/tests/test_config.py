@@ -16,11 +16,12 @@ from support import run_metadata
 
 from moq_trace.analysis.artifact import write_metadata
 from moq_trace.errors import CaptureError
-from moq_trace.run import commands as commands_module
-from moq_trace.run import experiment, lttng, tcpdump, tls
+from moq_trace.run import experiment, lttng, suite, tcpdump, tls
 from moq_trace.run.commands import commands
 from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts
 from moq_trace.run.experiment import ExperimentError, _validate_workload
+
+PROTOCOL = "moq-transport-16"
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -45,9 +46,11 @@ class ConfigurationTests(unittest.TestCase):
             _validate_workload(database)
 
     def test_the_relay_certificate_is_a_self_signed_localhost_pair(self) -> None:
-        config = ExperimentConfig(output=pathlib.Path("run"), relay_args=("--cert", "{certificate}"))
+        config = ExperimentConfig(protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=("--cert", "{certificate}"))
         self.assertTrue(tls.needs_certificate(config))
-        self.assertFalse(tls.needs_certificate(ExperimentConfig(output=pathlib.Path("run"), relay_args=())))
+        self.assertFalse(
+            tls.needs_certificate(ExperimentConfig(protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=()))
+        )
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory)
             tls.generate_certificate(output)
@@ -64,6 +67,7 @@ class ConfigurationTests(unittest.TestCase):
         relay = HostConfig(ssh="me@relay.example", address="10.0.0.1", workdir="/tmp/runs")
         peer = HostConfig(ssh="me@peer.example", checkout="/srv/moq-trace", workdir="/tmp/runs")
         config = ExperimentConfig(
+            protocol=PROTOCOL,
             output=pathlib.Path("run"),
             relay_bin=pathlib.Path("/opt/relay/moq-relay"),
             relay_args=("--cert", "{certificate}"),
@@ -81,6 +85,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_a_local_relay_needs_a_url_for_remote_peers(self) -> None:
         config = ExperimentConfig(
+            protocol=PROTOCOL,
             output=pathlib.Path("run"),
             relay_args=(),
             relay_url="https://relay.example.com:4443",
@@ -94,6 +99,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_local_binaries_are_absolute_before_working_directory_changes(self) -> None:
         config = ExperimentConfig(
+            protocol=PROTOCOL,
             output=pathlib.Path("run"),
             relay_bin=pathlib.Path("target/release/moq-relay"),
             relay_args=(),
@@ -109,7 +115,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_default_binaries_are_absolute(self) -> None:
         # Child processes run from the output directory, so a defaulted relative path
         # would resolve against the wrong directory and never start.
-        config = ExperimentConfig(output=pathlib.Path("run"), relay_args=())
+        config = ExperimentConfig(protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=())
 
         self.assertTrue(config.relay_bin.is_absolute())
         self.assertTrue(config.bench_bin.is_absolute())
@@ -118,27 +124,35 @@ class ConfigurationTests(unittest.TestCase):
     def test_protocol_matches_the_reference_peers(self) -> None:
         # Both sides pin the version that every implementation has to negotiate, so a
         # drift here either fails the handshake or changes the wire under the trace.
-        source = pathlib.Path(__file__).resolve().parents[2] / "moq-bench/src/lib.rs"
-        pinned = re.findall(r'VERSION: &str = "([^"]+)"', source.read_text())
+        root = pathlib.Path(__file__).resolve().parents[2]
+        pinned = re.findall(r'VERSION: &str = "([^"]+)"', (root / "moq-bench/src/lib.rs").read_text())
 
-        self.assertEqual(pinned, [commands_module.PROTOCOL])
+        self.assertEqual(pinned, [suite.load(root / suite.FILE).protocol])
 
     def test_remote_subscriber_requires_relay_url(self) -> None:
         with self.assertRaisesRegex(ValidationError, "relay_url is required"):
             ExperimentConfig(
-                output=pathlib.Path("run"), relay_args=(), hosts=Hosts(subscriber=HostConfig(ssh="relay@example.com"))
+                protocol=PROTOCOL,
+                output=pathlib.Path("run"),
+                relay_args=(),
+                hosts=Hosts(subscriber=HostConfig(ssh="relay@example.com")),
             )
 
     def test_a_remote_relay_binary_is_resolved_on_its_host(self) -> None:
         remote = Hosts(relay=HostConfig(ssh="me@relay.example", checkout="/srv/relay", workdir="/tmp/runs"))
         config = ExperimentConfig(
-            output=pathlib.Path("run"), relay_bin=pathlib.Path("bin/relay"), relay_args=(), hosts=remote
+            protocol=PROTOCOL,
+            output=pathlib.Path("run"),
+            relay_bin=pathlib.Path("bin/relay"),
+            relay_args=(),
+            hosts=remote,
         )
 
         self.assertEqual(config.relay_bin, pathlib.Path("bin/relay"))
         self.assertEqual(placement_for(config).relay_binary(), "/srv/relay/bin/relay")
         with self.assertRaisesRegex(ValidationError, "set relay_bin"):
             ExperimentConfig(
+                protocol=PROTOCOL,
                 output=pathlib.Path("run"),
                 relay_args=(),
                 hosts=Hosts(relay=HostConfig(ssh="me@relay.example", binary="/opt/relay")),
@@ -147,15 +161,19 @@ class ConfigurationTests(unittest.TestCase):
     def test_the_relay_arguments_are_required(self) -> None:
         with self.assertRaisesRegex(ValidationError, "relay_args"):
             ExperimentConfig(output=pathlib.Path("run"))
+        with self.assertRaisesRegex(ValidationError, "protocol"):
+            ExperimentConfig(output=pathlib.Path("run"), relay_args=())
 
     def test_experiment_validates_workload_and_window(self) -> None:
         with self.assertRaises(ValidationError):
-            ExperimentConfig(output=pathlib.Path("run"), relay_args=(), object_size=0)
+            ExperimentConfig(protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=(), object_size=0)
         with self.assertRaises(ValidationError):
-            ExperimentConfig(output=pathlib.Path("run"), relay_args=(), warmup_seconds=-1)
+            ExperimentConfig(protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=(), warmup_seconds=-1)
 
     def test_peer_commands_leave_duration_to_the_controller(self) -> None:
-        config = ExperimentConfig(output=pathlib.Path("run"), relay_args=(), subscribers=3, object_size=1024, fps=15)
+        config = ExperimentConfig(
+            protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=(), subscribers=3, object_size=1024, fps=15
+        )
 
         command = commands(config, placement_for(config))
 
@@ -169,6 +187,7 @@ class ConfigurationTests(unittest.TestCase):
         relay = HostConfig(ssh="me@relay.example", workdir="/tmp/runs")
         peer = HostConfig(ssh="me@peer.example", binary="/usr/bin/moq-bench", workdir="/tmp/runs")
         config = ExperimentConfig(
+            protocol=PROTOCOL,
             output=pathlib.Path("run"),
             relay_args=(),
             relay_cpu=2,
@@ -183,7 +202,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_peer_cpus_exclude_a_pinned_relay_cpu_on_its_host(self) -> None:
         def peer_cpus(allowed: set[int], **overrides: object) -> tuple[int, ...] | None:
-            config = ExperimentConfig(output=pathlib.Path("run"), relay_args=(), **overrides)
+            config = ExperimentConfig(protocol=PROTOCOL, output=pathlib.Path("run"), relay_args=(), **overrides)
             placement = placement_for(config)
             with mock.patch.object(type(placement.relay), "cpus", mock.AsyncMock(return_value=frozenset(allowed))):
                 return asyncio.run(placement.peer_cpus())
@@ -200,6 +219,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_custom_relay_arguments_expand_run_paths(self) -> None:
         config = ExperimentConfig(
+            protocol=PROTOCOL,
             output=pathlib.Path("configured"),
             relay_args=("--port", "{port}", "--certificate_file", "{certificate}", "--version", "{protocol}"),
             port=19667,
@@ -209,7 +229,7 @@ class ConfigurationTests(unittest.TestCase):
 
         self.assertEqual(relay[1:3], ("--port", "19667"))
         self.assertEqual(relay[4], "actual/relay.crt")
-        self.assertEqual(relay[6], commands_module.PROTOCOL)
+        self.assertEqual(relay[6], PROTOCOL)
 
     def test_readiness_gauges_match_whole_values(self) -> None:
         connected = experiment._gauge("connections", 1)

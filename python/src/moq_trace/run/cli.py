@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from ..errors import ExperimentError, MoqTraceError
 from .config import ExperimentConfig, Hosts
+from .suite import FILE as SUITE_FILE
 from .tcpdump import take_sudo_password
 
 
@@ -25,14 +26,10 @@ def _model(path: pathlib.Path, model):
 
 
 def _relays(value: str) -> tuple[str, ...]:
-    from .bench import profiles
-
+    # Checked against the suite's profiles once the suite is loaded, which needs `--suite`.
     names = tuple(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
     if not names:
         raise argparse.ArgumentTypeError("name at least one relay")
-    unknown = [name for name in names if name not in profiles()]
-    if unknown:
-        raise argparse.ArgumentTypeError(f"unknown relay {', '.join(unknown)}; available: {', '.join(profiles())}")
     return names
 
 
@@ -88,14 +85,18 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("config", type=pathlib.Path)
     run.add_argument("--output", type=pathlib.Path, help="Override the configured output directory.")
 
-    from .bench import profiles
-
     bench = commands.add_parser("bench", help="Run one workload against one or more relay implementations.")
     bench.add_argument(
         "--relay",
         type=_relays,
         required=True,
-        help=f"Comma-separated relay profiles, run in order: {', '.join(profiles())}.",
+        help="Comma-separated relay profiles from the suite, run in order.",
+    )
+    bench.add_argument(
+        "--suite",
+        type=pathlib.Path,
+        metavar="TOML",
+        help=f"The relay profiles, protocol, and peers to bench with (default: ./{SUITE_FILE}).",
     )
     bench.add_argument(
         "--trace",
@@ -215,6 +216,7 @@ def _run(args: argparse.Namespace) -> None:
         print(asyncio.run(_pooled(run, config)))
     elif args.command == "bench":
         from .bench import bench, default_output
+        from .suite import load
 
         names = [*_BENCH_SETTINGS, "capture_packets", "qlog", "render"]
         settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
@@ -226,7 +228,14 @@ def _run(args: argparse.Namespace) -> None:
             settings["hosts"] = _model(args.hosts, Hosts)
         try:
             results = asyncio.run(
-                bench(args.relay, args.output or default_output(), settings, dict(args.checkout), args.sweep)
+                bench(
+                    load(args.suite),
+                    args.relay,
+                    args.output or default_output(),
+                    settings,
+                    dict(args.checkout),
+                    args.sweep,
+                )
             )
         except ValidationError as error:
             raise ValueError(str(error)) from error

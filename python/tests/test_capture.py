@@ -77,6 +77,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         fields = {
             "output": self.root / "run",
             "relay_args": (),
+            "protocol": "moq-transport-16",
             "warmup_seconds": 0,
             "duration_seconds": 0.2,
             "cooldown_seconds": 0,
@@ -223,19 +224,26 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
     async def test_building_runs_once_per_host_and_checkout(self) -> None:
         relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay", workdir="/tmp/runs")
         peer = HostConfig(ssh="me@peer.example", checkout="/srv/moq-trace", workdir="/tmp/runs")
-        config = self._config(relay_build="make relay", hosts=Hosts(relay=relay, publisher=peer, subscriber=peer))
+        config = self._config(
+            relay_build="make relay",
+            bench_build="make peers",
+            hosts=Hosts(relay=relay, publisher=peer, subscriber=peer),
+        )
         with mock.patch.object(FakeRemote, "build", autospec=True) as build:
             await placement_for(config).build()
 
         self.assertEqual(
             [call.args[1:3] for call in build.await_args_list],
-            [("/srv/relay", "make relay"), ("/srv/moq-trace", placement.BENCH_BUILD)],
+            [("/srv/relay", "make relay"), ("/srv/moq-trace", "make peers")],
         )
 
-    async def test_a_remote_relay_without_a_build_command_is_rejected(self) -> None:
+    async def test_a_remote_host_without_a_build_command_is_rejected(self) -> None:
         relay = HostConfig(ssh="me@relay.example", checkout="/srv/relay")
-        with self.assertRaisesRegex(CaptureError, "no build command for the relay"):
+        with self.assertRaisesRegex(CaptureError, "no build command for the relay.*set relay_build"):
             await placement_for(self._config(hosts=Hosts(relay=relay))).build()
+        peer = HostConfig(ssh="me@peer.example", checkout="/srv/moq-trace")
+        with self.assertRaisesRegex(CaptureError, "no build command for the publisher.*set bench_build"):
+            await placement_for(self._config(hosts=Hosts(publisher=peer), relay_url="https://relay:4443")).build()
 
     async def test_every_host_is_connected_once(self) -> None:
         relay = HostConfig(ssh="me@relay.example")

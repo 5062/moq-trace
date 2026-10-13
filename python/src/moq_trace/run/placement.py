@@ -18,10 +18,7 @@ _log = logging.getLogger(__name__)
 
 ROLES = ("relay", "publisher", "subscriber")
 
-# Builds the reference peers in a moq-trace checkout on a peer host. The flags
-# enable flakes for this command alone, since a host's Nix may leave them off.
-BENCH_BUILD = "nix --extra-experimental-features 'nix-command flakes' develop --command just moq-bench-build"
-# The reference peers' binary, relative to a moq-trace checkout.
+# The reference peers' binary, relative to a peer host's checkout.
 BENCH_BINARY = "moq-bench/target/release/moq-bench"
 
 
@@ -131,11 +128,11 @@ class Placement:
             if spec is None or spec.checkout is None:
                 continue
             host = self.host(role)
-            default = self.config.relay_build if role == "relay" else BENCH_BUILD
-            command = spec.build if spec.build is not None else default
+            key = "relay_build" if role == "relay" else "bench_build"
+            command = spec.build if spec.build is not None else getattr(self.config, key)
             if command is None:
                 raise CaptureError(
-                    f"no build command for the {role} on {host.name}; set relay_build, hosts.{role}.build, "
+                    f"no build command for the {role} on {host.name}; set {key}, hosts.{role}.build, "
                     "or an empty build to use the existing binary"
                 )
             checkout = host.path(spec.checkout)

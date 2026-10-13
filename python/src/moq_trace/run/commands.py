@@ -11,11 +11,6 @@ from .config import ExperimentConfig
 from .hosts import Host
 from .placement import Placement
 
-# Pinned for every implementation, so a run cannot silently negotiate a version
-# that makes its trace incomparable with the rest of the matrix. Must match the
-# peers' own pin in `moq-bench/src/lib.rs`.
-PROTOCOL = "moq-transport-16"
-
 
 def _relay_url(config: ExperimentConfig, placement: Placement, peer: Host) -> str:
     """The URL a peer dials: loopback on the relay's host, the relay's address elsewhere."""
@@ -51,7 +46,7 @@ def _peer(config: ExperimentConfig, placement: Placement, role: str, cpus: Seque
         "--client-backend",
         "quinn",
         "--client-version",
-        PROTOCOL,
+        config.protocol,
         "--client-tls-disable-verify",
         "--startup",
         "0s",
@@ -71,7 +66,7 @@ def _relay(config: ExperimentConfig, placement: Placement) -> list[str]:
     directory = placement.directory(placement.relay)
     values = {
         "port": str(config.port),
-        "protocol": PROTOCOL,
+        "protocol": config.protocol,
         "output": directory,
         "certificate": f"{directory}/{tls.CERTIFICATE}",
         "key": f"{directory}/{tls.KEY}",

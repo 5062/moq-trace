@@ -146,7 +146,8 @@ render figures from the resulting DuckDB artifact. The CTF reader accepts only
 the current provider event schemas.
 
 An experiment names the relay's whole command line in a `relay_args` TOML
-array, since the runner knows no relay's arguments. Its entries can use
+array, since the runner knows no relay's arguments, and the MoQ version the peers
+offer in `protocol`. The `relay_args` entries can use
 `{port}`, `{protocol}`, `{output}`, `{certificate}`, and `{key}`; certificate
 placeholders trigger generation of a throwaway TLS pair. Relays
 without a readiness log marker can set `relay_ready_log = ""` and use
@@ -154,7 +155,19 @@ without a readiness log marker can set `relay_ready_log = ""` and use
 directory without changing the checked-in experiment profile.
 
 `moq-trace bench` runs one workload against several relay implementations in
-turn, from the toolkit root so the default peer path resolves:
+turn. It reads which relays, protocol, and peers to use from a `moq-trace.toml`
+suite file, in the working directory unless `--suite` names another. Relative
+paths in it resolve against the file's directory:
+
+```toml
+profiles = "python/src/moq_trace/relays"  # one launch profile per relay
+protocol = "moq-transport-16"             # the version every implementation negotiates
+bench_bin = "moq-bench/target/release/moq-bench"
+bench_build = "nix develop --command just moq-bench-build"  # in a remote peer's checkout
+```
+
+This checkout's own `moq-trace.toml` runs the profiles and peers shipped here,
+so from the toolkit root:
 
 ```sh
 moq-trace bench --relay moq-dev-moq,cloudflare-moq-rs,google-quiche \
@@ -169,12 +182,13 @@ object, which is a stress case; the default of 30 is one second of 30 fps video.
 object of each group and for the rest, so the setup cost stays visible.
 
 Each relay gets its own subdirectory under `--output`, which defaults to
-`artifacts/bench-<UTC time>`. The relays come from the launch profiles in
-`python/src/moq_trace/relays/`. A profile names the relay's checkout, binary,
+`artifacts/bench-<UTC time>`. The relays come from the launch profiles in the
+suite's `profiles` directory. A profile names the relay's checkout, binary,
 arguments, readiness marker, and stop behavior, and may not set any workload key,
 so every relay in one invocation runs the same workload. The workload flags
-default to the experiment defaults. `--checkout RELAY=PATH` points one relay at
-another checkout, and a relay whose binary is missing fails before any run starts.
+default to the experiment defaults. A relative profile checkout resolves against
+the suite's directory. `--checkout RELAY=PATH` points one relay at another
+checkout, and an unknown relay or a missing binary fails before any run starts.
 A failed run does not stop the relays after it. Build each relay with its tracing
 hooks first, linked against the LTTng-UST release of the `lttng` tools that run
 the capture.
@@ -219,14 +233,17 @@ checkout = "~/moq-trace"
 Every path is a path on that host, and `~/` or a relative path resolves against
 the remote home. Before each run, every remote host with a `checkout` builds
 its role there, once per host and checkout: the relay with its profile's
-`relay_build`, and the peers with `just moq-bench-build` through `nix develop`.
-The default commands enable flakes themselves, so a host whose Nix leaves them
-off still builds.
+`relay_build`, and the peers with the suite's `bench_build`. This checkout's
+commands enable flakes themselves, so a host whose Nix leaves them off still
+builds.
 `build` overrides the command, and an empty `build` uses the existing binary.
-A remote relay builds from `--checkout` for that relay when given, then its
-host's `checkout`, then the profile's path, and the profile's relative `relay_bin`
-resolves against that checkout. `binary` overrides where a peer's binary is; the
-relay's is always `relay_bin`.
+A remote relay builds from `--checkout` for that relay when given, and otherwise
+from the profile's checkout. A relay host's `checkout` names its copy of the
+suite: a relative profile checkout resolves against it, so every relay of one
+bench finds its own checkout there, and against the remote home without one. The
+profile's relative `relay_bin` resolves against the relay's checkout. A peer's
+binary is `moq-bench/target/release/moq-bench` in its host's `checkout`, and
+`binary` overrides it; the relay's is always `relay_bin`.
 
 Only the relay's host is traced. The LTTng session, the packet capture, qlog,
 and the clock offset the network figures need are all taken there and copied
