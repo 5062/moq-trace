@@ -241,7 +241,7 @@ def _run(args: argparse.Namespace) -> None:
         print(args.output.resolve())
     elif args.command == "plot":
         from ..analysis.comparison import bench_runs, snapshot_bench
-        from ..render import render
+        from ..plot.render import render
 
         # A bench directory is compared from the runs it holds now, so a run that
         # was analyzed again is picked up; without runs, its saved snapshot renders.

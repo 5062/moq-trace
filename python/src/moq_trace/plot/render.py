@@ -6,12 +6,12 @@ import pathlib
 
 import duckdb
 
-from . import labels
-from .analysis.artifact import open_artifact
-from .analysis.comparison import SNAPSHOT
-from .errors import TraceError
-from .metadata import ComparisonMetadata, RunMetadata
-from .plot import (
+from .. import labels
+from ..analysis.artifact import open_artifact
+from ..analysis.comparison import SNAPSHOT
+from ..errors import TraceError
+from ..metadata import ComparisonMetadata, RunMetadata
+from . import (
     PlotRun,
     plot_breakdown,
     plot_latency_cdf,

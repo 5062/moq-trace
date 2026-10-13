@@ -18,9 +18,9 @@ import pyarrow
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from moq_trace import render  # noqa: E402
 from moq_trace.analysis import analyze, coverage  # noqa: E402
 from moq_trace.analysis.artifact import open_artifact  # noqa: E402
+from moq_trace.plot import render  # noqa: E402
 
 
 def measure(args: argparse.Namespace) -> dict:

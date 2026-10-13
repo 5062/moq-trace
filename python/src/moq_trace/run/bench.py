@@ -159,7 +159,7 @@ async def bench(
     # Deferred like the CLI's own imports: the runner pulls in the analysis stack,
     # which listing profiles for `--help` does not need.
     from ..analysis.comparison import snapshot_bench
-    from ..render import render
+    from ..plot.render import render
     from .experiment import run
     from .ssh import SshPool
 

@@ -18,7 +18,7 @@ from moq_trace.decode import ctf, pcap, quic
 from moq_trace.errors import TraceError
 from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest
 from moq_trace.metadata import Window, Workload
-from moq_trace.render import render
+from moq_trace.plot.render import render
 
 RELAY = ("10.0.0.1", 4443)
 PUBLISHER = ("10.0.0.2", 50000)

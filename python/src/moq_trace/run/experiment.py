@@ -14,7 +14,7 @@ from ..analysis.artifact import open_artifact
 from ..analysis.comparison import write_comparison
 from ..errors import ExperimentError
 from ..metadata import Affinity, Binaries, CommandSet, Window, Workload
-from ..render import render
+from ..plot.render import render
 from . import tls
 from .capture import Capture, CaptureSession
 from .commands import PROTOCOL, commands

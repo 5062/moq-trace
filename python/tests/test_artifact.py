@@ -21,8 +21,8 @@ from moq_trace.analysis.comparison import bench_runs, snapshot_bench, write_comp
 from moq_trace.decode import ctf
 from moq_trace.errors import TraceError
 from moq_trace.metadata import Window, Workload
+from moq_trace.plot.render import render
 from moq_trace.plot.timeline import _timelines
-from moq_trace.render import render
 
 
 @contextmanager
@@ -379,7 +379,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(snapshot.read_bytes(), saved)
 
     def test_rendering_only_reads(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch("moq_trace.render._render_comparison"):
+        with tempfile.TemporaryDirectory() as directory, mock.patch("moq_trace.plot.render._render_comparison"):
             root = pathlib.Path(directory)
             sources = {}
             for name in ("a", "b"):

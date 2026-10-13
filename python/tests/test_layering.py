@@ -54,10 +54,9 @@ class LayeringTests(unittest.TestCase):
                     self.assertLessEqual(imported_layers(path) - {layer}, allowed)
 
     def test_shared_root_modules_do_not_import_a_layer(self) -> None:
-        # render is the presentation entry point and names the layers it draws from.
-        for name in ("errors", "manifest", "metadata", "labels"):
-            with self.subTest(module=name):
-                self.assertEqual(imported_layers(PACKAGE / f"{name}.py"), set())
+        for path in sorted(PACKAGE.glob("*.py")):
+            with self.subTest(module=path.name):
+                self.assertEqual(imported_layers(path), set())
 
     def test_the_guard_detects_an_upward_import(self) -> None:
         source = "from ..run import hosts\nfrom .. import labels, run\nfrom moq_trace.run import cli\n"
