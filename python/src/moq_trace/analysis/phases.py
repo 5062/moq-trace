@@ -55,7 +55,7 @@ OBJECT_PHASES = (
     Phase("object", "rx", "notify", "Notify", drawn=False),
     # From the instant the relay made the object readable until this copy's
     # clone starts: waking the consumer and the scheduler delay before it runs.
-    Phase("object", "tx", "delivery_wait", "Delivery wait", wait=True),
+    Phase("object", "tx", "delivery_wait", "Delivery wait", wait=True, drawn=False),
     Phase("object", "tx", "clone", "Clone"),
     Phase("object", "tx", "header_encode", "Header encode"),
     Phase("object", "tx", "payload_write", "Payload write"),
