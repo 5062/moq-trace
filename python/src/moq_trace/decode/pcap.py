@@ -5,14 +5,24 @@ from __future__ import annotations
 import dataclasses
 import ipaddress
 import pathlib
+import struct
 from collections.abc import Iterator
-from decimal import Decimal
 
 import dpkt
 
 from ..errors import TraceError
 
 _PACKET_OUTGOING = 4
+
+# Classic pcap (draft-ietf-opsawg-pcap): a file header, then one record header
+# before each frame. Formats are little-endian here; a file written big-endian
+# is read with the same fields in its own byte order.
+_FILE_HEADER = struct.Struct("<IHHiIII")
+_RECORD_HEADER = struct.Struct("<IIII")
+# The magic number says whether a record's fractional timestamp counts
+# microseconds or nanoseconds.
+_NS_PER_FRACTION = {0xA1B2C3D4: 1_000, 0xA1B23C4D: 1}
+_LINKTYPE_LINUX_SLL2 = 276
 
 
 @dataclasses.dataclass(frozen=True)
@@ -38,44 +48,42 @@ class Datagram:
         return self.payload
 
 
-class _CheckedPcapStream:
-    """Reject partial reads that dpkt's pcap iterator otherwise accepts.
+def _pcap_records(path: pathlib.Path) -> Iterator[tuple[int, bytes]]:
+    """Yield `(realtime_ns, frame)` from a classic pcap file, rejecting any truncation.
 
-    dpkt reads one file header, then alternating record headers and record data.
-    Only an empty read for the next record header is a clean end of file.
+    The container is read here rather than by dpkt, whose reader accepts a
+    partial final record. Only an empty read for the next record header is a
+    clean end of file.
     """
 
-    def __init__(self, stream, path: pathlib.Path) -> None:
-        self.stream = stream
-        self.path = path
-        self.part = "file header"
-
-    def read(self, size: int) -> bytes:
-        offset = self.stream.tell()
-        data = self.stream.read(size)
-        if self.part == "record header" and not data:
-            return data
-        if len(data) != size:
-            if self.part == "file header":
-                raise TraceError(f"{self.path} is not a pcap file")
-            raise TraceError(f"{self.path} has a truncated pcap {self.part} at byte {offset}")
-        self.part = "record" if self.part == "record header" else "record header"
-        return data
-
-
-def _pcap_records(path: pathlib.Path) -> Iterator[tuple[int, bytes]]:
-    """Yield `(realtime_ns, frame)` from a checked classic pcap stream."""
-
     with path.open("rb") as stream:
-        try:
-            reader = dpkt.pcap.Reader(_CheckedPcapStream(stream, path))
-        except ValueError as error:
-            raise TraceError(f"{path} is not a classic pcap file; capture with tcpdump -w") from error
-        if reader.datalink() & 0x0FFFFFFF != dpkt.pcap.DLT_LINUX_SLL2:
-            raise TraceError(f"{path} has link type {reader.datalink()}; capture with tcpdump -i any -y LINUX_SLL2")
-        for timestamp, frame in reader:
-            # dpkt returns Decimal for nanosecond captures and float for microsecond captures.
-            yield int(Decimal(str(timestamp)) * 1_000_000_000), frame
+        header = stream.read(_FILE_HEADER.size)
+        if len(header) != _FILE_HEADER.size:
+            raise TraceError(f"{path} is not a pcap file")
+        for order in "<>":
+            (magic,) = struct.unpack_from(f"{order}I", header)
+            if magic in _NS_PER_FRACTION:
+                break
+        else:
+            raise TraceError(f"{path} is not a classic pcap file; capture with tcpdump -w")
+        scale = _NS_PER_FRACTION[magic]
+        *_, link_type = struct.unpack(f"{order}{_FILE_HEADER.format[1:]}", header)
+        # The upper bits of the link type describe frame check sequences, not the link.
+        if link_type & 0x0FFFFFFF != _LINKTYPE_LINUX_SLL2:
+            raise TraceError(f"{path} has link type {link_type}; capture with tcpdump -i any -y LINUX_SLL2")
+        record = struct.Struct(f"{order}{_RECORD_HEADER.format[1:]}")
+        while True:
+            offset = stream.tell()
+            header = stream.read(record.size)
+            if not header:
+                return
+            if len(header) != record.size:
+                raise TraceError(f"{path} has a truncated pcap record header at byte {offset}")
+            seconds, fraction, captured, _original = record.unpack(header)
+            frame = stream.read(captured)
+            if len(frame) != captured:
+                raise TraceError(f"{path} has a truncated pcap record at byte {offset + record.size}")
+            yield seconds * 1_000_000_000 + fraction * scale, frame
 
 
 def read_datagrams(path: pathlib.Path, relay_port: int, loopback_ifindexes: tuple[int, ...]) -> Iterator[Datagram]:

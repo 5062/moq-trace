@@ -124,6 +124,29 @@ class DatagramTests(unittest.TestCase):
             with self.assertRaisesRegex(TraceError, "truncated pcap record"):
                 list(pcap.read_datagrams(path, RELAY_PORT, ()))
 
+    def test_a_big_endian_pcap_is_read_in_its_own_byte_order(self) -> None:
+        frame = _frame(ETHERNET, 0, "10.0.0.2", "10.0.0.1", 50000, RELAY_PORT, 1200)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.pcap"
+            header = struct.pack(">IHHiIII", 0xA1B23C4D, 2, 4, 0, 0, 128, 276)
+            path.write_bytes(header + struct.pack(">IIII", 3, 5, len(frame), len(frame)) + frame)
+            (datagram,) = pcap.read_datagrams(path, RELAY_PORT, ())
+        self.assertEqual(datagram.realtime_ns, 3_000_000_005)
+        self.assertEqual(datagram.payload_bytes, 1200)
+
+    def test_a_file_that_is_not_classic_pcap_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "relay.pcap"
+            for content, message in (
+                (b"short", "is not a pcap file"),
+                # A pcapng section header block.
+                (struct.pack("<III", 0x0A0D0D0A, 28, 0x1A2B3C4D) + bytes(16), "not a classic pcap file"),
+            ):
+                with self.subTest(message=message):
+                    path.write_bytes(content)
+                    with self.assertRaisesRegex(TraceError, message):
+                        list(pcap.read_datagrams(path, RELAY_PORT, ()))
+
     def test_a_truncated_pcap_record_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "relay.pcap"
