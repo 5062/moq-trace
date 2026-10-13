@@ -58,7 +58,7 @@
             rustPlatform.bindgenHook
             util-linux
             (writeShellScriptBin "moq-trace" ''
-              exec ${python}/bin/python -m moq_trace.run.cli "$@"
+              exec ${python}/bin/python -P -m moq_trace.run.cli "$@"
             '')
           ];
           # Entered from the workspace, the git top level is the workspace, and the

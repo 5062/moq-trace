@@ -80,12 +80,13 @@ class LttngSession:
 
         await self._lttng("track", "--userspace", "--session", self.name, f"--vpid={pid}")
 
-    async def start(self, pids: Sequence[int]) -> None:
-        """Restrict recording to the given processes and start the session."""
+    async def start(self, pids: Sequence[int] | None) -> None:
+        """Restrict recording to the given processes, or record every process, and start the session."""
 
-        await self._lttng("untrack", "--userspace", "--session", self.name, "--vpid", "--all")
-        for pid in pids:
-            await self.track(pid)
+        if pids is not None:
+            await self._lttng("untrack", "--userspace", "--session", self.name, "--vpid", "--all")
+            for pid in pids:
+                await self.track(pid)
         channel = ("--userspace", "--session", self.name, "--channel", "moq")
         await self._lttng("add-context", *channel, "--type", "vpid")
         # The thread tells transport work run inside a MoQ call apart from the

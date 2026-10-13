@@ -192,6 +192,49 @@ def parser() -> argparse.ArgumentParser:
         help="network.json from a run directory, to analyze its packet capture and qlog.",
     )
 
+    verify = commands.add_parser(
+        "verify",
+        help="Check a transport stack's own fixtures against the quic_trace contract.",
+    )
+    verify.add_argument(
+        "trace",
+        type=pathlib.Path,
+        help="An LTTng CTF trace, or with --run the directory to record one into.",
+    )
+    verify.add_argument(
+        "--run",
+        action="append",
+        default=[],
+        metavar="COMMAND",
+        help="Record every quic_trace event while this command runs. Repeatable; commands run in turn.",
+    )
+    verify.add_argument(
+        "--rx-outcome",
+        action="append",
+        default=[],
+        metavar="OUTCOME",
+        help="Require an RX packet that ends with this outcome. Repeatable.",
+    )
+    verify.add_argument(
+        "--socket",
+        action="append",
+        default=[],
+        metavar="OUTCOME,BUFFERS,DATAGRAMS,BYTES=COUNT",
+        help="Require exactly these socket operations; once given, every other one fails. Repeatable.",
+    )
+    verify.add_argument(
+        "--send-blocked",
+        action="append",
+        default=[],
+        metavar="REASON[/stream]",
+        help="Require a send-blocked interval for this reason, with a stream ID when /stream. Repeatable.",
+    )
+    verify.add_argument(
+        "--allow-abandoned",
+        action="store_true",
+        help="Accept packets that end abandoned, for a fixture that drops a connection mid-send.",
+    )
+
     plot = commands.add_parser("plot", help="Render figures from a DuckDB artifact.")
     plot.add_argument("database", type=pathlib.Path)
     return root
@@ -267,6 +310,25 @@ def _run(args: argparse.Namespace) -> None:
             network=args.network,
         )
         print(args.output.resolve())
+    elif args.command == "verify":
+        import shlex
+
+        from ..analysis.verify import Requirements, parse_send_blocked, parse_socket_stats, verify
+        from .verify import record
+
+        trace = args.trace
+        if args.run:
+            trace = asyncio.run(record(args.trace, [shlex.split(command) for command in args.run]))
+        summary = verify(
+            trace,
+            Requirements(
+                rx_outcomes=args.rx_outcome,
+                socket_stats=parse_socket_stats(args.socket),
+                send_blocked=parse_send_blocked(args.send_blocked),
+                allow_abandoned=args.allow_abandoned,
+            ),
+        )
+        print(summary.describe())
     elif args.command == "plot":
         from ..analysis.comparison import bench_runs, snapshot_bench
         from ..plot.render import render

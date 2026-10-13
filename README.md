@@ -130,6 +130,31 @@ flag:
 pkg-config --cflags --libs moq_trace
 ```
 
+## Checking a transport stack
+
+`moq-trace verify` checks the `quic_trace:*` events of a stack's own fixtures,
+without a relay or a MoQ workload. It records the commands it is given under
+LTTng, or reads an existing CTF trace, and fails unless every packet and socket
+lifecycle and every phase is balanced, no packet ends abandoned, each successful
+packet's `read_queue` or `send_queue` sits on its socket boundary, every STREAM
+range is non-empty, every send-blocked interval is balanced, and the capture
+holds a connection path and a `frame_process` phase. A fixture adds what its
+scenario must produce:
+
+```sh
+moq-trace verify artifacts/check \
+  --run "target/debug/deps/quic_trace-0123" \
+  --rx-outcome dropped \
+  --send-blocked stream_flow_control/stream \
+  --socket success,1,2,1100=1
+```
+
+`--run` is repeatable and runs its commands in turn, `--send-blocked` takes a
+reason, with `/stream` when the interval must name a stream, and `--socket`
+requires exact (outcome, buffers, datagrams, bytes) counts once given. The Quinn
+and Google QUICHE forks, and the moxygen fork for mvfst, each run their fixtures
+this way from `moq_trace/test_trace.sh`.
+
 ## Capture and analysis
 
 Install the Python package:
