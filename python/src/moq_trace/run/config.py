@@ -7,7 +7,7 @@ import shutil
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from ..metadata import ComparisonDimension, TransportProfile
+from ..metadata import TransportProfile
 
 
 class StrictModel(BaseModel):
@@ -147,32 +147,4 @@ class ExperimentConfig(StrictModel):
             raise ValueError("relay_url is required when a peer runs on another host than a local relay")
         if relay is not None and relay.binary is not None:
             raise ValueError("hosts.relay.binary is not used; set relay_bin, which a remote relay resolves on its host")
-        return self
-
-
-class ComparisonConfig(StrictModel):
-    """One comparison dimension applied to a base experiment."""
-
-    experiment: ExperimentConfig
-    dimension: ComparisonDimension
-    values: tuple[int, ...]
-
-    @model_validator(mode="after")
-    def distinct_positive_values(self) -> "ComparisonConfig":
-        """Require at least two distinct positive comparison values."""
-
-        if len(self.values) < 2:
-            raise ValueError("a comparison requires at least two values")
-        if len(set(self.values)) != len(self.values):
-            raise ValueError("comparison values must be unique")
-        if any(value <= 0 for value in self.values):
-            raise ValueError("comparison values must be positive")
-        return self
-
-    @model_validator(mode="after")
-    def runs_are_traced(self) -> "ComparisonConfig":
-        """Require tracing, because a comparison indexes analysis artifacts."""
-
-        if not self.experiment.trace:
-            raise ValueError("a comparison requires tracing")
         return self

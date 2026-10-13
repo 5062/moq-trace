@@ -109,6 +109,83 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(results[0].error, "relay exited")
         self.assertIsNone(results[1].error)
 
+    def test_a_sweep_names_one_dimension_and_distinct_positive_values(self) -> None:
+        self.assertEqual(bench.parse_sweep("subscribers=1,4,2"), bench.Sweep("subscribers", (1, 4, 2)))
+        self.assertEqual(bench.parse_sweep("object-size=1024,16384"), bench.Sweep("object_size", (1024, 16384)))
+        self.assertEqual(bench.parse_sweep("object_size=1024,16384").directory(1024), "object-size-1024")
+        for text, message in (
+            ("fps=1,2", "dimension among subscribers, object_size, objects_per_group"),
+            ("subscribers", "expected DIMENSION="),
+            ("subscribers=1,x", "must be integers"),
+            ("subscribers=4", "at least two distinct positive"),
+            ("subscribers=2,2", "at least two distinct positive"),
+            ("subscribers=0,2", "at least two distinct positive"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, message):
+                bench.parse_sweep(text)
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "at least two"):
+            cli._sweep("subscribers=1")
+
+    def test_a_sweep_runs_every_relay_at_every_value_and_compares_each_relay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for binary in ("a/target/release/moq-relay", "b/target/release/moq-relay-ietf"):
+                (root / binary).parent.mkdir(parents=True)
+                (root / binary).touch()
+            sweep = bench.Sweep("subscribers", (1, 4))
+
+            async def run(config, _pool):
+                if config.output.parent.name == "cloudflare-moq-rs" and config.subscribers == 4:
+                    raise RuntimeError("relay exited")
+                return config.output / "analysis.duckdb"
+
+            with (
+                mock.patch("moq_trace.run.experiment.run", side_effect=run) as runner,
+                mock.patch("moq_trace.analysis.comparison.snapshot_bench") as snapshot,
+                mock.patch("moq_trace.plot.render.render") as render,
+            ):
+                results = asyncio.run(
+                    bench.bench(
+                        ["moq-dev-moq", "cloudflare-moq-rs"],
+                        root / "out",
+                        {"fps": 60},
+                        {"moq-dev-moq": root / "a", "cloudflare-moq-rs": root / "b"},
+                        sweep,
+                    )
+                )
+
+            out = (root / "out").resolve()
+            configs = [call.args[0] for call in runner.call_args_list]
+            self.assertEqual(
+                [(config.output.relative_to(out), config.subscribers, config.fps) for config in configs],
+                [
+                    (pathlib.Path("moq-dev-moq/subscribers-1"), 1, 60),
+                    (pathlib.Path("moq-dev-moq/subscribers-4"), 4, 60),
+                    (pathlib.Path("cloudflare-moq-rs/subscribers-1"), 1, 60),
+                    (pathlib.Path("cloudflare-moq-rs/subscribers-4"), 4, 60),
+                ],
+            )
+            self.assertEqual([(result.relay, result.value) for result in results][-1], ("cloudflare-moq-rs", 4))
+            self.assertEqual(results[-1].error, "relay exited")
+            # Only the relay with two traced runs is compared, across its own values.
+            snapshot.assert_called_once_with(
+                root / "out/moq-dev-moq",
+                {
+                    "subscribers-1": out / "moq-dev-moq/subscribers-1/analysis.duckdb",
+                    "subscribers-4": out / "moq-dev-moq/subscribers-4/analysis.duckdb",
+                },
+            )
+            render.assert_called_once_with(root / "out/moq-dev-moq")
+
+    def test_a_swept_dimension_cannot_also_be_set(self) -> None:
+        with self.assertRaisesRegex(ValueError, "subscribers is swept"):
+            sweep = bench.parse_sweep("subscribers=1,2")
+            asyncio.run(bench.bench(["moq-dev-moq"], pathlib.Path("out"), {"subscribers": 2}, None, sweep))
+        flags = ["--relay", "moq-dev-moq", "--sweep", "subscribers=1,2", "--subscribers", "2"]
+        args = cli.parser().parse_args(["bench", *flags])
+        with self.assertRaisesRegex(ValueError, "--sweep subscribers cannot be combined with --subscribers"):
+            cli._run(args)
+
     def test_relay_list_is_comma_separated(self) -> None:
         self.assertEqual(cli._relays("google-quiche, moq-dev-moq,google-quiche"), ("google-quiche", "moq-dev-moq"))
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "unknown relay moq"):

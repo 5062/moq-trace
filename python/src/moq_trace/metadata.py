@@ -18,9 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # with the experiment configuration so both name the same closed set.
 TransportProfile = Literal["generic", "quinn"]
 
-# The dimensions a comparison can vary. Shared with the experiment
-# configuration, because a comparison writes the value it varied straight into
-# its artifact.
+# The workload dimensions a comparison can vary. Shared with the bench sweep,
+# because a comparison writes the value it varied straight into its artifact.
 ComparisonDimension = Literal["subscribers", "object_size", "objects_per_group"]
 
 

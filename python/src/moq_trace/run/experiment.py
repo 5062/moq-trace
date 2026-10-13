@@ -8,17 +8,15 @@ import pathlib
 import re
 from collections.abc import Callable, Sequence
 
-from .. import labels
 from ..analysis.analyze import run as analyze
 from ..analysis.artifact import open_artifact
-from ..analysis.comparison import write_comparison
 from ..errors import ExperimentError
 from ..metadata import Binaries, CommandSet, Window, Workload
 from ..plot.render import render
 from . import tls
 from .capture import Capture, CaptureSession
 from .commands import PROTOCOL, commands
-from .config import ComparisonConfig, ExperimentConfig
+from .config import ExperimentConfig
 from .hosts import Process
 from .placement import Placement
 from .ssh import SshPool
@@ -175,32 +173,5 @@ async def run(config: ExperimentConfig, pool: SshPool) -> pathlib.Path:
     await asyncio.to_thread(_validate_workload, database)
     if config.render:
         _log.info("rendering figures into %s", output / "plots")
-        await asyncio.to_thread(render, database)
-    return database
-
-
-async def compare(config: ComparisonConfig, pool: SshPool) -> pathlib.Path:
-    """Run every value for one comparison dimension."""
-
-    output = config.experiment.output.resolve()
-    if output.exists():
-        raise ExperimentError(f"comparison output already exists: {output}")
-    output.mkdir(parents=True)
-    runs = []
-    for value in config.values:
-        field = config.dimension
-        run_config = config.experiment.model_copy(
-            update={
-                field: value,
-                "output": output / f"{field.replace('_', '-')}-{value}",
-                "render": False,
-            }
-        )
-        database = await run(run_config, pool)
-        label = labels.dimension(field, value)
-        runs.append((label, database, value))
-    database = output / "comparison.duckdb"
-    await asyncio.to_thread(write_comparison, database, config.dimension, runs)
-    if config.experiment.render:
         await asyncio.to_thread(render, database)
     return database

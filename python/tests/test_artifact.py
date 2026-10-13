@@ -52,14 +52,18 @@ def fixture(scenario="basic"):
 COPY_METRICS = {"full_span", "quic_forward_start", "quic_tail_gap", "quic_full_span", "read_to_moq", "moq_to_send"}
 
 
-def publish(trace, output):
-    """Publish the fixture through the production analyzer entry point."""
+def publish(trace, output, **workload):
+    """Publish the fixture through the production analyzer entry point.
+
+    `workload` adds recorded workload fields that do not change what the
+    fixture's analysis selects, such as `objects_per_group`.
+    """
 
     with mock.patch.object(ctf, "batches", trace.batches):
         analyze.run(
             pathlib.Path("fixture.ctf"),
             output,
-            workload=Workload(object_size=16, subscribers=1),
+            workload=Workload(object_size=16, subscribers=1, **workload),
             window=Window(warmup_seconds=0, cooldown_seconds=0),
             pid=0,
         )
@@ -395,6 +399,34 @@ class ArtifactTests(unittest.TestCase):
             render(root)
             render(snapshot)
             self.assertEqual(snapshot.read_bytes(), saved)
+
+    def test_a_bench_directory_compares_the_one_dimension_its_runs_vary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            runs = {}
+            for name, workload in (
+                ("objects-per-group-30", {"objects_per_group": 30, "fps": 30}),
+                ("objects-per-group-1", {"objects_per_group": 1, "fps": 30}),
+            ):
+                runs[name] = root / name / "analysis.duckdb"
+                with fixture() as trace:
+                    publish(trace, runs[name], **workload)
+            self.assertEqual(bench_runs(root), {name: runs[name] for name in sorted(runs)})
+            snapshot_bench(root, bench_runs(root))
+            with open_artifact(root / "comparison.duckdb", "comparison") as artifact:
+                self.assertEqual(artifact.metadata.dimension, "objects_per_group")
+                self.assertEqual(
+                    artifact.connection.execute("SELECT label, dimension_value FROM runs ORDER BY run_id").fetchall(),
+                    [("1 object/group", 1), ("30 objects/group", 30)],
+                )
+
+            other = root / "fps-60" / "analysis.duckdb"
+            with fixture() as trace:
+                publish(trace, other, objects_per_group=1, fps=60)
+            with self.assertRaisesRegex(TraceError, "differ in objects_per_group, fps; .* and nothing else"):
+                snapshot_bench(root, {**runs, "fps-60": other})
+            with self.assertRaisesRegex(TraceError, "differ in fps; "):
+                snapshot_bench(root, {"objects-per-group-1": runs["objects-per-group-1"], "fps-60": other})
 
     def test_comparison_snapshots_keep_repeats_and_render_without_sources(self):
         with tempfile.TemporaryDirectory() as directory:

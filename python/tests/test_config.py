@@ -19,7 +19,7 @@ from moq_trace.errors import CaptureError
 from moq_trace.run import commands as commands_module
 from moq_trace.run import experiment, lttng, tcpdump, tls
 from moq_trace.run.commands import commands
-from moq_trace.run.config import ComparisonConfig, ExperimentConfig, HostConfig, Hosts
+from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts
 from moq_trace.run.experiment import ExperimentError, _validate_workload
 
 
@@ -210,22 +210,6 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(relay[1:3], ("--port", "19667"))
         self.assertEqual(relay[4], "actual/relay.crt")
         self.assertEqual(relay[6], commands_module.PROTOCOL)
-
-    def test_comparison_values_are_distinct(self) -> None:
-        with self.assertRaises(ValidationError):
-            ComparisonConfig(
-                experiment=ExperimentConfig(output=pathlib.Path("run"), relay_args=()),
-                dimension="subscribers",
-                values=(1, 1),
-            )
-
-    def test_comparison_requires_tracing(self) -> None:
-        with self.assertRaisesRegex(ValidationError, "requires tracing"):
-            ComparisonConfig(
-                experiment=ExperimentConfig(output=pathlib.Path("run"), relay_args=(), trace=False),
-                dimension="subscribers",
-                values=(1, 2),
-            )
 
     def test_readiness_gauges_match_whole_values(self) -> None:
         connected = experiment._gauge("connections", 1)

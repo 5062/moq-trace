@@ -6,16 +6,18 @@ import os
 import pathlib
 import tempfile
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Literal, get_args
 
 import duckdb
 
+from .. import labels
 from ..errors import TraceError
-from ..metadata import ComparisonDimension, ComparisonMetadata, ComparisonRun
+from ..metadata import ComparisonDimension, ComparisonMetadata, ComparisonRun, Workload
 from . import sql
 from .artifact import open_artifact, write_metadata
 
-# The comparison artifact a bench output directory holds beside its runs.
+# The comparison artifact a bench output directory holds beside its runs, which
+# are either one workload on several relays or one relay swept over a dimension.
 SNAPSHOT = "comparison.duckdb"
 
 # The run tables a comparison copies from the attached run, each under its own
@@ -94,23 +96,42 @@ def write_comparison(
 
 
 def bench_runs(directory: pathlib.Path) -> dict[str, pathlib.Path]:
-    """The run artifacts of a bench output directory, keyed by relay.
+    """The run artifacts of a bench output directory, keyed by subdirectory.
 
-    Each subdirectory is one relay's run, and it holds an artifact only when that
-    run was traced and analyzed.
+    Each subdirectory is one run, named for its relay or for its value of a swept
+    dimension, and it holds an artifact only when that run was traced and analyzed.
     """
 
     return {path.parent.name: path for path in sorted(directory.glob("*/analysis.duckdb"))}
 
 
 def snapshot_bench(directory: pathlib.Path, runs: Mapping[str, pathlib.Path]) -> pathlib.Path:
-    """Snapshot the relay runs of one bench into the directory's comparison artifact.
+    """Snapshot the runs of one bench directory into the directory's comparison artifact.
 
-    Replacement keeps the previous snapshot intact until the new one is
-    complete, so a run that was analyzed again is picked up by snapshotting
-    again.
+    The runs' recorded workloads say what the directory compares: relays when
+    every workload is the same, or else the one comparison dimension whose value
+    differs, in ascending order of that value. Runs that differ in any other
+    workload field, or in more than one, are not comparable. Replacement keeps
+    the previous snapshot intact until the new one is complete, so a run that
+    was analyzed again is picked up by snapshotting again.
     """
 
+    workloads = {}
+    for name, path in runs.items():
+        with open_artifact(path, "run") as artifact:
+            workloads[name] = artifact.metadata.workload.model_dump()
+    varied = [field for field in Workload.model_fields if len({workload[field] for workload in workloads.values()}) > 1]
     database = directory / SNAPSHOT
-    write_comparison(database, "relay", [(relay, path, None) for relay, path in runs.items()], replace=True)
+    if not varied:
+        write_comparison(database, "relay", [(name, path, None) for name, path in runs.items()], replace=True)
+    elif len(varied) == 1 and varied[0] in get_args(ComparisonDimension):
+        (dimension,) = varied
+        values = sorted((workloads[name][dimension], path) for name, path in runs.items())
+        entries = [(labels.dimension(dimension, value), path, value) for value, path in values]
+        write_comparison(database, dimension, entries, replace=True)
+    else:
+        raise TraceError(
+            f"the runs in {directory} differ in {', '.join(varied)}; a comparison varies one of "
+            f"{', '.join(get_args(ComparisonDimension))} and nothing else"
+        )
     return database

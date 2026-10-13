@@ -179,6 +179,18 @@ A failed run does not stop the relays after it. Build each relay with its tracin
 hooks first, linked against the LTTng-UST release of the `lttng` tools that run
 the capture.
 
+`--sweep DIMENSION=V1,V2,...` runs every relay at each value of `subscribers`,
+`object-size`, or `objects-per-group` instead of once, with every other workload
+flag fixed:
+
+```sh
+moq-trace bench --relay moq-dev-moq --sweep subscribers=1,4,16
+```
+
+Each run then goes to `<relay>/<dimension>-<value>/` under `--output`, and each
+relay's values are compared in that relay's directory instead of the relays being
+compared with each other. The swept dimension cannot also be given as its own flag.
+
 ### Distributed runs
 
 `--hosts hosts.toml` places the relay, the publisher, and the subscriber on
@@ -227,8 +239,7 @@ directory under `workdir` (`~/moq-trace-runs` by default) for inspection.
 
 `--no-trace` runs the same workload without an LTTng session. Its runs keep only
 the peers' logs, which report throughput, frame rates, and mismatches, and
-produce no analysis artifact. `compare` requires tracing, because a comparison
-indexes analysis artifacts.
+produce no analysis artifact, so they are left out of any comparison.
 
 Every run also measures the network the relay saw, and renders it as
 `network.png` when anything was captured. `--capture-packets` (or
@@ -253,7 +264,7 @@ publisher and up to two subscriber connections.
 
 ### Figures
 
-`run`, `compare`, and `bench` render figures when a traced run finishes, unless
+`run` and `bench` render figures when a traced run finishes, unless
 the configuration sets `render = false` or `bench` is given `--no-render`.
 `moq-trace plot` renders them again
 from an existing artifact, for example after changing the plotting code:
@@ -261,12 +272,14 @@ from an existing artifact, for example after changing the plotting code:
 ```sh
 moq-trace plot artifacts/bench-<UTC time>/moq-dev-moq/analysis.duckdb
 moq-trace plot artifacts/bench-<UTC time>
-moq-trace plot <comparison output>/comparison.duckdb
+moq-trace plot artifacts/bench-<UTC time>/comparison.duckdb
 ```
 
 A run's figures go to `plots/` beside its `analysis.duckdb`. Given a bench
-output directory, `plot` compares the relays whose runs it holds, which must
-share one workload, and writes to that directory's `plots/`. A comparison
+output directory, or one relay's directory of a sweep, `plot` compares the runs
+it holds and writes to that directory's `plots/`. The runs' recorded workloads
+decide what is compared: relays when every workload is the same, or else the one
+swept dimension, which must be the only difference. A comparison
 artifact renders the runs it indexes. Rendering overwrites figures of the same
 name and leaves any others in place.
 
@@ -280,7 +293,7 @@ name and leaves any others in place.
 | `object_timeline.png` | Every QUIC and MoQ phase of the mean, median, and p99 object, from its first RX packet |
 | `network.png` | Throughput, RTT, lost packets, and congestion window; only when a capture or qlog was taken |
 | `relays_cdf.png`, `relays_segments.png`, `relays_breakdown.png`, `relays_moq_work.png` | The relays of one bench, overlaid |
-| `comparison_cdf.png`, `comparison_segments.png`, `comparison_breakdown.png`, `comparison_moq_work.png` | The runs of one `compare`, overlaid |
+| `comparison_cdf.png`, `comparison_segments.png`, `comparison_breakdown.png`, `comparison_moq_work.png` | One relay's runs of a `--sweep`, overlaid |
 
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that

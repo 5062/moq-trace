@@ -13,7 +13,7 @@ import typing
 from pydantic import ValidationError
 
 from ..errors import ExperimentError, MoqTraceError
-from .config import ComparisonConfig, ExperimentConfig, Hosts
+from .config import ExperimentConfig, Hosts
 from .tcpdump import take_sudo_password
 
 
@@ -34,6 +34,15 @@ def _relays(value: str) -> tuple[str, ...]:
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown relay {', '.join(unknown)}; available: {', '.join(profiles())}")
     return names
+
+
+def _sweep(value: str):
+    from .bench import parse_sweep
+
+    try:
+        return parse_sweep(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
 
 
 def _checkout(value: str) -> tuple[str, pathlib.Path]:
@@ -79,9 +88,6 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("config", type=pathlib.Path)
     run.add_argument("--output", type=pathlib.Path, help="Override the configured output directory.")
 
-    compare = commands.add_parser("compare", help="Run one comparison from TOML configuration.")
-    compare.add_argument("config", type=pathlib.Path)
-
     from .bench import profiles
 
     bench = commands.add_parser("bench", help="Run one workload against one or more relay implementations.")
@@ -112,6 +118,13 @@ def parser() -> argparse.ArgumentParser:
     )
     for name in _BENCH_SETTINGS:
         _add_setting(bench, name)
+    bench.add_argument(
+        "--sweep",
+        type=_sweep,
+        metavar="DIMENSION=V1,V2,...",
+        help="Run every relay at each value of subscribers, object_size, or objects_per_group, "
+        "and compare each relay's values instead of the relays.",
+    )
     bench.add_argument(
         "--hosts",
         type=pathlib.Path,
@@ -200,28 +213,34 @@ def _run(args: argparse.Namespace) -> None:
         if args.output is not None:
             config = config.model_copy(update={"output": args.output})
         print(asyncio.run(_pooled(run, config)))
-    elif args.command == "compare":
-        from .experiment import compare
-
-        print(asyncio.run(_pooled(compare, _model(args.config, ComparisonConfig))))
     elif args.command == "bench":
         from .bench import bench, default_output
 
         names = [*_BENCH_SETTINGS, "capture_packets", "qlog", "render"]
         settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
+        if args.sweep is not None and args.sweep.dimension in settings:
+            flag = args.sweep.dimension.replace("_", "-")
+            raise ValueError(f"--sweep {args.sweep.dimension} cannot be combined with --{flag}")
         settings["trace"] = args.trace
         if args.hosts is not None:
             settings["hosts"] = _model(args.hosts, Hosts)
         try:
-            results = asyncio.run(bench(args.relay, args.output or default_output(), settings, dict(args.checkout)))
+            results = asyncio.run(
+                bench(args.relay, args.output or default_output(), settings, dict(args.checkout), args.sweep)
+            )
         except ValidationError as error:
             raise ValueError(str(error)) from error
         for result in results:
+            name = result.relay if result.value is None else f"{result.relay} {args.sweep.dimension}={result.value}"
             if result.error is None:
-                print(f"{result.relay}: {result.path}")
+                print(f"{name}: {result.path}")
             else:
-                print(f"{result.relay}: error: {result.error}", file=sys.stderr)
-        failed = [result.relay for result in results if result.error is not None]
+                print(f"{name}: error: {result.error}", file=sys.stderr)
+        failed = [
+            result.relay if result.value is None else f"{result.relay} {args.sweep.dimension}={result.value}"
+            for result in results
+            if result.error is not None
+        ]
         if failed:
             raise ExperimentError(f"{len(failed)} of {len(results)} relay runs failed: {', '.join(failed)}")
     elif args.command == "analyze":

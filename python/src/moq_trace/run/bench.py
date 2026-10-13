@@ -15,11 +15,12 @@ import logging
 import pathlib
 import tomllib
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, get_args
 
 import pydantic
 
 from ..errors import ExperimentError
+from ..metadata import ComparisonDimension
 from .config import ExperimentConfig, Hosts
 
 _log = logging.getLogger(__name__)
@@ -73,10 +74,47 @@ class RelayProfile:
 
 
 @dataclasses.dataclass(frozen=True)
+class Sweep:
+    """One workload dimension and the values each relay runs it at."""
+
+    dimension: ComparisonDimension
+    values: tuple[int, ...]
+
+    def directory(self, value: int) -> str:
+        """The run directory name for one value, such as `object-size-1024`."""
+
+        return f"{self.dimension.replace('_', '-')}-{value}"
+
+
+def parse_sweep(text: str) -> Sweep:
+    """Parse `DIMENSION=V1,V2,...` into a sweep of at least two distinct positive values.
+
+    The dimension may be spelled as its flag is, with dashes.
+    """
+
+    dimension, separator, listed = text.partition("=")
+    dimension = dimension.replace("-", "_")
+    dimensions = get_args(ComparisonDimension)
+    if not separator or dimension not in dimensions:
+        raise ValueError(f"expected DIMENSION=V1,V2,... with a dimension among {', '.join(dimensions)}")
+    try:
+        values = tuple(int(value) for value in listed.split(","))
+    except ValueError:
+        raise ValueError(f"sweep values must be integers: {listed}") from None
+    if len(values) < 2 or len(set(values)) != len(values) or min(values) <= 0:
+        raise ValueError("a sweep needs at least two distinct positive values")
+    return Sweep(dimension, values)
+
+
+@dataclasses.dataclass(frozen=True)
 class BenchResult:
-    """Outcome of one relay's run: its artifact or run directory, or the error."""
+    """Outcome of one run: its artifact or run directory, or the error.
+
+    `value` is the swept dimension's value, when the bench swept one.
+    """
 
     relay: str
+    value: int | None = None
     path: pathlib.Path | None = None
     error: str | None = None
 
@@ -146,14 +184,18 @@ async def bench(
     output: pathlib.Path,
     settings: Mapping[str, Any],
     checkouts: Mapping[str, pathlib.Path] | None = None,
+    sweep: Sweep | None = None,
 ) -> list[BenchResult]:
-    """Run the same workload against each relay in turn.
+    """Run the same workload against each relay in turn, at each value of `sweep`.
 
-    Every profile and binary is checked before the first run starts, so a typo
-    fails immediately instead of after the other relays have run. A failing run
-    does not stop the ones after it; its error is returned in its result. When
-    rendering is on and at least two traced runs succeed, their comparison
-    figures are written under `output / "plots"`.
+    Without a sweep each relay runs once in `output / relay`, and the relays are
+    compared in `output`. A sweep runs every relay at each of its values in
+    `output / relay / <dimension>-<value>`, and compares each relay's values in
+    `output / relay`. Every profile and binary is checked before the first run
+    starts, so a typo fails immediately instead of after the other relays have
+    run. A failing run does not stop the ones after it; its error is returned in
+    its result. When rendering is on and at least two traced runs of one
+    comparison succeed, it is snapshotted and its figures written to its `plots`.
     """
 
     # Deferred like the CLI's own imports: the runner pulls in the analysis stack,
@@ -167,33 +209,49 @@ async def bench(
     unknown = sorted(set(checkouts) - set(relays))
     if unknown:
         raise ValueError(f"checkout given for relays not being run: {', '.join(unknown)}")
-    configs = {}
+    if sweep is not None and sweep.dimension in settings:
+        raise ValueError(f"{sweep.dimension} is swept, so it cannot also be set")
+    values: tuple[int | None, ...] = (None,) if sweep is None else sweep.values
+    runs = []
     for name in relays:
-        config = experiment_config(load_profile(name), output / name, settings, checkouts.get(name))
-        # A remote relay is built on its host at the start of its run.
-        if config.hosts.relay is None and not config.relay_bin.is_file():
-            raise ValueError(f"{name}: relay binary not found at {config.relay_bin}; build it first")
-        configs[name] = config
+        profile = load_profile(name)
+        for value in values:
+            directory = output / name if sweep is None else output / name / sweep.directory(value)
+            overrides = {} if sweep is None else {sweep.dimension: value}
+            config = experiment_config(profile, directory, {**settings, **overrides}, checkouts.get(name))
+            # A remote relay is built on its host at the start of its run.
+            if config.hosts.relay is None and not config.relay_bin.is_file():
+                raise ValueError(f"{name}: relay binary not found at {config.relay_bin}; build it first")
+            runs.append((name, value, config))
     if output.exists():
         raise ExperimentError(f"bench output already exists: {output.resolve()}")
 
     results = []
     # One pool for every run, so each remote host is logged in to once.
     async with SshPool() as pool:
-        for index, (name, config) in enumerate(configs.items(), start=1):
-            _log.info("[%d/%d] %s", index, len(configs), name)
+        for index, (name, value, config) in enumerate(runs, start=1):
+            label = name if sweep is None else f"{name} {sweep.dimension}={value}"
+            _log.info("[%d/%d] %s", index, len(runs), label)
             try:
-                results.append(BenchResult(relay=name, path=await run(config, pool)))
+                results.append(BenchResult(relay=name, value=value, path=await run(config, pool)))
             # Broad on purpose: one relay's failure, even a bug, must not cost the
             # relays after it their runs.
             except (OSError, RuntimeError, ValueError) as error:
-                _log.info("%s failed: %s", name, error)
-                results.append(BenchResult(relay=name, error=str(error)))
-    databases = {
-        result.relay: result.path for result in results if result.path is not None and result.path.suffix == ".duckdb"
-    }
-    if settings.get("render", True) and len(databases) >= 2:
-        _log.info("rendering the relay comparison into %s", output / "plots")
-        await asyncio.to_thread(snapshot_bench, output, databases)
-        await asyncio.to_thread(render, output)
+                _log.info("%s failed: %s", label, error)
+                results.append(BenchResult(relay=name, value=value, error=str(error)))
+
+    # Each comparison directory and its traced runs, keyed as `plot` keys them:
+    # by the subdirectory each run is in.
+    comparisons: dict[pathlib.Path, dict[str, pathlib.Path]] = {}
+    for result in results:
+        if result.path is None or result.path.suffix != ".duckdb":
+            continue
+        directory = output if sweep is None else output / result.relay
+        comparisons.setdefault(directory, {})[result.path.parent.name] = result.path
+    if settings.get("render", True):
+        for directory, databases in comparisons.items():
+            if len(databases) >= 2:
+                _log.info("rendering the comparison into %s", directory / "plots")
+                await asyncio.to_thread(snapshot_bench, directory, databases)
+                await asyncio.to_thread(render, directory)
     return results
