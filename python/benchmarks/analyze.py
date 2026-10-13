@@ -38,13 +38,22 @@ def measure(args: argparse.Namespace) -> dict:
 
         return call
 
+    def resolve_stage(_connection, _source="coverage/trace-source", family="model.coverage"):
+        # The decrypted capture resolves its own coverage inside `_ingest_network`,
+        # so it is timed apart from the trace's instead of overwriting it.
+        return "resolve" if family == "model.coverage" else "wire_resolve"
+
+    resolve = coverage.resolve
+
+    def timed_resolve(*args, **kwargs):
+        return timed(resolve_stage(*args, **kwargs), resolve)(*args, **kwargs)
+
     with open_artifact(args.reference, "run") as artifact:
         metadata = artifact.metadata
     stages = (
         (analyze, "_ingest"),
         (analyze, "_validate_raw"),
         (analyze, "_select_window"),
-        (coverage, "resolve"),
         (analyze, "_derive_samples"),
         (analyze, "_ingest_network"),
         (analyze, "_define_metrics"),
@@ -53,6 +62,7 @@ def measure(args: argparse.Namespace) -> dict:
     with contextlib.ExitStack() as stack:
         for module, name in stages:
             stack.enter_context(patch.object(module, name, timed(name, getattr(module, name))))
+        stack.enter_context(patch.object(coverage, "resolve", timed_resolve))
         analyze.run(
             args.trace,
             args.output / "analysis.duckdb",

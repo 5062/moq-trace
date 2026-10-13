@@ -35,6 +35,7 @@
             dpkt
             duckdb
             matplotlib
+            numpy
             pyarrow
             pydantic
           ]

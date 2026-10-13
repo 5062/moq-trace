@@ -7,6 +7,7 @@ import pathlib
 from collections.abc import Mapping, Sequence
 
 import duckdb
+import numpy
 from matplotlib import pyplot as plt
 from matplotlib import ticker
 from matplotlib.axes import Axes
@@ -39,8 +40,9 @@ def _draw_distribution(
     """Draw one sorted sample set as an ECDF and, optionally, its tail CCDF."""
 
     count = len(values_us)
-    p50 = values_us[int(0.50 * (count - 1))]
-    p99 = values_us[int(0.99 * (count - 1))]
+    # Interpolated like DuckDB's `quantile_cont`, so a legend reports the same
+    # quantiles as `metrics.statistics`.
+    p50, p99 = (float(value) for value in numpy.quantile(values_us, (0.50, 0.99)))
     color = f"C{index}"
     ecdf.ecdf(
         values_us,

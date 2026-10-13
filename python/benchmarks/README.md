@@ -21,7 +21,9 @@ Rendering is timed separately. Peak RSS is the worker's lifetime high-water mark
 in KiB on Linux, including rendering when requested. Database size is recorded
 after the writer closes. Pass `--network path/to/network.json` to include packet
 capture decryption and qlog ingestion. The manifest resolves its sidecars from
-its own directory. Network ingestion is timed separately as `_ingest_network`.
+its own directory. Network ingestion is timed separately as `_ingest_network`,
+which includes resolving the decrypted capture's coverage, also reported alone
+as `wire_resolve`.
 
 Run on an otherwise idle machine, alternate before/after runs when differences
 are small, and compare the databases as unordered multisets before accepting an
