@@ -20,12 +20,12 @@ boundaries being measured.
 - `crates/trace-core` owns the process-wide identity counters, the host clock,
   and the provider seam that both Rust facades share.
 - `include` provides equivalent C++17 scoped APIs.
-- `python` captures relay workloads and builds combined DuckDB artifacts. Its
-  `relays/` directory holds the launch profile for each relay implementation that
-  `moq-trace bench` runs.
-- `moq-bench` provides implementation-independent MoQ client and server peers used
-  as a baseline and a fixture. It builds against the MoQ implementation under test,
-  so it sits outside the workspace; see `moq-bench/README.md`.
+- `python` captures relay workloads and builds combined DuckDB artifacts.
+
+The toolkit names no relay implementation. The launch profile for each relay, the
+`moq-bench` reference peers, and the hosts experiments run on live in
+[moq-workspace](https://github.com/5062/moq-workspace), which pins this repository
+together with the instrumented relays.
 
 The MoQ provider emits:
 
@@ -160,14 +160,14 @@ suite file, in the working directory unless `--suite` names another. Relative
 paths in it resolve against the file's directory:
 
 ```toml
-profiles = "python/src/moq_trace/relays"  # one launch profile per relay
-protocol = "moq-transport-16"             # the version every implementation negotiates
+profiles = "profiles"                 # one launch profile per relay
+protocol = "moq-transport-16"         # the version every implementation negotiates
 bench_bin = "moq-bench/target/release/moq-bench"
-bench_build = "nix develop --command just moq-bench-build"  # in a remote peer's checkout
+bench_build = "nix develop --command just build-moq-bench"  # in a remote peer's checkout
 ```
 
-This checkout's own `moq-trace.toml` runs the profiles and peers shipped here,
-so from the toolkit root:
+The workspace's `moq-trace.toml` runs its profiles and peers, so from the
+workspace root:
 
 ```sh
 moq-trace bench --relay moq-dev-moq,cloudflare-moq-rs,google-quiche \
@@ -219,21 +219,22 @@ tables go under `[hosts.relay]` and so on in a `run` configuration.
 [relay]
 ssh = "me@relay-host"
 address = "10.0.0.1"      # what the peers dial; defaults to the ssh host name
-lttng = "nix --extra-experimental-features 'nix-command flakes' develop ~/moq-trace --command lttng"   # when lttng is not on the ssh PATH
+lttng = "nix --extra-experimental-features 'nix-command flakes' develop ~/moq-workspace/moq-trace --command lttng"   # when lttng is not on the ssh PATH
+checkout = "~/moq-workspace"  # the copy of the suite the relays' checkouts are in
 
 [publisher]
 ssh = "me@pub-host"
-checkout = "~/moq-trace"  # a moq-trace checkout that builds moq-bench
+checkout = "~/moq-workspace"  # a checkout that builds moq-bench
 
 [subscriber]
 ssh = "me@sub-host"
-checkout = "~/moq-trace"
+checkout = "~/moq-workspace"
 ```
 
 Every path is a path on that host, and `~/` or a relative path resolves against
 the remote home. Before each run, every remote host with a `checkout` builds
 its role there, once per host and checkout: the relay with its profile's
-`relay_build`, and the peers with the suite's `bench_build`. This checkout's
+`relay_build`, and the peers with the suite's `bench_build`. The workspace's
 commands enable flakes themselves, so a host whose Nix leaves them off still
 builds.
 `build` overrides the command, and an empty `build` uses the existing binary.

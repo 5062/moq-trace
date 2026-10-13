@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-import re
 import tempfile
 import unittest
 from unittest import mock
@@ -16,7 +15,7 @@ from support import run_metadata
 
 from moq_trace.analysis.artifact import write_metadata
 from moq_trace.errors import CaptureError
-from moq_trace.run import experiment, lttng, suite, tcpdump, tls
+from moq_trace.run import experiment, lttng, tcpdump, tls
 from moq_trace.run.commands import commands
 from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts
 from moq_trace.run.experiment import ExperimentError, _validate_workload
@@ -120,14 +119,6 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(config.relay_bin.is_absolute())
         self.assertTrue(config.bench_bin.is_absolute())
         self.assertEqual(config.bench_bin.name, "moq-bench")
-
-    def test_protocol_matches_the_reference_peers(self) -> None:
-        # Both sides pin the version that every implementation has to negotiate, so a
-        # drift here either fails the handshake or changes the wire under the trace.
-        root = pathlib.Path(__file__).resolve().parents[2]
-        pinned = re.findall(r'VERSION: &str = "([^"]+)"', (root / "moq-bench/src/lib.rs").read_text())
-
-        self.assertEqual(pinned, [suite.load(root / suite.FILE).protocol])
 
     def test_remote_subscriber_requires_relay_url(self) -> None:
         with self.assertRaisesRegex(ValidationError, "relay_url is required"):

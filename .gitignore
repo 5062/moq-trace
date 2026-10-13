@@ -1,5 +1,4 @@
 /target/
-/moq-bench/target/
 /.venv/
 /.direnv/
 **/__pycache__/

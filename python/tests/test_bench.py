@@ -10,8 +10,7 @@ from unittest import mock
 from moq_trace.run import bench, cli, suite
 from moq_trace.run.bench import RelayProfile, experiment_config, load_profile, profiles
 
-# This checkout's own suite, whose profiles the tests check as shipped.
-SUITE = suite.load(pathlib.Path(__file__).resolve().parents[2] / suite.FILE)
+SUITE = suite.load(pathlib.Path(__file__).resolve().parent / "fixtures/suite" / suite.FILE)
 SETTINGS = {"protocol": SUITE.protocol}
 
 
@@ -27,8 +26,8 @@ def _profile(checkout: str = "/opt/relay", **launch) -> RelayProfile:
 class BenchTests(unittest.TestCase):
     """Exercise relay profiles and the bench command through stable interfaces."""
 
-    def test_every_shipped_profile_builds_an_experiment(self) -> None:
-        self.assertEqual(profiles(SUITE), ("cloudflare-moq-rs", "facebook-moxygen", "google-quiche", "moq-dev-moq"))
+    def test_every_profile_builds_an_experiment(self) -> None:
+        self.assertEqual(profiles(SUITE), ("alpha", "beta"))
         for name in profiles(SUITE):
             config = experiment_config(load_profile(SUITE, name), pathlib.Path("run"), SETTINGS)
             self.assertTrue(config.relay_bin.is_absolute(), name)
@@ -111,10 +110,10 @@ class BenchTests(unittest.TestCase):
                     asyncio.run(
                         bench.bench(
                             SUITE,
-                            ["moq-dev-moq"],
+                            ["alpha"],
                             pathlib.Path(directory) / "out",
                             {},
-                            {"moq-dev-moq": pathlib.Path(directory)},
+                            {"alpha": pathlib.Path(directory)},
                         )
                     )
             run.assert_not_called()
@@ -122,22 +121,22 @@ class BenchTests(unittest.TestCase):
     def test_bench_continues_after_a_failed_relay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            for binary in ("a/target/release/moq-relay", "b/target/release/moq-relay-ietf"):
+            for binary in ("a/bin/alpha", "b/bin/beta"):
                 (root / binary).parent.mkdir(parents=True)
                 (root / binary).touch()
-            outcomes = [RuntimeError("relay exited"), root / "out/cloudflare-moq-rs/analysis.duckdb"]
+            outcomes = [RuntimeError("relay exited"), root / "out/beta/analysis.duckdb"]
             with mock.patch("moq_trace.run.experiment.run", new_callable=mock.AsyncMock, side_effect=outcomes):
                 results = asyncio.run(
                     bench.bench(
                         SUITE,
-                        ["moq-dev-moq", "cloudflare-moq-rs"],
+                        ["alpha", "beta"],
                         root / "out",
                         {},
-                        {"moq-dev-moq": root / "a", "cloudflare-moq-rs": root / "b"},
+                        {"alpha": root / "a", "beta": root / "b"},
                     )
                 )
 
-        self.assertEqual([result.relay for result in results], ["moq-dev-moq", "cloudflare-moq-rs"])
+        self.assertEqual([result.relay for result in results], ["alpha", "beta"])
         self.assertEqual(results[0].error, "relay exited")
         self.assertIsNone(results[1].error)
 
@@ -161,13 +160,13 @@ class BenchTests(unittest.TestCase):
     def test_a_sweep_runs_every_relay_at_every_value_and_compares_each_relay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            for binary in ("a/target/release/moq-relay", "b/target/release/moq-relay-ietf"):
+            for binary in ("a/bin/alpha", "b/bin/beta"):
                 (root / binary).parent.mkdir(parents=True)
                 (root / binary).touch()
             sweep = bench.Sweep("subscribers", (1, 4))
 
             async def run(config, _pool):
-                if config.output.parent.name == "cloudflare-moq-rs" and config.subscribers == 4:
+                if config.output.parent.name == "beta" and config.subscribers == 4:
                     raise RuntimeError("relay exited")
                 return config.output / "analysis.duckdb"
 
@@ -179,10 +178,10 @@ class BenchTests(unittest.TestCase):
                 results = asyncio.run(
                     bench.bench(
                         SUITE,
-                        ["moq-dev-moq", "cloudflare-moq-rs"],
+                        ["alpha", "beta"],
                         root / "out",
                         {"fps": 60},
-                        {"moq-dev-moq": root / "a", "cloudflare-moq-rs": root / "b"},
+                        {"alpha": root / "a", "beta": root / "b"},
                         sweep,
                     )
                 )
@@ -196,42 +195,42 @@ class BenchTests(unittest.TestCase):
             self.assertEqual(
                 [(config.output.relative_to(out), config.subscribers, config.fps) for config in configs],
                 [
-                    (pathlib.Path("moq-dev-moq/subscribers-1"), 1, 60),
-                    (pathlib.Path("moq-dev-moq/subscribers-4"), 4, 60),
-                    (pathlib.Path("cloudflare-moq-rs/subscribers-1"), 1, 60),
-                    (pathlib.Path("cloudflare-moq-rs/subscribers-4"), 4, 60),
+                    (pathlib.Path("alpha/subscribers-1"), 1, 60),
+                    (pathlib.Path("alpha/subscribers-4"), 4, 60),
+                    (pathlib.Path("beta/subscribers-1"), 1, 60),
+                    (pathlib.Path("beta/subscribers-4"), 4, 60),
                 ],
             )
-            self.assertEqual([(result.relay, result.value) for result in results][-1], ("cloudflare-moq-rs", 4))
+            self.assertEqual([(result.relay, result.value) for result in results][-1], ("beta", 4))
             self.assertEqual(results[-1].error, "relay exited")
             # Only the relay with two traced runs is compared, across its own values.
             snapshot.assert_called_once_with(
-                root / "out/moq-dev-moq",
+                root / "out/alpha",
                 {
-                    "subscribers-1": out / "moq-dev-moq/subscribers-1/analysis.duckdb",
-                    "subscribers-4": out / "moq-dev-moq/subscribers-4/analysis.duckdb",
+                    "subscribers-1": out / "alpha/subscribers-1/analysis.duckdb",
+                    "subscribers-4": out / "alpha/subscribers-4/analysis.duckdb",
                 },
             )
-            render.assert_called_once_with(root / "out/moq-dev-moq")
+            render.assert_called_once_with(root / "out/alpha")
 
     def test_a_swept_dimension_cannot_also_be_set(self) -> None:
         with self.assertRaisesRegex(ValueError, "subscribers is swept"):
             sweep = bench.parse_sweep("subscribers=1,2")
-            asyncio.run(bench.bench(SUITE, ["moq-dev-moq"], pathlib.Path("out"), {"subscribers": 2}, None, sweep))
-        flags = ["--relay", "moq-dev-moq", "--sweep", "subscribers=1,2", "--subscribers", "2"]
+            asyncio.run(bench.bench(SUITE, ["alpha"], pathlib.Path("out"), {"subscribers": 2}, None, sweep))
+        flags = ["--relay", "alpha", "--sweep", "subscribers=1,2", "--subscribers", "2"]
         args = cli.parser().parse_args(["bench", *flags])
         with self.assertRaisesRegex(ValueError, "--sweep subscribers cannot be combined with --subscribers"):
             cli._run(args)
 
     def test_relay_list_is_comma_separated(self) -> None:
-        self.assertEqual(cli._relays("google-quiche, moq-dev-moq,google-quiche"), ("google-quiche", "moq-dev-moq"))
+        self.assertEqual(cli._relays("beta, alpha,beta"), ("beta", "alpha"))
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "at least one relay"):
             cli._relays(" , ")
 
     def test_an_unknown_relay_fails_before_any_run(self) -> None:
         with mock.patch("moq_trace.run.experiment.run", new_callable=mock.AsyncMock) as run:
-            with self.assertRaisesRegex(ValueError, "unknown relay 'moq'; available: cloudflare-moq-rs"):
-                asyncio.run(bench.bench(SUITE, ["moq-dev-moq", "moq"], pathlib.Path("out"), {}))
+            with self.assertRaisesRegex(ValueError, "unknown relay 'moq'; available: alpha, beta"):
+                asyncio.run(bench.bench(SUITE, ["moq", "alpha"], pathlib.Path("out"), {}))
         run.assert_not_called()
 
 
@@ -266,8 +265,8 @@ class SuiteTests(unittest.TestCase):
     def test_the_suite_fills_only_what_the_bench_leaves_unset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "a/target/release/moq-relay").parent.mkdir(parents=True)
-            (root / "a/target/release/moq-relay").touch()
+            (root / "a/bin/alpha").parent.mkdir(parents=True)
+            (root / "a/bin/alpha").touch()
 
             async def run(config, _pool):
                 return config.output
@@ -276,10 +275,10 @@ class SuiteTests(unittest.TestCase):
                 asyncio.run(
                     bench.bench(
                         SUITE,
-                        ["moq-dev-moq"],
+                        ["alpha"],
                         root / "out",
                         {"bench_bin": root / "peer", "render": False},
-                        {"moq-dev-moq": root / "a"},
+                        {"alpha": root / "a"},
                     )
                 )
 
@@ -287,9 +286,9 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual((config.protocol, config.bench_bin), (SUITE.protocol, (root / "peer").resolve()))
 
     def test_bench_flags_default_to_the_experiment(self) -> None:
-        args = cli.parser().parse_args(["bench", "--relay", "moq-dev-moq", "--no-trace", "--fps", "60"])
+        args = cli.parser().parse_args(["bench", "--relay", "alpha", "--no-trace", "--fps", "60"])
 
-        self.assertEqual(args.relay, ("moq-dev-moq",))
+        self.assertEqual(args.relay, ("alpha",))
         self.assertFalse(args.trace)
         self.assertEqual(args.fps, 60)
         self.assertIsNone(args.subscribers)

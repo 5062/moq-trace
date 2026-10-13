@@ -1,0 +1,4 @@
+# A suite for the bench tests: two relays that run nothing.
+profiles = "profiles"
+protocol = "moq-transport-16"
+bench_build = "make peers"

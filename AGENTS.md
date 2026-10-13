@@ -44,22 +44,14 @@ in their MoQ and QUIC code.
   enforces the direction.
 - Keep implementation-specific types and control flow outside this repository.
 
-Two bounded exceptions to that boundary exist.
-
-`moq-bench/` is an implementation-independent client and server used as a
-measurement fixture and baseline, and it builds against the MoQ implementation
-under test, so it lives outside the workspace (`Cargo.toml` excludes it) and keeps
-`just check` working from a standalone checkout. MoQ semantics must not leak from
-`moq-bench/` into `crates/` or `python/`, and relay policy must not leak the other
-way.
-
-`python/src/moq_trace/relays/` holds one launch profile per relay implementation,
-so `moq-trace bench` can run one workload against all of them. A profile is data
-only: where the relay's checkout lives, its binary, its arguments, and how to wait
-for and stop it. `bench.LAUNCH_KEYS` lists the keys a profile may set, and it
-excludes every workload key so that one invocation cannot run relays under
-different workloads. Relay-specific behavior belongs in a profile's keys, never in
-branches on a relay's name in the runner or the analysis.
+The relay launch profiles, the `moq-bench` reference peers, and the protocol
+version every implementation negotiates live in the moq-workspace repository,
+whose `moq-trace.toml` names them for `moq-trace bench`. A profile is data only:
+where the relay's checkout lives, its binary, its arguments, and how to wait for
+and stop it. `bench.LAUNCH_KEYS` lists the keys a profile may set, and it excludes
+every workload key so that one invocation cannot run relays under different
+workloads. Relay-specific behavior belongs in a profile's keys, never in branches
+on a relay's name in the runner or the analysis.
 
 Provider event names, enum values, fields, and units are one contract shared by
 the providers, both facades, and the analyzer, and all of them change together
@@ -81,13 +73,6 @@ nix develop --command just check
 tests, both C++ facade smoke tests, and Python linting. It also links a real
 binary to confirm the LTTng providers survive garbage collection and reach a
 capture, and consumes the installed CMake packages from separate prefixes.
-
-The bench peers are checked separately, because they fetch and build the moq
-implementation under test from its git branch:
-
-```sh
-nix develop --command just moq-bench-check
-```
 
 Document every public Rust and C++ symbol. Comments should explain constraints
 or invariants. Use plain prose without em dashes.

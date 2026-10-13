@@ -94,18 +94,3 @@ fix:
     cargo fmt --all
     ruff check --fix python
     ruff format python
-
-# The measurement peers. They build against the instrumented moq branch, so they are
-# excluded from the workspace and from `check`, which must pass on its own.
-moq-bench-build:
-    # Release: a measurement must not carry a debug-built peer's overhead, and the
-    # experiment configuration defaults to this path.
-    cargo build --release --manifest-path moq-bench/Cargo.toml --features lttng
-
-moq-bench-check:
-    cargo test --manifest-path moq-bench/Cargo.toml --all-features
-    cargo fmt --manifest-path moq-bench/Cargo.toml --all --check
-    cargo clippy --manifest-path moq-bench/Cargo.toml --all-targets --all-features -- -D warnings
-
-moq-bench-fix:
-    cargo fmt --manifest-path moq-bench/Cargo.toml --all
