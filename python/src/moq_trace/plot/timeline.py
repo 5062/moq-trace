@@ -279,9 +279,8 @@ def plot_object_timelines(
         active_us = _active_time_us(timeline.intervals)
         active_label = "unavailable" if active_us is None else f"{active_us:.2f} µs"
         axis.set_title(
-            f"Near {timeline.statistic} | group {timeline.group_id}, object {timeline.object_id} | "
-            f"dataset {timeline.statistic}: {timeline.target_us:.2f} µs\n"
-            f"MoQ latency: {timeline.actual_us:.2f} µs | active time: {active_label}",
+            f"MoQ {timeline.statistic} latency: {timeline.actual_us:.2f} µs | "
+            f"active: {active_label} | object ({timeline.group_id}, {timeline.object_id})",
             fontsize=10,
             loc="left",
         )

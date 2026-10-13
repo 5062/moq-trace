@@ -357,8 +357,8 @@ name and leaves any others in place.
 | `relays_cdf.png`, `relays_segments.png`, `relays_breakdown.png`, `relays_moq_work.png` | The relays of one bench, overlaid |
 | `comparison_cdf.png`, `comparison_segments.png`, `comparison_breakdown.png`, `comparison_moq_work.png` | One relay's runs of a `--sweep`, overlaid |
 
-Each object timeline heading separates the dataset statistic used to select the
-object from that object's actual MoQ latency, measured from RX start to its
+Each object timeline heading names the selection statistic (mean, median, or
+p99) and shows that object's actual MoQ latency, measured from RX start to its
 latest successful TX completion. Active time is the union of successful non-wait
 MoQ phase intervals across RX and all successful TX copies, including phases
 hidden from the drawing. Overlapping and nested intervals count once. These are

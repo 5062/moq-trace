@@ -160,8 +160,7 @@ class RunPlotTests(unittest.TestCase):
         figure = save.call_args.args[0]
         try:
             heading = figure.axes[0].get_title(loc="left")
-            self.assertIn("dataset mean: 110.00 µs", heading)
-            self.assertIn("MoQ latency: 100.00 µs | active time: 37.00 µs", heading)
+            self.assertEqual(heading, "MoQ mean latency: 100.00 µs | active: 37.00 µs | object (4, 28)")
             self.assertEqual([text.get_text() for text in figure.axes[0].get_legend().texts], ["RX", "TX #1", "TX #3"])
         finally:
             plt.close(figure)
