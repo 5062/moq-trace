@@ -3,20 +3,15 @@ from __future__ import annotations
 import json
 import pathlib
 import re
-import sys
 import tempfile
 import unittest
 
 import duckdb
+from support import run_metadata, write_raw_metadata
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from support import run_metadata, write_raw_metadata  # noqa: E402
-
-from moq_trace.analysis import phases  # noqa: E402
-from moq_trace.analysis.artifact import open_artifact, write_metadata  # noqa: E402
-from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.analysis import phases
+from moq_trace.analysis.artifact import open_artifact, write_metadata
+from moq_trace.errors import TraceError
 
 
 class PhaseTableTests(unittest.TestCase):

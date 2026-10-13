@@ -1,26 +1,20 @@
 from __future__ import annotations
 
 import json
-import pathlib
-import sys
 import unittest
 
 import duckdb
 import pyarrow as pa
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-
-from moq_trace.analysis import coverage, sql  # noqa: E402
-from moq_trace.analysis.analyze import (  # noqa: E402
+from moq_trace.analysis import coverage, sql
+from moq_trace.analysis.analyze import (
     _define_metrics,
     _derive_samples,
     _select_process,
     _select_window,
     _validate_raw,
 )
-from moq_trace.decode import ctf  # noqa: E402
+from moq_trace.decode import ctf
 
 # Every outcome label the providers declare, which a capture's metadata lists.
 OUTCOMES = (

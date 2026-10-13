@@ -5,24 +5,20 @@ from __future__ import annotations
 import ipaddress
 import pathlib
 import struct
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
+import analysis_case
+from test_quic import _Peer, _stream
 
-import analysis_case  # noqa: E402
-from test_quic import _Peer, _stream  # noqa: E402
-
-from moq_trace.analysis import analyze, coverage, sql, wire  # noqa: E402
-from moq_trace.analysis.artifact import open_artifact  # noqa: E402
-from moq_trace.decode import ctf, pcap, quic  # noqa: E402
-from moq_trace.errors import TraceError  # noqa: E402
-from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest  # noqa: E402
-from moq_trace.metadata import Window, Workload  # noqa: E402
-from moq_trace.render import render  # noqa: E402
+from moq_trace.analysis import analyze, coverage, sql, wire
+from moq_trace.analysis.artifact import open_artifact
+from moq_trace.decode import ctf, pcap, quic
+from moq_trace.errors import TraceError
+from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest
+from moq_trace.metadata import Window, Workload
+from moq_trace.render import render
 
 RELAY = ("10.0.0.1", 4443)
 PUBLISHER = ("10.0.0.2", 50000)

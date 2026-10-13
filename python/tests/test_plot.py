@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
 import duckdb
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from moq_trace.analysis.phases import Phase  # noqa: E402
-from moq_trace.plot import (  # noqa: E402
+from moq_trace.analysis.phases import Phase
+from moq_trace.plot import (
     PlotRun,
     plot_breakdown,
     plot_latency_cdf,
@@ -21,11 +17,11 @@ from moq_trace.plot import (  # noqa: E402
     plot_segments,
     plot_stability,
     plot_transport_waits,
-    timeline,  # noqa: E402
+    timeline,
 )
-from moq_trace.plot.breakdown import _row_summary  # noqa: E402
-from moq_trace.plot.common import _copy_rows  # noqa: E402
-from moq_trace.plot.segments import _segments  # noqa: E402
+from moq_trace.plot.breakdown import _row_summary
+from moq_trace.plot.common import _copy_rows
+from moq_trace.plot.segments import _segments
 
 SUBTITLE = "unpinned | 1 subscriber | 1024 bytes | 30 fps | test"
 

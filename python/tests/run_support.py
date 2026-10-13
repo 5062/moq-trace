@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import pathlib
 import shlex
-import sys
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-
-from moq_trace.metadata import CommandSet  # noqa: E402
-from moq_trace.run import hosts, local, placement, ssh  # noqa: E402
-from moq_trace.run.config import ExperimentConfig, HostConfig  # noqa: E402
+from moq_trace.metadata import CommandSet
+from moq_trace.run import hosts, local, placement, ssh
+from moq_trace.run.config import ExperimentConfig, HostConfig
 
 
 def placement_for(config: ExperimentConfig, output: pathlib.Path | None = None) -> placement.Placement:

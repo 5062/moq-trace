@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import re
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -12,20 +11,16 @@ import duckdb
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from pydantic import ValidationError
+from run_support import placement_for
+from support import run_metadata
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from run_support import placement_for  # noqa: E402
-from support import run_metadata  # noqa: E402
-
-from moq_trace.analysis.artifact import write_metadata  # noqa: E402
-from moq_trace.errors import CaptureError  # noqa: E402
-from moq_trace.run import commands as commands_module  # noqa: E402
-from moq_trace.run import experiment, lttng, tcpdump, tls  # noqa: E402
-from moq_trace.run.commands import commands  # noqa: E402
-from moq_trace.run.config import ComparisonConfig, ExperimentConfig, HostConfig, Hosts  # noqa: E402
-from moq_trace.run.experiment import ExperimentError, _validate_workload  # noqa: E402
+from moq_trace.analysis.artifact import write_metadata
+from moq_trace.errors import CaptureError
+from moq_trace.run import commands as commands_module
+from moq_trace.run import experiment, lttng, tcpdump, tls
+from moq_trace.run.commands import commands
+from moq_trace.run.config import ComparisonConfig, ExperimentConfig, HostConfig, Hosts
+from moq_trace.run.experiment import ExperimentError, _validate_workload
 
 
 class ConfigurationTests(unittest.TestCase):

@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import pathlib
-import sys
+from analysis_case import ModelCase
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from analysis_case import ModelCase  # noqa: E402
-
-from moq_trace.analysis import coverage  # noqa: E402
-from moq_trace.analysis.analyze import (  # noqa: E402
+from moq_trace.analysis import coverage
+from moq_trace.analysis.analyze import (
     _define_metrics,
     _derive_samples,
     _select_window,
 )
-from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.errors import TraceError
 
 
 class SampleTests(ModelCase):

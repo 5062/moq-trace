@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 from unittest import mock
 
 import duckdb
+from analysis_case import ModelCase
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from analysis_case import ModelCase  # noqa: E402
-
-from moq_trace.analysis import sql  # noqa: E402
-from moq_trace.analysis.analyze import (  # noqa: E402
+from moq_trace.analysis import sql
+from moq_trace.analysis.analyze import (
     _ingest,
     _select_process,
     _select_window,
 )
-from moq_trace.decode import ctf  # noqa: E402
-from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.decode import ctf
+from moq_trace.errors import TraceError
 
 
 class WindowAndProcessTests(ModelCase):

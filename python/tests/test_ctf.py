@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 import unittest
 from unittest import mock
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
+import trace_source
+from trace_source import Clock, Enum, Event
 
-import trace_source  # noqa: E402
-from trace_source import Clock, Enum, Event  # noqa: E402
-
-from moq_trace.decode import ctf  # noqa: E402
+from moq_trace.decode import ctf
 
 
 def socket_start(

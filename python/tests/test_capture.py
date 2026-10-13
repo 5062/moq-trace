@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import pathlib
-import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
+from run_support import FakeRemote, command_set, peer, placement_for
 
-
-from run_support import FakeRemote, command_set, peer, placement_for  # noqa: E402
-
-from moq_trace.errors import CaptureError  # noqa: E402
-from moq_trace.manifest import MANIFEST, read_manifest  # noqa: E402
-from moq_trace.metadata import CommandSet  # noqa: E402
-from moq_trace.run import capture, experiment, hosts, local, lttng, placement, tcpdump  # noqa: E402
-from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts  # noqa: E402
-from moq_trace.run.experiment import ExperimentError  # noqa: E402
+from moq_trace.errors import CaptureError
+from moq_trace.manifest import MANIFEST, read_manifest
+from moq_trace.metadata import CommandSet
+from moq_trace.run import capture, experiment, hosts, local, lttng, placement, tcpdump
+from moq_trace.run.config import ExperimentConfig, HostConfig, Hosts
+from moq_trace.run.experiment import ExperimentError
 
 
 class _LttngHost(local.LocalHost):

@@ -5,29 +5,24 @@ from __future__ import annotations
 import json
 import pathlib
 import shutil
-import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
+import analysis_case
 import duckdb
+from support import run_metadata
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-import analysis_case  # noqa: E402
-from support import run_metadata  # noqa: E402
-
-from moq_trace.analysis import analyze, coverage, sql  # noqa: E402
-from moq_trace.analysis.artifact import open_artifact, write_metadata  # noqa: E402
-from moq_trace.analysis.comparison import bench_runs, snapshot_bench, write_comparison  # noqa: E402
-from moq_trace.decode import ctf  # noqa: E402
-from moq_trace.errors import TraceError  # noqa: E402
-from moq_trace.metadata import Window, Workload  # noqa: E402
-from moq_trace.plot.timeline import _timelines  # noqa: E402
-from moq_trace.render import render  # noqa: E402
+from moq_trace.analysis import analyze, coverage, sql
+from moq_trace.analysis.artifact import open_artifact, write_metadata
+from moq_trace.analysis.comparison import bench_runs, snapshot_bench, write_comparison
+from moq_trace.decode import ctf
+from moq_trace.errors import TraceError
+from moq_trace.metadata import Window, Workload
+from moq_trace.plot.timeline import _timelines
+from moq_trace.render import render
 
 
 @contextmanager

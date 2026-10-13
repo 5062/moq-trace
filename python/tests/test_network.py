@@ -4,23 +4,19 @@ import ipaddress
 import json
 import pathlib
 import struct
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
 import duckdb
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from moq_trace.analysis import network, sql  # noqa: E402
-from moq_trace.decode import pcap  # noqa: E402
-from moq_trace.errors import TraceError  # noqa: E402
-from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest  # noqa: E402
-from moq_trace.metadata import Workload  # noqa: E402
-from moq_trace.plot import plot_network  # noqa: E402
-from moq_trace.plot.network import _recovery_series  # noqa: E402
+from moq_trace.analysis import network, sql
+from moq_trace.decode import pcap
+from moq_trace.errors import TraceError
+from moq_trace.manifest import MANIFEST, NetworkManifest, read_manifest
+from moq_trace.metadata import Workload
+from moq_trace.plot import plot_network
+from moq_trace.plot.network import _recovery_series
 
 RELAY_PORT = 4443
 LOOPBACK = 1

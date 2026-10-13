@@ -3,21 +3,17 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
-import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
+from run_support import peer
 
-from run_support import peer  # noqa: E402
-
-from moq_trace.errors import CaptureError  # noqa: E402
-from moq_trace.run import experiment, hosts, local, ssh  # noqa: E402
-from moq_trace.run.config import HostConfig  # noqa: E402
-from moq_trace.run.experiment import ExperimentError  # noqa: E402
+from moq_trace.errors import CaptureError
+from moq_trace.run import experiment, hosts, local, ssh
+from moq_trace.run.config import HostConfig
+from moq_trace.run.experiment import ExperimentError
 
 
 class _FakeSshProcess:

@@ -1,22 +1,11 @@
-"""Fixtures shared by the analysis tests.
-
-Test modules put `python/src` on `sys.path` before importing this, but discovery
-imports modules in an unspecified order, so this bootstraps the path itself.
-"""
+"""Fixtures shared by the analysis tests."""
 
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import duckdb
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-if str(SOURCE) not in sys.path:
-    sys.path.insert(0, str(SOURCE))
-
-from moq_trace.analysis.artifact import SCHEMA_VERSION  # noqa: E402
-from moq_trace.metadata import (  # noqa: E402
+from moq_trace.analysis.artifact import SCHEMA_VERSION
+from moq_trace.metadata import (
     Counts,
     Processes,
     RunMetadata,

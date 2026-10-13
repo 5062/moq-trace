@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import pathlib
 import re
-import sys
 import unittest
 
 import pyarrow as pa
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "python/src"))
+from moq_trace.decode import ctf
 
-from moq_trace.decode import ctf  # noqa: E402
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class ProviderContractTests(unittest.TestCase):

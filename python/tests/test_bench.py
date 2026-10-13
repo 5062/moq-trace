@@ -3,16 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import pathlib
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from moq_trace.run import bench, cli  # noqa: E402
-from moq_trace.run.bench import RelayProfile, experiment_config, load_profile, profiles  # noqa: E402
+from moq_trace.run import bench, cli
+from moq_trace.run.bench import RelayProfile, experiment_config, load_profile, profiles
 
 
 def _profile(**launch) -> RelayProfile:

@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import os
-import pathlib
-import sys
 import unittest
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SOURCE))
-
-from moq_trace.decode import quic  # noqa: E402
-from moq_trace.errors import TraceError  # noqa: E402
+from moq_trace.decode import quic
+from moq_trace.errors import TraceError
 
 # RFC 9001 appendix A.
 _DCID = bytes.fromhex("8394c8f03e515708")
