@@ -40,6 +40,7 @@ class _Timeline:
 
     statistic: str
     target_us: float
+    actual_us: float
     group_id: int
     object_id: int
     intervals: tuple[_Interval, ...]
@@ -52,7 +53,7 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[_Timeline, ...]:
 
     timelines = []
     selections = connection.execute(sql.read("timeline/selections")).fetchall()
-    for rx_trace_id, statistic, target_us, group_id, object_id, origin in selections:
+    for rx_trace_id, statistic, target_us, actual_us, group_id, object_id, origin in selections:
         copies = [
             _Copy(session_id=int(session), subscriber_ordinal=int(ordinal) + 1, full_span_us=float(span))
             for session, ordinal, span in connection.execute(
@@ -64,6 +65,7 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[_Timeline, ...]:
             _Timeline(
                 statistic=statistic,
                 target_us=float(target_us),
+                actual_us=float(actual_us),
                 group_id=int(group_id),
                 object_id=int(object_id),
                 intervals=tuple(
@@ -82,6 +84,27 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[_Timeline, ...]:
             )
         )
     return tuple(timelines)
+
+
+def _active_time_us(intervals: tuple[_Interval, ...]) -> float | None:
+    """Union non-wait MoQ phases across RX and all TX copies, including nested work.
+
+    Phase spans measure wall-clock time. An absent work phase leaves active
+    time unknown rather than reporting zero for missing instrumentation.
+    """
+
+    work = {(phase.direction, phase.name) for phase in phases.OBJECT_PHASES if not phase.wait}
+    spans = sorted(
+        (interval.start_us, interval.end_us) for interval in intervals if (interval.direction, interval.phase) in work
+    )
+    if not spans:
+        return None
+    total = 0.0
+    end = spans[0][0]
+    for start, finish in spans:
+        total += max(0.0, finish - max(start, end))
+        end = max(end, finish)
+    return total
 
 
 def _rebase(timeline: _Timeline) -> _Timeline:
@@ -253,11 +276,25 @@ def plot_object_timelines(
         axis.set_xlim(x_min, x_max)
         axis.grid(axis="x", color="#CBD5E1", alpha=0.7, linewidth=0.7)
         axis.set_axisbelow(True)
+        active_us = _active_time_us(timeline.intervals)
+        active_label = "unavailable" if active_us is None else f"{active_us:.2f} µs"
         axis.set_title(
-            f"{timeline.statistic} {timeline.target_us:.2f} µs | object ({timeline.group_id}, {timeline.object_id}) ",
+            f"Near {timeline.statistic} | group {timeline.group_id}, object {timeline.object_id} | "
+            f"dataset {timeline.statistic}: {timeline.target_us:.2f} µs\n"
+            f"MoQ latency: {timeline.actual_us:.2f} µs | active time: {active_label}",
             fontsize=10,
             loc="left",
         )
 
     axes[-1].set_xlabel("Elapsed from first RX QUIC packet start (µs)")
-    _save(fig, path, f"QUIC packet and MoQ object timelines | {subtitle}", title_size=14, rect=(0, 0, 1, 0.965))
+    fig.text(
+        0.5,
+        0.01,
+        "MoQ latency: RX start to latest TX completion. "
+        "Active time: union of non-wait MoQ phases across RX and all TX copies.\n"
+        "Active time measures traced wall-clock time. "
+        "Bar labels: summed phase durations (µs), counting overlaps separately.",
+        ha="center",
+        fontsize=8,
+    )
+    _save(fig, path, f"QUIC packet and MoQ object timelines | {subtitle}", title_size=14, rect=(0, 0.045, 1, 0.965))

@@ -352,10 +352,20 @@ name and leaves any others in place.
 | `breakdown.png` | Each processing phase as a box of p25 to p75 with p1 to p99 whiskers, on a log time axis |
 | `moq_work.png` | MoQ RX and TX work per copy and the first write start after receipt; only when the provider emits object phases |
 | `stability.png` | Per-second p50 and p99 of object copies and of QUIC packets, on one time axis |
-| `object_timeline.png` | Every QUIC and MoQ phase of the mean, median, and p99 object, from its first RX packet |
+| `object_timeline.png` | QUIC and MoQ phases of objects nearest the mean, median, and p99 MoQ latency, with actual latency and active time, from each object's first RX packet |
 | `network.png` | Throughput, RTT, lost packets, and congestion window; only when a capture or qlog was taken |
 | `relays_cdf.png`, `relays_segments.png`, `relays_breakdown.png`, `relays_moq_work.png` | The relays of one bench, overlaid |
 | `comparison_cdf.png`, `comparison_segments.png`, `comparison_breakdown.png`, `comparison_moq_work.png` | One relay's runs of a `--sweep`, overlaid |
+
+Each object timeline heading separates the dataset statistic used to select the
+object from that object's actual MoQ latency, measured from RX start to its
+latest successful TX completion. Active time is the union of successful non-wait
+MoQ phase intervals across RX and all successful TX copies, including phases
+hidden from the drawing. Overlapping and nested intervals count once. These are
+traced wall-clock durations, including any transport calls inside MoQ phases,
+rather than CPU time. Active time is unavailable when no work phases were
+recorded. The drawing shows the first and last copies; its bar labels sum each
+phase's intervals separately, so overlapping intervals count separately there.
 
 One recording can hold the relay and the peers it serves. Every row keeps the
 `vpid` it came from, and the analysis tables are one process's slice of that

@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import duckdb
+from matplotlib import pyplot as plt
 from support import run_metadata
 
 from moq_trace.analysis.phases import Phase
@@ -109,14 +110,61 @@ class RunPlotTests(unittest.TestCase):
             finally:
                 connection.close()
 
-    def test_timeline_draws_object_waits_and_leaves_packet_waits_out(self) -> None:
+    def test_timeline_draws_blocked_writes_and_leaves_delivery_and_packet_waits_out(self) -> None:
         tx = {row[1]: row[3] for row in timeline._rows("object", "tx", "", "")}
-        self.assertTrue(tx["delivery_wait"])
+        self.assertNotIn("delivery_wait", tx)
         self.assertTrue(tx["write_blocked"])
         self.assertFalse(tx["clone"])
         rx_packets = [row[1] for row in timeline._rows("packet", "rx", "quic_", "QUIC ")]
         self.assertNotIn("quic_read_queue", rx_packets)
         self.assertNotIn("quic_scheduling", rx_packets)
+
+    def test_timeline_heading_uses_actual_latency_and_unions_all_copies_work(self) -> None:
+        intervals = tuple(
+            timeline._Interval(direction, session, phase, 0, start, end)
+            for direction, session, phase, start, end in (
+                ("rx", 1, "object", 0, 32),
+                ("tx", 2, "object", 5, 40),
+                ("tx", 3, "object", 70, 80),
+                ("tx", 4, "object", 40, 100),
+                ("rx", 1, "quic_packet", -10, 110),
+                ("rx", 1, "quic_frame_process", -10, 20),
+                ("rx", 1, "payload_read", 20, 30),
+                ("rx", 1, "header_parse", 0, 10),
+                ("rx", 1, "transport_call", 2, 8),
+                ("rx", 1, "notify", 30, 32),
+                ("tx", 2, "clone", 5, 15),
+                ("tx", 3, "payload_write", 70, 75),
+                ("tx", 4, "payload_write", 40, 45),
+                ("tx", 4, "delivery_wait", 15, 40),
+                ("tx", 4, "write_blocked", 45, 70),
+            )
+        )
+        selected = timeline._Timeline(
+            statistic="mean",
+            target_us=110.0,
+            actual_us=100.0,
+            group_id=4,
+            object_id=28,
+            intervals=intervals,
+            first_copy=timeline._Copy(2, 1, 40.0),
+            last_copy=timeline._Copy(4, 3, 100.0),
+        )
+        # Work covers [0, 15), [20, 32), [40, 45), and [70, 75).
+        self.assertEqual(timeline._active_time_us(intervals), 37.0)
+        self.assertEqual(timeline._active_time_us(timeline._rebase(selected).intervals), 37.0)
+        self.assertIsNone(timeline._active_time_us(()))
+        with mock.patch.object(timeline, "_timelines", return_value=(selected,)):
+            with mock.patch.object(timeline, "_save") as save:
+                timeline.plot_object_timelines(pathlib.Path("unused.png"), SUBTITLE, None)
+        figure = save.call_args.args[0]
+        try:
+            heading = figure.axes[0].get_title(loc="left")
+            self.assertIn("dataset mean: 110.00 µs", heading)
+            self.assertIn("MoQ latency: 100.00 µs | active time: 37.00 µs", heading)
+            self.assertEqual([text.get_text() for text in figure.axes[0].get_legend().texts], ["RX", "TX #1", "TX #3"])
+        finally:
+            plt.close(figure)
 
     def test_breakdown_sums_repeated_phases_within_a_unit(self) -> None:
         connection = _artifact(packet_phases=True)

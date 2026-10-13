@@ -176,6 +176,7 @@ class ArtifactTests(unittest.TestCase):
                 for timeline in timelines:
                     self.assertEqual(timeline.first_copy.session_id, 2)
                     self.assertEqual(timeline.last_copy.full_span_us, 200.0)
+                    self.assertEqual(timeline.actual_us, 200.0)
 
     def test_published_artifact_materializes_public_tables_and_keeps_raw_processes(self):
         with fixture() as trace, tempfile.TemporaryDirectory() as directory:

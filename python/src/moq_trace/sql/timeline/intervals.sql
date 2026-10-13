@@ -1,5 +1,6 @@
--- The lifecycle, phases, and carrying packets of one selected object and of its
--- first and last copies, in microseconds from `$origin`.
+-- The lifecycle, phases, and carrying packets of one selected object and all
+-- its successful copies, in microseconds from `$origin`. The heading measures
+-- all copies, while the drawing shows only the first and last.
 WITH objects AS (
   SELECT * FROM model.objects
   WHERE trace_id = $rx OR (rx_trace_id = $rx AND copy_ordinal IS NOT NULL)
@@ -23,8 +24,4 @@ WITH objects AS (
 SELECT object.direction, object.session_id, interval.phase, interval.occurrence,
        (interval.start_ns - $origin) / 1000.0, (interval.end_ns - $origin) / 1000.0
 FROM intervals interval JOIN objects object USING (trace_id)
-WHERE object.direction = 'rx' OR object.session_id IN (
-  SELECT session_id FROM objects
-  WHERE copy_ordinal = 0 OR copy_ordinal = (SELECT max(copy_ordinal) FROM objects)
-)
 ORDER BY object.direction, object.session_id, interval.phase, interval.occurrence, interval.start_ns;
