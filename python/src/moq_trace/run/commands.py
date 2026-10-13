@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from ..errors import CaptureError
 from ..metadata import CommandSet
+from . import tls
 from .config import ExperimentConfig
 from .hosts import Host
 from .placement import Placement
@@ -72,8 +73,8 @@ def _relay(config: ExperimentConfig, placement: Placement) -> list[str]:
         "port": str(config.port),
         "protocol": PROTOCOL,
         "output": directory,
-        "certificate": f"{directory}/relay.crt",
-        "key": f"{directory}/relay.key",
+        "certificate": f"{directory}/{tls.CERTIFICATE}",
+        "key": f"{directory}/{tls.KEY}",
     }
     try:
         relay = [placement.relay_binary(), *(argument.format_map(values) for argument in config.relay_args)]

@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
 from .breakdown import _draw_phase_cdfs
-from .common import PlotRun, _draw_distribution, _metrics, _object_spans, _save, _values_us
+from .common import PlotRun, _draw_distribution, _metrics, _object_spans, _sample_presence, _save, _values_us
 
 
 def _decorate_distribution(ecdf: Axes, ccdf: Axes | None, minimum_count: int) -> None:
@@ -72,7 +72,7 @@ def plot_latency_comparison(
 
     if len(runs) < 2:
         raise ValueError("a latency comparison requires at least two runs")
-    spans = _object_spans(all(_values_us(run.connection, "wire_full_span", run.run_id) for run in runs))
+    spans = _object_spans(all(_sample_presence(run.connection, "wire_full_span", run.run_id)[0] for run in runs))
     fig, axes = plt.subplots(
         2 if show_tail else 1,
         len(spans),

@@ -11,7 +11,7 @@ from matplotlib import ticker
 from matplotlib.axes import Axes
 from matplotlib.patches import Patch
 
-from .common import PlotRun, _copy_rows, _format_us, _quantile_box, _save
+from .common import PlotRun, _copy_rows, _format_us, _quantile_box, _sample_presence, _save
 
 # The segments of the wire span in pipeline order. Their boundaries chain, from
 # the capture of an inbound object's first datagram through the socket read, the
@@ -163,7 +163,7 @@ def plot_segments(
 
     if not runs:
         raise ValueError("a segments figure requires at least one run")
-    wire = all(_copy_rows(run.connection, ("wire_full_span",), run.run_id) for run in runs)
+    wire = all(_sample_presence(run.connection, "wire_full_span", run.run_id)[0] for run in runs)
     (total, total_label, bounds), segments = _segments(wire)
     metrics = (total, *(metric for metric, _label in segments))
     tables = []

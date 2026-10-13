@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 
 import duckdb
@@ -9,9 +10,44 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
 from ..analysis import phases
+from .common import _save
 
 
-def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
+@dataclasses.dataclass(frozen=True)
+class _Copy:
+    """One outbound copy of a selected object."""
+
+    session_id: int
+    subscriber_ordinal: int
+    full_span_us: float
+
+
+@dataclasses.dataclass(frozen=True)
+class _Interval:
+    """One drawn interval of the object, a copy, or a packet that carried it."""
+
+    direction: str
+    session_id: int
+    phase: str
+    occurrence: int
+    start_us: float
+    end_us: float
+
+
+@dataclasses.dataclass(frozen=True)
+class _Timeline:
+    """One selected object's lifecycle, with the first and last of its copies."""
+
+    statistic: str
+    target_us: float
+    group_id: int
+    object_id: int
+    intervals: tuple[_Interval, ...]
+    first_copy: _Copy
+    last_copy: _Copy
+
+
+def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[_Timeline, ...]:
     """Query selected lifecycles and intervals, converting nanoseconds for drawing."""
 
     timelines = []
@@ -21,7 +57,7 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
         ORDER BY s.selection_order""").fetchall()
     for rx_trace_id, statistic, target_us, group_id, object_id, origin in selections:
         copies = [
-            dict(session_id=int(session), subscriber_ordinal=int(ordinal) + 1, full_span_us=float(span))
+            _Copy(session_id=int(session), subscriber_ordinal=int(ordinal) + 1, full_span_us=float(span))
             for session, ordinal, span in connection.execute(
                 """SELECT session_id, copy_ordinal,
                       (end_ns - $origin) / 1000.0 FROM model.objects
@@ -61,15 +97,13 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
             {"rx": rx_trace_id, "origin": origin},
         ).fetchall()
         timelines.append(
-            {
-                "selection": {
-                    "statistic": statistic,
-                    "target_us": float(target_us),
-                    "group_id": int(group_id),
-                    "object_id": int(object_id),
-                },
-                "intervals": [
-                    dict(
+            _Timeline(
+                statistic=statistic,
+                target_us=float(target_us),
+                group_id=int(group_id),
+                object_id=int(object_id),
+                intervals=tuple(
+                    _Interval(
                         direction=direction,
                         session_id=int(session),
                         phase=phase,
@@ -78,15 +112,15 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[dict, ...]:
                         end_us=float(end),
                     )
                     for direction, session, phase, occurrence, start, end in intervals
-                ],
-                "first_copy": copies[0],
-                "last_copy": copies[-1],
-            }
+                ),
+                first_copy=copies[0],
+                last_copy=copies[-1],
+            )
         )
     return tuple(timelines)
 
 
-def _rebase(timeline: dict) -> None:
+def _rebase(timeline: _Timeline) -> _Timeline:
     """Shift a timeline so its first RX QUIC packet starts at zero.
 
     The analysis measures intervals from the object's RX start, which puts the
@@ -94,16 +128,18 @@ def _rebase(timeline: dict) -> None:
     packets falls back to its earliest interval.
     """
 
-    intervals = timeline["intervals"]
+    intervals = timeline.intervals
     packets = [
-        interval["start_us"]
-        for interval in intervals
-        if interval["direction"] == "rx" and interval["phase"] == "quic_packet"
+        interval.start_us for interval in intervals if interval.direction == "rx" and interval.phase == "quic_packet"
     ]
-    origin = min(packets or [interval["start_us"] for interval in intervals])
-    for interval in intervals:
-        interval["start_us"] -= origin
-        interval["end_us"] -= origin
+    origin = min(packets or [interval.start_us for interval in intervals])
+    return dataclasses.replace(
+        timeline,
+        intervals=tuple(
+            dataclasses.replace(interval, start_us=interval.start_us - origin, end_us=interval.end_us - origin)
+            for interval in intervals
+        ),
+    )
 
 
 def _rows(subject: str, direction: str, prefix: str, title: str) -> tuple[tuple[str, str, str, bool], ...]:
@@ -129,11 +165,9 @@ def plot_object_timelines(
 ) -> None:
     """Render aligned lifecycle timelines for representative objects."""
 
-    timelines = _timelines(connection)
+    timelines = tuple(map(_rebase, _timelines(connection)))
     if not timelines:
         raise ValueError("cannot plot an empty object timeline selection")
-    for timeline in timelines:
-        _rebase(timeline)
 
     # QUIC rows carry the `quic_` prefix the interval query gives packet phases.
     # The application phase is left out, as in the breakdown: it is the MoQ work
@@ -141,9 +175,7 @@ def plot_object_timelines(
     rx_quic_rows = _rows("packet", "rx", "quic_", "QUIC ")
     moq_rows = _rows("object", "rx", "", "") + _rows("object", "tx", "", "")
     tx_quic_rows = _rows("packet", "tx", "quic_", "QUIC ")
-    present = {
-        (interval["direction"], interval["phase"]) for timeline in timelines for interval in timeline["intervals"]
-    }
+    present = {(interval.direction, interval.phase) for timeline in timelines for interval in timeline.intervals}
     rx_quic_rows = tuple(row for row in rx_quic_rows if row[:2] in present)
     tx_quic_rows = tuple(row for row in tx_quic_rows if row[:2] in present)
     # Work rows stay put so stacks line up; a wait row appears only when waited.
@@ -156,8 +188,8 @@ def plot_object_timelines(
     figure_height = max(11.0, len(timelines) * len(phase_rows) * 0.28 + 2.5)
     fig, axes = plt.subplots(len(timelines), 1, figsize=(15, figure_height), sharex=True, squeeze=False)
     axes = axes[:, 0]
-    minimum = min(interval["start_us"] for timeline in timelines for interval in timeline["intervals"])
-    maximum = max(interval["end_us"] for timeline in timelines for interval in timeline["intervals"])
+    minimum = min(interval.start_us for timeline in timelines for interval in timeline.intervals)
+    maximum = max(interval.end_us for timeline in timelines for interval in timeline.intervals)
     # Rebasing leaves nothing before zero on a traced stack, so the axis starts
     # exactly at the origin instead of at padding to its left.
     x_min = min(0.0, minimum)
@@ -167,11 +199,11 @@ def plot_object_timelines(
     tx_palette = plt.get_cmap("Oranges")
 
     for axis, timeline in zip(axes, timelines, strict=True):
-        displayed_copies = (timeline["first_copy"],)
-        if timeline["last_copy"]["session_id"] != timeline["first_copy"]["session_id"]:
-            displayed_copies += (timeline["last_copy"],)
-        tx_sessions = [copy["session_id"] for copy in displayed_copies]
-        copy_by_session = {copy["session_id"]: copy for copy in displayed_copies}
+        displayed_copies = (timeline.first_copy,)
+        if timeline.last_copy.session_id != timeline.first_copy.session_id:
+            displayed_copies += (timeline.last_copy,)
+        tx_sessions = [copy.session_id for copy in displayed_copies]
+        copy_by_session = {copy.session_id: copy for copy in displayed_copies}
         tx_colors = {
             session_id: tx_palette(0.5 + 0.4 * index / max(1, len(tx_sessions) - 1))
             for index, session_id in enumerate(tx_sessions)
@@ -183,28 +215,28 @@ def plot_object_timelines(
         }
         phase_labels: dict[tuple[str, int, str], tuple[float, float, float]] = {}
 
-        for interval in timeline["intervals"]:
-            if interval["direction"] == "tx" and interval["session_id"] not in copy_by_session:
+        for interval in timeline.intervals:
+            if interval.direction == "tx" and interval.session_id not in copy_by_session:
                 continue
-            color = rx_color if interval["direction"] == "rx" else tx_colors[interval["session_id"]]
-            if interval["phase"] == "object":
-                axis.axvline(interval["start_us"], color=color, linestyle=":", linewidth=0.9, alpha=0.55)
-                axis.axvline(interval["end_us"], color=color, linestyle="--", linewidth=0.9, alpha=0.55)
+            color = rx_color if interval.direction == "rx" else tx_colors[interval.session_id]
+            if interval.phase == "object":
+                axis.axvline(interval.start_us, color=color, linestyle=":", linewidth=0.9, alpha=0.55)
+                axis.axvline(interval.end_us, color=color, linestyle="--", linewidth=0.9, alpha=0.55)
                 continue
 
-            key = (interval["direction"], interval["phase"])
+            key = (interval.direction, interval.phase)
             if key not in positions:
                 continue
             y = positions[key]
             height = 0.52
-            if interval["direction"] == "tx":
-                y += tx_offsets[interval["session_id"]]
+            if interval.direction == "tx":
+                y += tx_offsets[interval.session_id]
                 height = lane_height * 0.82
             # A wait is an unfilled, hatched bar in the copy's color, so it reads as
             # time spent waiting rather than as work.
             wait = key in waits
             axis.broken_barh(
-                [(interval["start_us"], interval["end_us"] - interval["start_us"])],
+                [(interval.start_us, interval.end_us - interval.start_us)],
                 (y - height / 2, height),
                 facecolors="none" if wait else color,
                 edgecolors=color if wait else "#334155",
@@ -212,10 +244,10 @@ def plot_object_timelines(
                 linewidth=0.7,
                 alpha=0.88,
             )
-            duration_us = interval["end_us"] - interval["start_us"]
-            label_key = (interval["direction"], interval["session_id"], interval["phase"])
-            previous_total, previous_end, _ = phase_labels.get(label_key, (0.0, interval["end_us"], y))
-            phase_labels[label_key] = (previous_total + duration_us, max(previous_end, interval["end_us"]), y)
+            duration_us = interval.end_us - interval.start_us
+            label_key = (interval.direction, interval.session_id, interval.phase)
+            previous_total, previous_end, _ = phase_labels.get(label_key, (0.0, interval.end_us, y))
+            phase_labels[label_key] = (previous_total + duration_us, max(previous_end, interval.end_us), y)
 
         for total_us, end_us, y in phase_labels.values():
             axis.annotate(
@@ -242,7 +274,7 @@ def plot_object_timelines(
                 [0],
                 color=tx_colors[session_id],
                 linewidth=5,
-                label=f"TX #{copy_by_session[session_id]['subscriber_ordinal']}",
+                label=f"TX #{copy_by_session[session_id].subscriber_ordinal}",
             )
             for session_id in tx_sessions
         )
@@ -257,17 +289,11 @@ def plot_object_timelines(
         axis.set_xlim(x_min, x_max)
         axis.grid(axis="x", color="#CBD5E1", alpha=0.7, linewidth=0.7)
         axis.set_axisbelow(True)
-        selected = timeline["selection"]
         axis.set_title(
-            f"{selected['statistic']} {selected['target_us']:.2f} µs | "
-            f"object ({selected['group_id']}, {selected['object_id']}) ",
+            f"{timeline.statistic} {timeline.target_us:.2f} µs | object ({timeline.group_id}, {timeline.object_id}) ",
             fontsize=10,
             loc="left",
         )
 
     axes[-1].set_xlabel("Elapsed from first RX QUIC packet start (µs)")
-    fig.suptitle(f"QUIC packet and MoQ object timelines | {subtitle}", fontsize=14)
-    fig.tight_layout(rect=(0, 0, 1, 0.965))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
+    _save(fig, path, f"QUIC packet and MoQ object timelines | {subtitle}", title_size=14, rect=(0, 0, 1, 0.965))

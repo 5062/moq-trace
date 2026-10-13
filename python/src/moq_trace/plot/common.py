@@ -68,9 +68,19 @@ def _plain_log(axis: Axis) -> None:
     axis.set_minor_formatter(ticker.NullFormatter())
 
 
-def _save(fig: Figure, path: pathlib.Path, title: str) -> None:
-    fig.suptitle(title)
-    fig.tight_layout()
+def _save(
+    fig: Figure,
+    path: pathlib.Path,
+    title: str,
+    *,
+    title_size: float | None = None,
+    rect: tuple[float, float, float, float] | None = None,
+) -> None:
+    """Title, lay out, and write a figure; `rect` reserves room the layout must leave free."""
+
+    # An explicit `fontsize=None` would replace the default figure title size.
+    fig.suptitle(title, **({} if title_size is None else {"fontsize": title_size}))
+    fig.tight_layout(rect=rect)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
     plt.close(fig)
@@ -78,6 +88,19 @@ def _save(fig: Figure, path: pathlib.Path, title: str) -> None:
 
 def _metrics(connection: duckdb.DuckDBPyConnection) -> set[str]:
     return {metric for (metric,) in connection.execute("SELECT DISTINCT metric FROM metrics.samples").fetchall()}
+
+
+def _sample_presence(
+    connection: duckdb.DuckDBPyConnection, metric: str, run_id: int | None = None
+) -> tuple[bool, bool]:
+    """Whether a metric has any samples, and whether any of them is nonzero, without fetching them."""
+
+    scope = " AND run_id = ?" if run_id is not None else ""
+    present, nonzero = connection.execute(
+        f"SELECT count(*) > 0, coalesce(bool_or(value_ns <> 0), false) FROM metrics.samples WHERE metric = ?{scope}",
+        [metric, run_id] if run_id is not None else [metric],
+    ).fetchone()
+    return bool(present), bool(nonzero)
 
 
 def _values_us(connection: duckdb.DuckDBPyConnection, metric: str, run_id: int | None = None) -> list[float]:

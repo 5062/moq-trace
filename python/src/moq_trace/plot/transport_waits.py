@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 from collections.abc import Sequence
 
-from .common import PlotRun, _cdf_panels, _values_us
+from .common import PlotRun, _cdf_panels, _sample_presence
 
 # The send wait runs from the copy's last write to the packet carrying its last
 # bytes. The blocked panels show how much of the copy's waiting, during that wait
@@ -39,8 +39,8 @@ def plot_transport_waits(
     blocked = []
     never = []
     for metric, label, reason in _BLOCKED:
-        values = [value for run in runs for value in _values_us(run.connection, metric, run.run_id)]
-        if values and not any(values):
+        presence = [_sample_presence(run.connection, metric, run.run_id) for run in runs]
+        if any(present for present, _nonzero in presence) and not any(nonzero for _present, nonzero in presence):
             never.append(reason)
         else:
             blocked.append((metric, label))
