@@ -15,7 +15,6 @@ from ..decode import ctf
 from ..errors import TraceError
 from ..manifest import read_manifest
 from ..metadata import (
-    Affinity,
     Binaries,
     CommandSet,
     Counts,
@@ -361,7 +360,7 @@ def _write_run_metadata(
     window: Window,
     transport_profile: TransportProfile,
     protocol: str | None,
-    affinity: Affinity,
+    relay_cpu: int | None,
     binaries: Binaries | None,
     commands: CommandSet | None,
     network: NetworkCapabilities | None = None,
@@ -406,7 +405,7 @@ def _write_run_metadata(
                 captured_pids=tuple(captured),
             ),
             protocol=protocol,
-            affinity=affinity,
+            relay_cpu=relay_cpu,
             binaries=binaries,
             commands=commands,
             network=network,
@@ -424,7 +423,7 @@ def run(
     pid: int | None = None,
     transport_profile: TransportProfile = "generic",
     protocol: str | None = None,
-    affinity: Affinity | None = None,
+    relay_cpu: int | None = None,
     binaries: Binaries | None = None,
     commands: CommandSet | None = None,
     network: pathlib.Path | None = None,
@@ -440,7 +439,7 @@ def run(
     subscriber received, so a capture that starts before the subscribers attach
     is measured from the steady state. Both are recorded in the artifact as
     given, so their optional fields carry whatever the caller knows about the
-    run, as do `protocol`, `affinity`, `binaries`, and `commands`.
+    run, as do `protocol`, `relay_cpu`, `binaries`, and `commands`.
 
     `network` names the manifest of a packet capture and qlog taken beside the
     trace. Their measurements are placed on the same time axis as the latency
@@ -479,7 +478,7 @@ def run(
                 window=window,
                 transport_profile=transport_profile,
                 protocol=protocol,
-                affinity=affinity or Affinity(),
+                relay_cpu=relay_cpu,
                 binaries=binaries,
                 commands=commands,
                 network=capabilities,

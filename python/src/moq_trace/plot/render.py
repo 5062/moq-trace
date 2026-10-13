@@ -32,10 +32,8 @@ def _describe(metadata: RunMetadata, varied: str | None = None) -> str:
     already labels each run with its value.
     """
 
-    affinity, workload = metadata.affinity, metadata.workload
-    values = [
-        f"pinned CPU {affinity.cpu}" if affinity.mode == "single-core" and affinity.cpu is not None else "unpinned"
-    ]
+    workload = metadata.workload
+    values = ["unpinned" if metadata.relay_cpu is None else f"pinned CPU {metadata.relay_cpu}"]
     if varied != "subscribers":
         values.append(labels.subscribers(workload.subscribers))
     if varied != "object_size":

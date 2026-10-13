@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import duckdb
+from support import run_metadata
 
 from moq_trace.analysis.phases import Phase
 from moq_trace.plot import (
@@ -21,6 +22,7 @@ from moq_trace.plot import (
 )
 from moq_trace.plot.breakdown import _row_summary
 from moq_trace.plot.common import _copy_rows
+from moq_trace.plot.render import _describe
 from moq_trace.plot.segments import _segments
 
 SUBTITLE = "unpinned | 1 subscriber | 1024 bytes | 30 fps | test"
@@ -216,6 +218,12 @@ class ComparisonPlotTests(unittest.TestCase):
         finally:
             for connection in connections:
                 connection.close()
+
+
+class SubtitleTests(unittest.TestCase):
+    def test_the_subtitle_names_the_relay_cpu_only_when_pinned(self) -> None:
+        self.assertEqual(_describe(run_metadata()), "unpinned | 1 subscriber | 1024 bytes")
+        self.assertEqual(_describe(run_metadata(relay_cpu=3)), "pinned CPU 3 | 1 subscriber | 1024 bytes")
 
 
 if __name__ == "__main__":

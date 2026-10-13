@@ -13,7 +13,7 @@ from ..analysis.analyze import run as analyze
 from ..analysis.artifact import open_artifact
 from ..analysis.comparison import write_comparison
 from ..errors import ExperimentError
-from ..metadata import Affinity, Binaries, CommandSet, Window, Workload
+from ..metadata import Binaries, CommandSet, Window, Workload
 from ..plot.render import render
 from . import tls
 from .capture import Capture, CaptureSession
@@ -167,11 +167,7 @@ async def run(config: ExperimentConfig, pool: SshPool) -> pathlib.Path:
         pid=capture.relay_pid,
         transport_profile=config.transport_profile,
         protocol=PROTOCOL,
-        affinity=(
-            Affinity(mode="unpinned")
-            if config.relay_cpu is None
-            else Affinity(mode="single-core", cpu=config.relay_cpu)
-        ),
+        relay_cpu=config.relay_cpu,
         binaries=binaries,
         commands=command,
         network=capture.network,

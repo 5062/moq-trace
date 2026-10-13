@@ -40,13 +40,6 @@ class ArtifactModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
-class Affinity(ArtifactModel):
-    """CPU affinity the relay was confined to."""
-
-    mode: Literal["unpinned", "single-core"] = "unpinned"
-    cpu: int | None = Field(default=None, ge=0)
-
-
 class Workload(ArtifactModel):
     """Object shape and fan-out one workload drove."""
 
@@ -147,7 +140,8 @@ class RunMetadata(ArtifactModel):
     counts: Counts
     processes: Processes
     protocol: str | None = None
-    affinity: Affinity = Field(default_factory=Affinity)
+    # The one CPU the relay was pinned to, or unset when it ran unpinned.
+    relay_cpu: int | None = Field(default=None, ge=0)
     binaries: Binaries | None = None
     commands: CommandSet | None = None
     # Unset when no network capture was supplied beside the trace.

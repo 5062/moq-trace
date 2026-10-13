@@ -16,7 +16,7 @@ import duckdb
 from support import run_metadata
 
 from moq_trace.analysis import analyze, coverage, sql
-from moq_trace.analysis.artifact import open_artifact, write_metadata
+from moq_trace.analysis.artifact import SCHEMA_VERSION, open_artifact, write_metadata
 from moq_trace.analysis.comparison import bench_runs, snapshot_bench, write_comparison
 from moq_trace.decode import ctf
 from moq_trace.errors import TraceError
@@ -179,7 +179,8 @@ class ArtifactTests(unittest.TestCase):
             output = pathlib.Path(directory) / "analysis.duckdb"
             publish(trace, output)
             with open_artifact(output) as artifact:
-                self.assertEqual(artifact.connection.execute("SELECT schema_version FROM metadata").fetchone(), (8,))
+                (version,) = artifact.connection.execute("SELECT schema_version FROM metadata").fetchone()
+                self.assertEqual(version, SCHEMA_VERSION)
                 self.assertEqual(artifact.connection.execute("SELECT count(*) FROM processes").fetchone(), (2,))
                 self.assertEqual(
                     artifact.connection.execute("SELECT count(*) FROM raw.moq_object_start").fetchone(), (3,)
@@ -308,13 +309,13 @@ class ArtifactTests(unittest.TestCase):
             ctf._batch("udp_socket_end", [[value] for value in row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
-        for version in (7, 9):
+        for version in (SCHEMA_VERSION - 1, SCHEMA_VERSION + 1):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 output = pathlib.Path(directory) / "analysis.duckdb"
                 with duckdb.connect(str(output)) as connection:
                     write_metadata(connection, run_metadata())
                     connection.execute("UPDATE metadata SET schema_version = ?", [version])
-                expected = f"schema version {version}, .* reads only 8; .*new output path"
+                expected = f"schema version {version}, .* reads only {SCHEMA_VERSION}; .*new output path"
                 with self.assertRaisesRegex(TraceError, expected):
                     with open_artifact(output):
                         pass
