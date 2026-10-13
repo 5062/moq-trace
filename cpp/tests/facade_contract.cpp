@@ -79,6 +79,18 @@ int main() {
     completed.finish_at(QUIC_TRACE_PACKET_OUTCOME_SUCCESS, 500);
     quic_trace::Socket socket(direction, connection);
     socket.finish_at(QUIC_TRACE_SOCKET_OUTCOME_SUCCESS, {1, 2, 1200}, 600);
+    quic_trace::PacketContext recorded_context;
+    recorded_context.direction = direction;
+    recorded_context.connection_id = connection;
+    recorded_context.start_ns = 250;
+    quic_trace::Packet recorded(recorded_context);
+    recorded.record_phase(QUIC_TRACE_PACKET_PHASE_ROUTING, 300, 400, QUIC_TRACE_PACKET_OUTCOME_SUCCESS);
+    recorded.finish_at(QUIC_TRACE_PACKET_OUTCOME_SUCCESS, 500);
+    quic_trace::SocketCall call(direction, connection);
+    call.returned();
+    auto stats = quic_trace::SocketStats::buffer(2400, 1200);
+    stats += quic_trace::SocketStats::buffer(100);
+    call.succeeded(stats);
     for (const auto outcome : {QUIC_TRACE_PACKET_OUTCOME_MALFORMED,
          QUIC_TRACE_PACKET_OUTCOME_AUTHENTICATION_FAILED, QUIC_TRACE_PACKET_OUTCOME_DROPPED}) {
       quic_trace::PacketContext packet_context;

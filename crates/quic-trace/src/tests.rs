@@ -193,13 +193,22 @@ fn pending_send_holds_no_untraced_packet() {
 #[test]
 fn socket_outcome_describes_the_system_call_not_the_stack_policy() {
     assert_eq!(SocketOutcome::from_errno(0), SocketOutcome::Success);
-    assert_eq!(SocketOutcome::from_errno(libc_errno::EAGAIN), SocketOutcome::WouldBlock);
+    assert_eq!(
+        SocketOutcome::from_errno(libc_errno::EAGAIN),
+        SocketOutcome::WouldBlock
+    );
     assert_eq!(
         SocketOutcome::from_errno(libc_errno::ECONNRESET),
         SocketOutcome::ConnectionReset
     );
-    assert_eq!(SocketOutcome::from_errno(libc_errno::ENOBUFS), SocketOutcome::Error);
-    assert_eq!(SocketOutcome::from_errno(libc_errno::EMSGSIZE), SocketOutcome::Error);
+    assert_eq!(
+        SocketOutcome::from_errno(libc_errno::ENOBUFS),
+        SocketOutcome::Error
+    );
+    assert_eq!(
+        SocketOutcome::from_errno(libc_errno::EMSGSIZE),
+        SocketOutcome::Error
+    );
     assert_eq!(
         SocketOutcome::from_io_error(&std::io::ErrorKind::WouldBlock.into()),
         SocketOutcome::WouldBlock
@@ -224,6 +233,155 @@ fn handle_reports_whether_any_transport_event_is_enabled() {
     assert!(handle.is_enabled());
     recording.set_enabled(Tracepoint::SocketEnd, false);
     assert!(!handle.is_enabled());
+}
+
+/// Disable every transport tracepoint of a recording handle.
+fn disable_all(handle: &Handle) {
+    for tracepoint in backend::ALL_TRACEPOINTS {
+        recording(handle).set_enabled(tracepoint, false);
+    }
+}
+
+#[test]
+fn now_ns_if_enabled_reads_the_clock_only_while_tracing() {
+    assert_eq!(Handle::disabled().now_ns_if_enabled(), None);
+    let handle = trace();
+    assert!(handle.now_ns_if_enabled().is_some());
+    disable_all(&handle);
+    let clock_reads = recording(&handle).clock_reads();
+    assert_eq!(handle.now_ns_if_enabled(), None);
+    assert_eq!(recording(&handle).clock_reads(), clock_reads);
+}
+
+#[test]
+fn socket_call_ends_at_the_instant_the_call_returned() {
+    let handle = trace();
+    let mut call = handle.socket_call(Direction::Tx, Some(7));
+    let returned = call.returned().expect("tracing is on");
+    call.succeeded(SocketStats::buffer(2400, Some(1200)));
+    let events = events(&handle);
+    assert!(matches!(
+        events[0],
+        Event::SocketStart {
+            direction: Direction::Tx,
+            connection_id: Some(7),
+            ..
+        }
+    ));
+    assert_eq!(
+        events[1],
+        Event::SocketEnd {
+            timestamp_ns: returned,
+            trace_id: trace_id(&events[0]).unwrap(),
+            outcome: SocketOutcome::Success,
+            stats: SocketStats::new(1, 2, 2400),
+        }
+    );
+}
+
+#[test]
+fn socket_call_records_the_system_call_error() {
+    let handle = trace();
+    let mut call = handle.socket_call(Direction::Rx, None);
+    let returned = call.returned();
+    call.failed(&std::io::ErrorKind::WouldBlock.into());
+    assert!(matches!(
+        events(&handle)[1],
+        Event::SocketEnd {
+            outcome: SocketOutcome::WouldBlock,
+            stats: SocketStats { buffers: 0, .. },
+            timestamp_ns,
+            ..
+        } if Some(timestamp_ns) == returned
+    ));
+}
+
+#[test]
+fn socket_call_still_reports_its_instant_without_socket_events() {
+    // The instant also bounds the call's packets, so it is read whenever any
+    // transport event would be recorded, even with the socket events off.
+    let handle = trace();
+    recording(&handle).enable_only(Tracepoint::PacketEnd);
+    let mut call = handle.socket_call(Direction::Tx, None);
+    assert!(call.returned().is_some());
+    call.succeeded(SocketStats::buffer(1200, None));
+    assert!(events(&handle).is_empty());
+}
+
+#[test]
+fn disabled_socket_call_reads_no_clock() {
+    let handle = trace();
+    disable_all(&handle);
+    let mut call = handle.socket_call(Direction::Tx, Some(7));
+    assert_eq!(call.returned(), None);
+    call.succeeded(SocketStats::buffer(1200, None));
+    let mut failed = handle.socket_call(Direction::Rx, None);
+    assert_eq!(failed.returned(), None);
+    failed.failed(&std::io::ErrorKind::Other.into());
+    assert_eq!(recording(&handle).clock_reads(), 0);
+    assert!(events(&handle).is_empty());
+}
+
+#[test]
+fn socket_stats_count_one_datagram_per_segment() {
+    assert_eq!(
+        SocketStats::buffer(1200, None),
+        SocketStats::new(1, 1, 1200)
+    );
+    assert_eq!(
+        SocketStats::buffer(2500, Some(1200)),
+        SocketStats::new(1, 3, 2500)
+    );
+    assert_eq!(
+        SocketStats::buffer(800, Some(1200)),
+        SocketStats::new(1, 1, 800)
+    );
+    assert_eq!(
+        SocketStats::buffer(0, Some(1200)),
+        SocketStats::new(1, 1, 0)
+    );
+    assert_eq!(
+        SocketStats::buffer(1200, Some(0)),
+        SocketStats::new(1, 1, 1200)
+    );
+    let batch: SocketStats = [
+        SocketStats::buffer(2400, Some(1200)),
+        SocketStats::buffer(100, None),
+    ]
+    .into_iter()
+    .sum();
+    assert_eq!(batch, SocketStats::new(2, 3, 2500));
+}
+
+#[test]
+fn record_phase_emits_both_edges_at_the_given_instants() {
+    let handle = trace();
+    let packet = handle.packet(PacketContext::new(Direction::Rx, 7).with_start_ns(10));
+    let clock_reads = recording(&handle).clock_reads();
+    packet.record_phase(PacketPhase::Routing, 20, 30, PacketOutcome::Dropped);
+    assert_eq!(recording(&handle).clock_reads(), clock_reads);
+    let events = events(&handle);
+    assert!(matches!(
+        events[1],
+        Event::PacketPhase {
+            timestamp_ns: 20,
+            phase: PacketPhase::Routing,
+            edge: PhaseEdge::Start,
+            outcome: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        events[2],
+        Event::PacketPhase {
+            timestamp_ns: 30,
+            phase: PacketPhase::Routing,
+            edge: PhaseEdge::Done,
+            outcome: Some(PacketOutcome::Dropped),
+            ..
+        }
+    ));
+    packet.finish(PacketOutcome::Success);
 }
 
 #[test]

@@ -28,6 +28,31 @@ inline std::uint64_t now_ns() { return quic_trace_now_ns(); }
 /** Allocate a process-wide stable transport connection identifier. */
 inline std::uint64_t next_connection_id() { return quic_trace_next_connection_id(); }
 
+/**
+ * Return whether any transport event would be recorded now.
+ *
+ * A stack that captures timestamps of its own before it knows which lifecycle
+ * they belong to checks this first, so an untraced process reads no clock. It
+ * matches the Rust facade's `Handle::is_enabled`.
+ */
+inline bool enabled() {
+  return quic_trace_quic_packet_start_enabled() || quic_trace_quic_packet_phase_enabled() ||
+         quic_trace_quic_stream_frame_enabled() || quic_trace_quic_packet_end_enabled() ||
+         quic_trace_udp_socket_start_enabled() || quic_trace_udp_socket_end_enabled() ||
+         quic_trace_quic_connection_path_enabled() || quic_trace_quic_send_blocked_enabled();
+}
+
+/**
+ * Read the clock only when any transport event would be recorded now.
+ *
+ * A stack stamps an instant it may later attach to a lifecycle, such as the
+ * return of a system call made outside `SocketCall`, with this.
+ */
+inline std::optional<std::uint64_t> now_ns_if_enabled() {
+  if (!enabled()) return std::nullopt;
+  return now_ns();
+}
+
 /** Metadata known when a QUIC packet trace starts. */
 struct PacketContext {
   /** QUIC connection identifier associated with the packet. */
@@ -180,6 +205,17 @@ class Packet {
                        std::uint64_t timestamp_ns) const {
     if (trace_id_ == 0 || !quic_trace_quic_packet_phase_enabled()) return {};
     return PacketPhase(trace_id_, value, timestamp_ns);
+  }
+
+  /**
+   * Record a phase that already ran from `start_ns` to `end_ns`.
+   *
+   * A stack that measured a phase's boundaries before it held the packet's
+   * trace records the finished phase in one call. It reads no clock.
+   */
+  void record_phase(quic_trace_packet_phase value, std::uint64_t start_ns,
+                    std::uint64_t end_ns, quic_trace_packet_outcome outcome) const {
+    phase_at(value, start_ns).finish_at(outcome, end_ns);
   }
 
   /**
@@ -362,6 +398,30 @@ struct SocketStats {
   std::uint64_t datagrams = 0;
   /** Total bytes represented by those buffers. */
   std::uint64_t bytes = 0;
+
+  /**
+   * Measure one buffer of `bytes` that GSO or GRO splits into datagrams of
+   * `segment_size`, or 0 for none.
+   *
+   * A buffer holds at least one datagram, so one without segmentation and an
+   * empty datagram each count as one. Add the measurements of a batch's
+   * buffers to describe the whole operation.
+   */
+  static SocketStats buffer(std::uint64_t bytes, std::uint64_t segment_size = 0) {
+    std::uint64_t datagrams = 1;
+    if (segment_size > 0 && bytes > segment_size) {
+      datagrams = (bytes + segment_size - 1) / segment_size;
+    }
+    return {1, datagrams, bytes};
+  }
+
+  /** Add another buffer's or batch's measurements to these. */
+  SocketStats& operator+=(const SocketStats& other) {
+    buffers += other.buffers;
+    datagrams += other.datagrams;
+    bytes += other.bytes;
+    return *this;
+  }
 };
 
 /**
@@ -530,6 +590,67 @@ class Socket {
   std::uint64_t trace_id_ = 0;
   quic_trace_direction direction_ = QUIC_TRACE_DIRECTION_RX;
   std::optional<std::uint64_t> connection_id_;
+};
+
+/**
+ * One UDP system call, recorded as a socket operation that ends when the call
+ * returned.
+ *
+ * A stack starts the call just before the system call, marks `returned()`
+ * right after it, and then finishes with the call's own result, before any
+ * error policy of the stack. The returned instant also starts or ends the
+ * packets the call carried, so the socket event and those packets agree
+ * exactly. When no transport event would be recorded, no clock is read and the
+ * call reports no instant. Finishing leaves `errno` as it was, so the stack
+ * still sees the system call's error. Destroying the call unfinished records
+ * an abandoned operation.
+ */
+class SocketCall {
+ public:
+  /** Start a socket operation for one system call about to be made. */
+  explicit SocketCall(quic_trace_direction direction,
+                      std::optional<std::uint64_t> connection_id = std::nullopt)
+      : socket_(direction, connection_id), timed_(enabled()) {}
+
+  SocketCall(const SocketCall&) = delete;
+  SocketCall& operator=(const SocketCall&) = delete;
+
+  /**
+   * Mark that the system call returned, and return that instant.
+   *
+   * Call this immediately after the system call, before any other work, so the
+   * instant is the call's completion. It is empty when no transport event
+   * would be recorded.
+   */
+  std::optional<std::uint64_t> returned() {
+    if (timed_) {
+      const int error = errno;
+      returned_ns_ = now_ns();
+      errno = error;
+    }
+    return returned_ns_;
+  }
+
+  /** Finish a call that succeeded with the buffers it carried. */
+  void succeeded(SocketStats stats) { finish(QUIC_TRACE_SOCKET_OUTCOME_SUCCESS, stats); }
+
+  /** Finish a call that failed with `error`, classified as `socket_outcome` does. */
+  void failed(int error) { finish(socket_outcome(error), {}); }
+
+ private:
+  void finish(quic_trace_socket_outcome outcome, SocketStats stats) {
+    const int error = errno;
+    if (returned_ns_) {
+      socket_.finish_at(outcome, stats, *returned_ns_);
+    } else {
+      socket_.finish(outcome, stats);
+    }
+    errno = error;
+  }
+
+  Socket socket_;
+  bool timed_ = false;
+  std::optional<std::uint64_t> returned_ns_;
 };
 
 /**

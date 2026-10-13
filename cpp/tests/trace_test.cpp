@@ -145,4 +145,45 @@ int main() {
   coalesced.dropped(quic_trace::now_ns());
   assert(coalesced.empty());
   if (!traced) assert(clock_reads == before_dropped + 1);
+
+  // The tracing gate covers every transport event, and reads no clock when
+  // nothing would be recorded.
+  const auto before_gate = clock_reads;
+  const auto maybe_now = quic_trace::now_ns_if_enabled();
+  assert(maybe_now.has_value() == quic_trace::enabled());
+  assert(clock_reads == before_gate + (maybe_now ? 1 : 0));
+
+  // A socket call ends at the instant it returned, keeps errno for the stack,
+  // and reads no clock while tracing is off.
+  const auto before_call = clock_reads;
+  quic_trace::SocketCall call(QUIC_TRACE_DIRECTION_TX, 7);
+  const auto returned = call.returned();
+  assert(returned.has_value() == quic_trace::enabled());
+  errno = EAGAIN;
+  call.failed(EAGAIN);
+  assert(errno == EAGAIN);
+  if (!quic_trace::enabled()) assert(clock_reads == before_call);
+  quic_trace::SocketCall read(QUIC_TRACE_DIRECTION_RX);
+  read.returned();
+  read.succeeded(quic_trace::SocketStats::buffer(1200));
+
+  // A buffer holds at least one datagram, and GSO segments count separately.
+  const auto single = quic_trace::SocketStats::buffer(1200);
+  assert(single.buffers == 1 && single.datagrams == 1 && single.bytes == 1200);
+  auto batch = quic_trace::SocketStats::buffer(2500, 1200);
+  assert(batch.datagrams == 3);
+  batch += quic_trace::SocketStats::buffer(0, 1200);
+  assert(batch.buffers == 2 && batch.datagrams == 4 && batch.bytes == 2500);
+  assert(quic_trace::SocketStats::buffer(800, 1200).datagrams == 1);
+
+  // A recorded phase takes both instants from the caller.
+  quic_trace::PacketContext recorded_context;
+  recorded_context.connection_id = 7;
+  recorded_context.start_ns = 10;
+  quic_trace::Packet recorded(recorded_context);
+  const auto before_record = clock_reads;
+  recorded.record_phase(QUIC_TRACE_PACKET_PHASE_ROUTING, 20, 30,
+                        QUIC_TRACE_PACKET_OUTCOME_SUCCESS);
+  assert(clock_reads == before_record);
+  recorded.finish_at(QUIC_TRACE_PACKET_OUTCOME_SUCCESS, 40);
 }

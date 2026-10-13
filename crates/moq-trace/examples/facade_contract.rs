@@ -126,6 +126,14 @@ fn main() {
             SocketStats::new(1, 2, 1200),
             600,
         );
+        let recorded = handle.packet(PacketContext::new(direction, connection).with_start_ns(250));
+        recorded.record_phase(PacketPhase::Routing, 300, 400, PacketOutcome::Success);
+        recorded.finish_at(PacketOutcome::Success, 500);
+        let mut call = handle.socket_call(direction, Some(connection));
+        let _ = call.returned();
+        let mut stats = SocketStats::buffer(2400, Some(1200));
+        stats += SocketStats::buffer(100, None);
+        call.succeeded(stats);
         for outcome in [
             PacketOutcome::Malformed,
             PacketOutcome::AuthenticationFailed,

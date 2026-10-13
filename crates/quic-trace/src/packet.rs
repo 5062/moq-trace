@@ -237,6 +237,21 @@ impl PacketTrace {
         self.start_phase(phase, Some(timestamp_ns))
     }
 
+    /// Record a phase that already ran from `start_ns` to `end_ns`.
+    ///
+    /// A stack that measured a phase's boundaries before it held the packet's
+    /// trace, such as the stages of a datagram handled before routing, records
+    /// the finished phase in one call. It reads no clock.
+    pub fn record_phase(
+        &self,
+        phase: PacketPhase,
+        start_ns: u64,
+        end_ns: u64,
+        outcome: PacketOutcome,
+    ) {
+        self.phase_at(phase, start_ns).finish_at(outcome, end_ns);
+    }
+
     /// Start a phase at `timestamp_ns`, or at the current time when it is absent.
     ///
     /// The clock is read only after enablement is checked, so a disabled phase

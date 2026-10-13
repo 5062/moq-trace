@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 pub use quic_trace::{
     ConnectionPath, Direction, PacketContext, PacketOutcome, PacketPhase, PacketPhaseTrace,
-    PacketSpace, PacketTrace, SendBlockedReason, SendBlockedTrace, SocketOutcome, SocketStats,
-    SocketTrace, StreamFrame, next_connection_id,
+    PacketSpace, PacketTrace, SendBlockedReason, SendBlockedTrace, SocketCall, SocketOutcome,
+    SocketStats, SocketTrace, StreamFrame, next_connection_id,
 };
 pub use trace_core::now_ns;
 
@@ -66,6 +66,12 @@ impl Handle {
     /// Start a UDP socket trace through the shared transport toolkit.
     pub fn socket(&self, direction: Direction, connection_id: Option<u64>) -> SocketTrace {
         self.transport.socket(direction, connection_id)
+    }
+
+    /// Start a socket operation for one system call through the shared transport
+    /// toolkit.
+    pub fn socket_call(&self, direction: Direction, connection_id: Option<u64>) -> SocketCall {
+        self.transport.socket_call(direction, connection_id)
     }
 
     /// Record a connection's path through the shared transport toolkit.

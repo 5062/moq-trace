@@ -16,7 +16,7 @@ pub use packet::{
 };
 
 mod socket;
-pub use socket::{SocketOutcome, SocketStats, SocketTrace};
+pub use socket::{SocketCall, SocketOutcome, SocketStats, SocketTrace};
 
 mod blocked;
 pub use blocked::{SendBlockedReason, SendBlockedTrace};
@@ -70,6 +70,18 @@ impl Handle {
         self.inner
             .as_ref()
             .is_some_and(|inner| inner.any_enabled(&backend::ALL_TRACEPOINTS))
+    }
+
+    /// Read the clock only when any transport event would be recorded now.
+    ///
+    /// A stack stamps an instant it may later attach to a lifecycle, such as
+    /// the return of a system call made outside [`Handle::socket_call`], with
+    /// this, so an untraced build reads no clock.
+    pub fn now_ns_if_enabled(&self) -> Option<u64> {
+        let inner = self.inner.as_ref()?;
+        inner
+            .any_enabled(&backend::ALL_TRACEPOINTS)
+            .then(|| inner.now_ns())
     }
 }
 

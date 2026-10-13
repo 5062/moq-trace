@@ -68,6 +68,37 @@ impl SocketStats {
             bytes,
         }
     }
+
+    /// Measure one buffer of `bytes` that GSO or GRO splits into datagrams of
+    /// `segment_size`.
+    ///
+    /// A buffer holds at least one datagram, so one without segmentation, a
+    /// segment size of zero, and an empty datagram each count as one. Sum the
+    /// measurements of a batch's buffers to describe the whole operation.
+    pub fn buffer(bytes: usize, segment_size: Option<usize>) -> Self {
+        let datagrams = match segment_size {
+            Some(size) if size > 0 => bytes.div_ceil(size).max(1),
+            _ => 1,
+        };
+        Self::new(1, datagrams, bytes)
+    }
+}
+
+impl std::ops::AddAssign for SocketStats {
+    fn add_assign(&mut self, other: Self) {
+        self.buffers += other.buffers;
+        self.datagrams += other.datagrams;
+        self.bytes += other.bytes;
+    }
+}
+
+impl std::iter::Sum for SocketStats {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |mut total, stats| {
+            total += stats;
+            total
+        })
+    }
 }
 
 /// The tracepoints a socket trace token covers.
@@ -145,6 +176,69 @@ impl Drop for SocketTrace {
     fn drop(&mut self) {
         if let Some(state) = self.0.take() {
             state.emit_end(SocketOutcome::Abandoned, SocketStats::default(), None);
+        }
+    }
+}
+
+/// One UDP system call, recorded as a socket operation that ends when the call
+/// returned.
+///
+/// A stack starts the call just before the system call, marks
+/// [`SocketCall::returned`] right after it, and then finishes with the call's
+/// own result, before any error policy of the stack. The returned instant also
+/// starts or ends the packets the call carried, so the socket event and those
+/// packets agree exactly. When no transport event would be recorded, no clock
+/// is read and the call reports no instant.
+///
+/// Dropping the call unfinished records an abandoned operation.
+pub struct SocketCall {
+    trace: SocketTrace,
+    clock: Option<crate::backend::Handle>,
+    returned_ns: Option<u64>,
+}
+
+impl Handle {
+    /// Start a socket operation for one system call about to be made.
+    pub fn socket_call(&self, direction: Direction, connection_id: Option<u64>) -> SocketCall {
+        SocketCall {
+            trace: self.socket(direction, connection_id),
+            clock: self.inner.filter(|_| self.is_enabled()),
+            returned_ns: None,
+        }
+    }
+}
+
+impl SocketCall {
+    /// Mark that the system call returned, and return that instant.
+    ///
+    /// Call this immediately after the system call, before any other work, so
+    /// the instant is the call's completion. The instant is `None` when no
+    /// transport event would be recorded.
+    pub fn returned(&mut self) -> Option<u64> {
+        if let Some(clock) = self.clock {
+            self.returned_ns = Some(clock.now_ns());
+        }
+        self.returned_ns
+    }
+
+    /// Finish a call that succeeded with the buffers it carried.
+    pub fn succeeded(self, stats: SocketStats) {
+        self.finish(SocketOutcome::Success, stats);
+    }
+
+    /// Finish a call that failed with the error it returned.
+    ///
+    /// The outcome is classified as [`SocketOutcome::from_io_error`] does.
+    pub fn failed(self, error: &std::io::Error) {
+        self.finish(SocketOutcome::from_io_error(error), SocketStats::default());
+    }
+
+    /// Finish the operation at the returned instant, or now when it was never
+    /// marked.
+    fn finish(self, outcome: SocketOutcome, stats: SocketStats) {
+        match self.returned_ns {
+            Some(at_ns) => self.trace.finish_at(outcome, stats, at_ns),
+            None => self.trace.finish(outcome, stats),
         }
     }
 }
