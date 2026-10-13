@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import analysis_case
+import duckdb
 from test_quic import _Peer, _stream
 
 from moq_trace.analysis import analyze, coverage, sql, wire
@@ -409,6 +410,44 @@ class WireTests(unittest.TestCase):
         self.prepare()
         with self.assertRaisesRegex(TraceError, "no key logs"):
             self.ingest(key_logs=())
+
+
+class CoverageAgreementTests(unittest.TestCase):
+    """The trace and the wire must cover and complete every object with the same packets."""
+
+    def check(self, trace: list[tuple[int, int]], wire: list[tuple[int, int]], complete: tuple[int, int]) -> None:
+        """Check one object whose trace and wire coverage are `(object, packet trace ID)` rows.
+
+        Wire packet IDs are the trace IDs plus 100, so only the join through
+        `network.wire_packets` relates them. `complete` names the packet trace ID
+        that completes the object in the trace and on the wire.
+        """
+
+        connection = duckdb.connect()
+        self.addCleanup(connection.close)
+        connection.execute("""CREATE SCHEMA model; CREATE SCHEMA network;
+            CREATE TABLE model.coverage_packets (object_trace_id UBIGINT, packet_trace_id UBIGINT);
+            CREATE TABLE model.coverage (object_trace_id UBIGINT, complete_packet_trace_id UBIGINT);
+            CREATE TABLE network.wire_coverage_packets (object_trace_id UBIGINT, packet_trace_id UBIGINT);
+            CREATE TABLE network.wire_coverage (object_trace_id UBIGINT, complete_packet_trace_id UBIGINT);
+            CREATE TABLE network.wire_packets (packet_id UBIGINT, trace_id UBIGINT)""")
+        connection.executemany("INSERT INTO model.coverage_packets VALUES (?, ?)", trace)
+        connection.executemany("INSERT INTO network.wire_coverage_packets VALUES (?, ? + 100)", wire)
+        connection.executemany("INSERT INTO network.wire_packets VALUES (? + 100, ?)", [(i, i) for i in range(10)])
+        connection.execute("INSERT INTO model.coverage VALUES (1, ?)", [complete[0]])
+        connection.execute("INSERT INTO network.wire_coverage VALUES (1, ? + 100)", [complete[1]])
+        sql.check(connection, "wire/coverage-checks", context="coverage: ")
+
+    def test_matching_coverage_passes(self) -> None:
+        self.check([(1, 2), (1, 3)], [(1, 3), (1, 2)], (3, 3))
+
+    def test_different_packets_are_rejected(self) -> None:
+        with self.assertRaisesRegex(TraceError, "objects covered by different packets: 1"):
+            self.check([(1, 2), (1, 3)], [(1, 2), (1, 4)], (3, 3))
+
+    def test_a_different_completing_packet_is_rejected(self) -> None:
+        with self.assertRaisesRegex(TraceError, "objects completed by a different packet: 1"):
+            self.check([(1, 2), (1, 3)], [(1, 2), (1, 3)], (3, 2))
 
 
 def _load(connection, table: str, columns, rows: list[tuple]) -> None:

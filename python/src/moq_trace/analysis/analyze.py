@@ -188,18 +188,7 @@ def _select_window(
     delivered. Only the delivered ones carry latency samples.
     """
 
-    connection.execute(
-        """CREATE TEMP TABLE inbound_objects AS
-           SELECT rx.trace_id, rx.start_ns,
-                  count(tx.trace_id) FILTER (
-                    tx.outcome = 'success' OR list_contains($undelivered, tx.outcome::VARCHAR)
-                  ) AS copies
-           FROM model.objects AS rx
-           LEFT JOIN model.objects AS tx ON tx.rx_trace_id = rx.trace_id AND tx.direction = 'tx'
-           WHERE rx.direction = 'rx' AND rx.outcome = 'success' AND rx.payload_bytes = $size
-           GROUP BY rx.trace_id, rx.start_ns""",
-        {"undelivered": list(_UNDELIVERED), "size": object_size},
-    )
+    connection.execute(sql.read("window/inbound-stage"), {"undelivered": list(_UNDELIVERED), "size": object_size})
     origin, last, steady = connection.execute(
         "SELECT min(start_ns), max(start_ns), min(start_ns) FILTER (copies = ?) FROM inbound_objects", [subscribers]
     ).fetchone()
@@ -211,13 +200,7 @@ def _select_window(
     start = min(int(steady) + round(warmup_seconds * 1_000_000_000), 2**63 - 1)
     end = max(int(last) - round(cooldown_seconds * 1_000_000_000), 0)
     connection.execute("INSERT INTO model.window VALUES (?, ?, ?)", [origin, start, end])
-    connection.execute(
-        """CREATE TEMP TABLE selected_rx AS
-           SELECT * FROM model.objects
-           SEMI JOIN inbound_objects AS inbound USING (trace_id)
-           WHERE start_ns BETWEEN ? AND ?""",
-        [start, end],
-    )
+    connection.execute(sql.read("window/selected-stage"), {"start": start, "end": end})
     if _count(connection, "SELECT count(*) FROM selected_rx") == 0:
         raise TraceError("steady-state window contains no complete objects")
     bad = _count(
@@ -231,13 +214,7 @@ def _select_window(
             f"that were delivered or ended {', '.join(_UNDELIVERED)}"
         )
     connection.execute("INSERT INTO model.selected_objects SELECT trace_id FROM selected_rx")
-    connection.execute(
-        """CREATE TEMP VIEW selected_copies AS
-           SELECT rx.trace_id AS rx_trace_id, rx.start_ns AS rx_start_ns,
-                  tx.trace_id AS tx_trace_id, tx.end_ns AS tx_end_ns,
-                  tx.connection_id, tx.stream_id, tx.stream_offset_start, tx.stream_offset_end
-           FROM selected_rx AS rx JOIN object_copies AS tx ON tx.rx_trace_id = rx.trace_id"""
-    )
+    connection.execute(sql.read("window/copies"))
     return int(origin)
 
 
@@ -248,11 +225,7 @@ def _derive_samples(connection: duckdb.DuckDBPyConnection, origin: int) -> None:
     object in the trace, so every sample shares one time axis.
     """
 
-    connection.execute(
-        """CREATE TEMP VIEW selected_packets AS
-           SELECT * FROM model.packets
-           SEMI JOIN (SELECT DISTINCT packet_trace_id AS trace_id FROM model.coverage_packets) USING (trace_id)"""
-    )
+    connection.execute(sql.read("samples/selected-packets"))
     connection.execute(sql.read("samples/schema"))
     for stage in (
         "samples/copy-spans-stage",

@@ -199,7 +199,9 @@ def ingest(
     tolerance = manifest.realtime_offset_uncertainty_ns + _CLOCK_STEP_NS
     sql.check(connection, "wire/checks", {"tolerance": tolerance}, "the packet capture disagrees with the trace: ")
     coverage.resolve(connection, "wire/coverage-source", "network.wire_coverage")
-    _check_coverage(connection)
+    sql.check(
+        connection, "wire/coverage-checks", context="the packet capture disagrees with the trace on object coverage: "
+    )
     for stage in ("wire/object-samples-stage", "wire/packet-samples-stage"):
         connection.execute(sql.read(stage), {"origin": origin_ns})
     return packet_count
@@ -219,14 +221,7 @@ def _join_connections(connection: duckdb.DuckDBPyConnection, states: list[quic.C
     other than exactly one candidate for the complete sequence is an error.
     """
 
-    paths = connection.execute(
-        """SELECT connection_id, timestamp_ns,
-                  (local_address_high::UHUGEINT << 64) | local_address_low::UHUGEINT AS local_address,
-                  local_port,
-                  (peer_address_high::UHUGEINT << 64) | peer_address_low::UHUGEINT AS peer_address,
-                  peer_port
-           FROM quic_connection_path"""
-    ).fetchall()
+    paths = connection.execute(sql.read("wire/connection-paths")).fetchall()
     wildcards = {0, int(ipaddress.IPv6Address("::ffff:0.0.0.0"))}
     candidates_staged = False
     for state in states:
@@ -260,35 +255,4 @@ def _join_connections(connection: duckdb.DuckDBPyConnection, states: list[quic.C
         connection.execute(
             "UPDATE network.wire_connections SET trace_connection_id = ? WHERE connection = ?",
             [candidates.pop(), state.index],
-        )
-
-
-def _check_coverage(connection: duckdb.DuckDBPyConnection) -> None:
-    """The trace and the wire must choose the same packets for every object and copy."""
-
-    disagreements = connection.execute(
-        """WITH trace AS (
-             SELECT object_trace_id, list(packet_trace_id ORDER BY packet_trace_id) AS packets
-             FROM model.coverage_packets GROUP BY ALL
-           ), wire AS (
-             SELECT coverage.object_trace_id, list(packet.trace_id ORDER BY packet.trace_id) AS packets
-             FROM network.wire_coverage_packets AS coverage
-             JOIN network.wire_packets AS packet ON packet.packet_id = coverage.packet_trace_id
-             GROUP BY ALL
-           ), completing AS (
-             SELECT trace.object_trace_id
-             FROM model.coverage AS trace
-             JOIN network.wire_coverage AS wire USING (object_trace_id)
-             JOIN network.wire_packets AS packet ON packet.packet_id = wire.complete_packet_trace_id
-             WHERE packet.trace_id IS DISTINCT FROM trace.complete_packet_trace_id
-           )
-           SELECT (SELECT count(*) FROM trace FULL JOIN wire USING (object_trace_id)
-                   WHERE trace.packets IS DISTINCT FROM wire.packets),
-                  (SELECT count(*) FROM completing)"""
-    ).fetchone()
-    if disagreements[0] or disagreements[1]:
-        raise TraceError(
-            "the packet capture disagrees with the trace on object coverage: "
-            f"{disagreements[0]} objects are covered by different packets and "
-            f"{disagreements[1]} are completed by a different packet"
         )

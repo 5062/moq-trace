@@ -9,7 +9,7 @@ import duckdb
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
-from ..analysis import phases
+from ..analysis import phases, sql
 from .common import _save
 
 
@@ -51,51 +51,15 @@ def _timelines(connection: duckdb.DuckDBPyConnection) -> tuple[_Timeline, ...]:
     """Query selected lifecycles and intervals, converting nanoseconds for drawing."""
 
     timelines = []
-    selections = connection.execute("""SELECT s.rx_trace_id, s.statistic,
-        s.target_ns / 1000.0, object.group_id, object.object_id, object.start_ns
-        FROM metrics.timeline_selections s JOIN model.objects object ON s.rx_trace_id = object.trace_id
-        ORDER BY s.selection_order""").fetchall()
+    selections = connection.execute(sql.read("timeline/selections")).fetchall()
     for rx_trace_id, statistic, target_us, group_id, object_id, origin in selections:
         copies = [
             _Copy(session_id=int(session), subscriber_ordinal=int(ordinal) + 1, full_span_us=float(span))
             for session, ordinal, span in connection.execute(
-                """SELECT session_id, copy_ordinal,
-                      (end_ns - $origin) / 1000.0 FROM model.objects
-                      WHERE rx_trace_id = $rx AND copy_ordinal IS NOT NULL
-                      ORDER BY copy_ordinal""",
-                {"rx": rx_trace_id, "origin": origin},
+                sql.read("timeline/copies"), {"rx": rx_trace_id, "origin": origin}
             ).fetchall()
         ]
-        intervals = connection.execute(
-            """WITH objects AS (
-            SELECT * FROM model.objects
-            WHERE trace_id = $rx OR (rx_trace_id = $rx AND copy_ordinal IS NOT NULL)
-        ), packets AS (
-            SELECT coverage.* FROM model.coverage_packets coverage
-            JOIN objects object ON object.trace_id = coverage.object_trace_id
-        ), intervals AS (
-            SELECT trace_id, 'object' AS phase, 0 AS occurrence, start_ns, end_ns FROM objects
-            UNION ALL
-            SELECT phase.trace_id, phase.phase, phase.occurrence, phase.start_ns, phase.end_ns
-            FROM model.intervals phase JOIN objects object USING (trace_id)
-            WHERE phase.subject = 'object' AND phase.outcome = 'success'
-            UNION ALL
-            SELECT packet.object_trace_id, 'quic_packet', packet.ordinal, lifecycle.start_ns, lifecycle.end_ns
-            FROM packets packet JOIN model.packets lifecycle ON lifecycle.trace_id = packet.packet_trace_id
-            UNION ALL
-            SELECT packet.object_trace_id, 'quic_' || phase.phase, phase.occurrence, phase.start_ns, phase.end_ns
-            FROM packets packet JOIN model.intervals phase ON phase.trace_id = packet.packet_trace_id
-            WHERE phase.subject = 'packet' AND phase.outcome = 'success'
-        )
-        SELECT object.direction, object.session_id, interval.phase, interval.occurrence,
-               (interval.start_ns - $origin) / 1000.0, (interval.end_ns - $origin) / 1000.0
-        FROM intervals interval JOIN objects object USING (trace_id)
-        WHERE object.direction = 'rx' OR object.session_id IN (
-            SELECT session_id FROM objects WHERE copy_ordinal = 0 OR copy_ordinal = (SELECT max(copy_ordinal) FROM
-            objects)
-        ) ORDER BY object.direction, object.session_id, interval.phase, interval.occurrence, interval.start_ns""",
-            {"rx": rx_trace_id, "origin": origin},
-        ).fetchall()
+        intervals = connection.execute(sql.read("timeline/intervals"), {"rx": rx_trace_id, "origin": origin}).fetchall()
         timelines.append(
             _Timeline(
                 statistic=statistic,
