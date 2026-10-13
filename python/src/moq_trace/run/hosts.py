@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import collections
 import contextlib
 import dataclasses
 import json
@@ -35,6 +36,11 @@ _ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 
 # How long a signalled process gets to exit before it is signalled harder.
 _STOP_TIMEOUT = 5.0
+
+# Output lines a process keeps in memory. The log file holds all of them; these
+# serve only a readiness wait that starts after its line arrived, and an error
+# message that quotes the last one.
+_KEPT_LINES = 1_000
 
 # Reports a host's clocks and loopback interfaces in one process. Each sample
 # brackets one realtime reading between two monotonic ones, and the tightest
@@ -113,8 +119,10 @@ class Channel(abc.ABC):
 class Process:
     """One command started on a host, with its output copied to a local log.
 
-    The output is also kept as lines with terminal escapes removed, so a caller
-    can wait for a readiness line without rereading the log.
+    The most recent output lines are also kept with terminal escapes removed,
+    so a caller can wait for a readiness line without rereading the log. A
+    readiness wait checks every line as it arrives, so a busy process cannot
+    push the line out of the kept window before the wait sees it.
     """
 
     def __init__(
@@ -126,12 +134,14 @@ class Process:
     ) -> None:
         self.name = name
         self.log = log
-        self.lines: list[str] = []
+        self.lines: collections.deque[str] = collections.deque(maxlen=_KEPT_LINES)
         self.pid = 0
         self._channel = channel
         self._on_line = on_line
         self._output_closed = False
-        self._grew = asyncio.Condition()
+        # Each pending readiness wait: its predicate and the future it resolves,
+        # with True for a matching line or False when output ends first.
+        self._watchers: list[tuple[Callable[[str], bool], asyncio.Future[bool]]] = []
         # Unbuffered, so the log on disk keeps up with a process that is killed.
         self._log_handle = log.open("wb", buffering=0)
         self._pump: asyncio.Task[None] | None = None
@@ -159,27 +169,27 @@ class Process:
                 self._log_handle.write(chunk)
                 pending += chunk
                 *complete, pending = pending.split(b"\n")
-                await self._append(complete)
+                self._append(complete)
             if pending:
-                await self._append([pending])
+                self._append([pending])
         except (OSError, ValueError, asyncssh.Error):
             pass
         finally:
             self._log_handle.close()
-            async with self._grew:
-                self._output_closed = True
-                self._grew.notify_all()
+            self._output_closed = True
+            for _predicate, found in self._watchers:
+                if not found.done():
+                    found.set_result(False)
 
-    async def _append(self, lines: list[bytes]) -> None:
-        if not lines:
-            return
+    def _append(self, lines: list[bytes]) -> None:
         for raw in lines:
             line = _ANSI.sub(b"", raw).rstrip(b"\r").decode(errors="replace")
             self.lines.append(line)
             if self._on_line is not None:
                 self._on_line(line)
-        async with self._grew:
-            self._grew.notify_all()
+            for predicate, found in self._watchers:
+                if not found.done() and predicate(line):
+                    found.set_result(True)
 
     @property
     def returncode(self) -> int | None:
@@ -195,26 +205,27 @@ class Process:
         return status
 
     async def wait_for_line(self, predicate: Callable[[str], bool], description: str, timeout: float) -> None:
-        """Wait for an output line that satisfies `predicate`, failing if the process exits first."""
+        """Wait for an output line that satisfies `predicate`, failing if the process exits first.
 
-        async def matched() -> None:
-            index = 0
-            async with self._grew:
-                while True:
-                    for line in self.lines[index:]:
-                        if predicate(line):
-                            return
-                    index = len(self.lines)
-                    if self._output_closed:
-                        status = await asyncio.shield(self.exited)
-                        raise CaptureError(f"{self.name} exited with status {status} before it reported {description}")
-                    await self._grew.wait()
+        A line already received counts while it is among the kept lines.
+        """
 
+        if any(predicate(line) for line in self.lines):
+            return
+        found: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        if self._output_closed:
+            found.set_result(False)
+        watcher = (predicate, found)
+        self._watchers.append(watcher)
         try:
             async with asyncio.timeout(timeout):
-                await matched()
+                if not await found:
+                    status = await asyncio.shield(self.exited)
+                    raise CaptureError(f"{self.name} exited with status {status} before it reported {description}")
         except TimeoutError:
             raise CaptureError(f"timed out after {timeout:g}s waiting for {description} in {self.log}") from None
+        finally:
+            self._watchers.remove(watcher)
 
     async def hold(self, seconds: float) -> None:
         """Require the process to keep running for `seconds`."""

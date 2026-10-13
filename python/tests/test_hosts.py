@@ -59,7 +59,7 @@ class LocalHostTests(unittest.IsolatedAsyncioTestCase):
             "echo", ["sh", "-c", "echo $$; echo ready"], str(self.directory), self.directory / "e.log"
         )
         self.assertEqual(await process.wait(), 0)
-        self.assertEqual(process.lines, [str(process.pid), "ready"])
+        self.assertEqual(list(process.lines), [str(process.pid), "ready"])
         self.assertEqual((self.directory / "e.log").read_text(), f"{process.pid}\nready\n")
 
     async def test_a_process_receives_its_stdin_and_then_end_of_input(self) -> None:
@@ -74,7 +74,7 @@ class LocalHostTests(unittest.IsolatedAsyncioTestCase):
             "env", ["sh", "-c", 'echo "$K" "$PWD"'], str(cwd), self.directory / "env.log", env={"K": "a b"}
         )
         await process.wait()
-        self.assertEqual(process.lines, [f"a b {cwd}"])
+        self.assertEqual(list(process.lines), [f"a b {cwd}"])
 
     async def test_readiness_waits_for_a_line_and_fails_on_exit_or_timeout(self) -> None:
         colored = (
@@ -93,6 +93,18 @@ class LocalHostTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(CaptureError, "early exited with status 3 before it reported ready"):
             await early.wait_for_line(lambda line: line == "ready", "ready", 5)
+
+    async def test_kept_output_is_bounded_without_losing_a_readiness_line(self) -> None:
+        # The ready line is followed by more output than a process keeps, so only
+        # a wait that checks lines as they arrive can still see it.
+        process = await self.host.start(
+            "chatty", ["sh", "-c", "echo ready; seq 3000"], str(self.directory), self.directory / "c.log"
+        )
+        await process.wait_for_line(lambda line: line == "ready", "ready", 5)
+        self.assertEqual(await process.wait(), 0)
+        self.assertEqual(len(process.lines), hosts._KEPT_LINES)
+        self.assertEqual(process.lines[-1], "3000")
+        self.assertEqual(len((self.directory / "c.log").read_text().splitlines()), 3001)
 
     async def test_a_graceful_stop_requires_a_clean_exit(self) -> None:
         process = await self.host.start("sleep", ["sleep", "30"], str(self.directory), self.directory / "s.log")
