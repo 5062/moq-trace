@@ -33,7 +33,7 @@ def _format_us(value: float) -> str:
 def _draw_distribution(
     ecdf: Axes,
     ccdf: Axes | None,
-    values_us: Sequence[float],
+    values_us: numpy.ndarray,
     label: str,
     index: int,
 ) -> None:
@@ -44,8 +44,11 @@ def _draw_distribution(
     # quantiles as `metrics.statistics`.
     p50, p99 = (float(value) for value in numpy.quantile(values_us, (0.50, 0.99)))
     color = f"C{index}"
-    ecdf.ecdf(
-        values_us,
+    # SQL already sorted the samples, so draw their exact steps without sorting again.
+    ecdf.step(
+        numpy.r_[values_us[0], values_us],
+        numpy.arange(count + 1, dtype=float) / count,
+        where="post",
         color=color,
         label=f"{label}: p50 {_format_us(p50)}, p99 {_format_us(p99)}, max {_format_us(values_us[-1])} µs (n={count})",
     )
@@ -55,7 +58,7 @@ def _draw_distribution(
         # stays visible on the log axis instead of dropping to zero.
         ccdf.step(
             values_us,
-            [1 - rank / count for rank in range(count)],
+            1 - numpy.arange(count, dtype=float) / count,
             where="post",
             color=color,
         )
@@ -103,15 +106,12 @@ def _sample_presence(
     return bool(present), bool(nonzero)
 
 
-def _values_us(connection: duckdb.DuckDBPyConnection, metric: str, run_id: int | None = None) -> list[float]:
+def _values_us(connection: duckdb.DuckDBPyConnection, metric: str, run_id: int | None = None) -> numpy.ndarray:
     scope = " AND run_id = ?" if run_id is not None else ""
-    return [
-        value
-        for (value,) in connection.execute(
-            f"SELECT value_ns / 1000.0 FROM metrics.samples WHERE metric = ?{scope} ORDER BY value_ns",
-            [metric, run_id] if run_id is not None else [metric],
-        ).fetchall()
-    ]
+    return connection.execute(
+        f"SELECT value_ns / 1000.0 AS us FROM metrics.samples WHERE metric = ?{scope} ORDER BY value_ns",
+        [metric, run_id] if run_id is not None else [metric],
+    ).fetchnumpy()["us"]
 
 
 # Per-copy object latency, the headline of every run, outermost span first. The
@@ -197,7 +197,7 @@ def _cdf_panels(
     drawn = [
         (metric, label, [_values_us(run.connection, metric, run.run_id) for run in runs]) for metric, label in panels
     ]
-    drawn = [panel for panel in drawn if any(panel[2])]
+    drawn = [panel for panel in drawn if any(values.size for values in panel[2])]
     if not drawn:
         return False
     columns = min(_PANEL_COLUMNS, len(drawn))
@@ -207,7 +207,7 @@ def _cdf_panels(
         axis.set_visible(False)
     for axis, (metric, label, series) in zip(axes.flat, drawn, strict=False):
         for index, (run, values) in enumerate(zip(runs, series, strict=True)):
-            if values:
+            if values.size:
                 _draw_distribution(axis, None, values, run.label or "Copies", index)
         axis.set_ylabel("CDF")
         axis.set_ylim(0, 1.005)

@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import duckdb
+import numpy
 from matplotlib import pyplot as plt
 from support import run_metadata
 
@@ -22,7 +23,7 @@ from moq_trace.plot import (
     timeline,
 )
 from moq_trace.plot.breakdown import _row_summary
-from moq_trace.plot.common import _copy_rows
+from moq_trace.plot.common import _copy_rows, _draw_distribution
 from moq_trace.plot.render import _describe
 from moq_trace.plot.segments import _segments
 
@@ -83,6 +84,29 @@ def _artifact(packet_phases: bool) -> duckdb.DuckDBPyConnection:
         connection.execute("""INSERT INTO metrics.phase_totals VALUES
             ('packet', 'rx', 100, 'scheduling', 4000), ('packet', 'tx', 200, 'packet_encrypt', 1000)""")
     return connection
+
+
+class DistributionPlotTests(unittest.TestCase):
+    def test_sorted_steps_match_ecdf_and_keep_the_slowest_tail_sample_visible(self) -> None:
+        for samples in ((0.0,), (0.0, 0.0), (-2.0, 0.0, 0.0, 3.0)):
+            with self.subTest(samples=samples):
+                values = numpy.asarray(samples)
+                figure, (ecdf, ccdf, reference) = plt.subplots(1, 3)
+                try:
+                    expected = reference.ecdf(values)
+                    _draw_distribution(ecdf, ccdf, values, "test", 0)
+                    actual = ecdf.lines[0]
+                    numpy.testing.assert_array_equal(actual.get_xdata(), expected.get_xdata())
+                    numpy.testing.assert_array_equal(actual.get_ydata(), expected.get_ydata())
+                    self.assertEqual(actual.get_drawstyle(), expected.get_drawstyle())
+                    numpy.testing.assert_array_equal(ccdf.lines[0].get_xdata(), values)
+                    numpy.testing.assert_allclose(
+                        ccdf.lines[0].get_ydata(), [1 - rank / len(samples) for rank in range(len(samples))]
+                    )
+                    self.assertGreater(ccdf.lines[0].get_ydata()[-1], 0)
+                    self.assertIn(f"n={len(samples)}", actual.get_label())
+                finally:
+                    plt.close(figure)
 
 
 class RunPlotTests(unittest.TestCase):

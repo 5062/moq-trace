@@ -50,7 +50,7 @@ def plot_latency_cdf(
     counts = []
     for index, (metric, label) in enumerate(_object_spans("wire_full_span" in _metrics(connection))):
         values = _values_us(connection, metric)
-        if not values:
+        if values.size == 0:
             raise ValueError(f"cannot plot object latency without {metric} samples")
         _draw_distribution(ecdf, None, values, label, index)
         counts.append(len(values))
@@ -86,7 +86,7 @@ def plot_latency_comparison(
         counts = []
         for index, run in enumerate(runs):
             values = _values_us(run.connection, metric, run.run_id)
-            if not values:
+            if values.size == 0:
                 raise ValueError(f"cannot compare {run.label} without {metric} samples")
             _draw_distribution(ecdf, ccdf, values, run.label, index)
             counts.append(len(values))
