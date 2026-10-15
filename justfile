@@ -2,27 +2,13 @@
 
 default: check
 
-check: decoder tracepoints
-    moq-trace --help >/dev/null
+check: tracepoints
     cargo test -p moq-trace --all-features
     cargo test -p quic-trace --all-features
-    cargo fmt --manifest-path python/native/Cargo.toml --check
-    cargo test --manifest-path python/native/Cargo.toml
-    cargo clippy --manifest-path python/native/Cargo.toml --all-targets -- -D warnings
-    cargo build --example facade_contract -p moq-trace --all-features
     cmake -S . -B target/cmake --fresh -DBUILD_TESTING=ON
     cmake --build target/cmake
-    PYTHONPATH=python/src${PYTHONPATH:+:$PYTHONPATH} python python/checks/facade_contract.py
-    PYTHONPATH=python/src${PYTHONPATH:+:$PYTHONPATH} python -m unittest discover -s python/tests -v
     ctest --test-dir target/cmake --output-on-failure
     just package
-    ruff check python
-    ruff format --check python
-
-# Build the Python extension with optimization for real capture ingestion.
-decoder:
-    cargo build --locked --manifest-path python/native/Cargo.toml --target-dir target/ctf --release --features extension-module
-    cp target/ctf/release/lib_native_ctf.so python/src/moq_trace/_native_ctf.abi3.so
 
 # Assert the LTTng providers survive the link and reach a capture.
 #
@@ -100,6 +86,3 @@ install:
 
 fix:
     cargo fmt --all
-    cargo fmt --manifest-path python/native/Cargo.toml
-    ruff check --fix python
-    ruff format python

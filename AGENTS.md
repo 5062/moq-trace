@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository owns the shared instrumentation and analysis contract for MoQ
+This repository owns the shared Rust/C++ instrumentation contract for MoQ
 relay implementations. Implementation repositories own the placement of hooks
 in their MoQ and QUIC code.
 
@@ -36,27 +36,17 @@ in their MoQ and QUIC code.
 - One capture can hold several processes. Every event carries the `vpid` it came
   from, and the analysis publishes one process's slice, so process-local IDs from
   a relay and a peer can never be paired with each other.
-- The Python package has four layers, and a lower layer never imports a higher
-  one: `decode` (CTF, pcap, QUIC parsers), `analysis` (the DuckDB pipeline and its
-  `sql/<stage>/` files at the package root), `plot`, and `run` (toolkit commands,
-  local process helpers, and LTTng capture).
-  `errors`, `manifest`, and `metadata` are the shared contract. Analyzing a
-  capture must never need SSH or host code. `python/tests/test_layering.py`
-  enforces the direction.
 - Keep implementation-specific types and control flow outside this repository.
 
-The moq-workspace repository owns experiment orchestration in `bench/`, relay
-launch profiles, reference peers, workload settings, and distributed hosts. Its
-runner uses this toolkit's analysis, plotting, metadata, and local capture
-interfaces. Standalone `moq-trace` owns `analyze`, `verify`, and `plot`; keep its
-imports and package dependencies independent of the workspace runner and SSH.
+The moq-workspace repository owns all Python tooling, including the native CTF
+reader, analysis, plots, capture, verification, and experiment orchestration.
+This repository contains local development/testing instrumentation and its unit
+tests; it is not intended for upstream integration.
 
 Provider event names, enum values, fields, and units are one contract shared by
-the providers, both facades, and the analyzer, and all of them change together
-in one commit. The analyzer reads only the current release: it rejects an event,
-field, or artifact schema version it does not know rather than skipping it, and a
-capture or artifact from another release is re-recorded or re-analyzed. Do not
-add compatibility layers, fallbacks, or migrations for older data.
+the providers, both facades, and the workspace analyzer. Coordinate changes with
+`moq-workspace/python/` and validate through the workspace's `just check-tools
+check-contract` before recording results with the new contract.
 
 ## Verification
 
@@ -67,10 +57,10 @@ nix develop --command just fix
 nix develop --command just check
 ```
 
-`just check` runs Rust tests with LTTng enabled, the combined Python analysis
-tests, both C++ facade smoke tests, and Python linting. It also links a real
-binary to confirm the LTTng providers survive garbage collection and reach a
-capture, and consumes the installed CMake packages from separate prefixes.
+`just check` runs Rust and C++ unit tests, checks that providers survive linking
+and reach a real capture, and consumes installed CMake packages from separate
+prefixes. Workspace checks validate the provider declarations against the
+analyzer and compare equivalent Rust/C++ captures.
 
 Document every public Rust and C++ symbol. Comments should explain constraints
 or invariants. Use plain prose without em dashes.

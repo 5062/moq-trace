@@ -1,2 +1,0 @@
-recursive-include native *.toml *.lock *.rs
-prune native/target
