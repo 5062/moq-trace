@@ -38,6 +38,8 @@
             numpy
             pyarrow
             pydantic
+            build
+            setuptools-rust
           ]
         );
       in

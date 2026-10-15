@@ -8,7 +8,6 @@ import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest import mock
 
 import analysis_case
@@ -70,13 +69,6 @@ def publish(trace, output, **workload):
 
 
 class ArtifactTests(unittest.TestCase):
-    def test_capture_identity_reads_the_trace_uid_and_hostname(self):
-        trace = SimpleNamespace(uid="capture", environment={"hostname": "host"})
-        self.assertEqual(ctf._capture_identity(trace), ("capture", "host"))
-        trace.environment = {}
-        with self.assertRaisesRegex(ctf.CtfError, "UUID and hostname"):
-            ctf._capture_identity(trace)
-
     def test_same_pid_in_distinct_captures_is_ambiguous(self):
         with fixture() as trace, duckdb.connect(":memory:") as connection:
 
@@ -304,14 +296,6 @@ class ArtifactTests(unittest.TestCase):
                     WHERE table_schema = 'model'""").fetchone(),
                     (0,),
                 )
-
-    def test_timestamp_narrowing_names_the_event_and_field(self):
-        schema = ctf.SCHEMAS["udp_socket_end"]
-        row = [
-            "success" if field.type == "string" else 2**63 if field.name == "timestamp_ns" else 0 for field in schema
-        ]
-        with self.assertRaisesRegex(ctf.CtfError, "udp_socket_end.timestamp_ns .* int64"):
-            ctf._batch("udp_socket_end", [[value] for value in row])
 
     def test_other_versions_have_kind_specific_rebuild_instructions(self):
         for version in (SCHEMA_VERSION - 1, SCHEMA_VERSION + 1):

@@ -164,9 +164,19 @@ python -m pip install ./python
 moq-trace --help
 ```
 
-The package needs the Babeltrace 2 Python bindings (`bt2`) to read CTF. Linux
-distributions normally provide them as `python3-bt2`; the Nix development shell
-includes them. The command can run a relay experiment, capture
+The package builds a Rust extension that reads CTF through Babeltrace 2.1 and
+returns Arrow batches directly to Python. Building it requires Rust, libclang,
+pkg-config, and the Babeltrace 2.1 development files; the Nix development shell
+provides them. Babeltrace and its standard plugins are also required at runtime.
+The Python `bt2` bindings are used only by the trace-IR tests.
+
+For a source checkout, build the extension before running Python commands:
+
+```sh
+nix develop --command just decoder
+```
+
+The command can run a relay experiment, capture
 both `moq_trace:*` and `quic_trace:*`, analyze an existing CTF directory, and
 render figures from the resulting DuckDB artifact. The CTF reader accepts only
 the current provider event schemas.

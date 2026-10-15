@@ -109,7 +109,7 @@ def stream_frame(trace_id: int, start: int, end: int) -> Event:
     )
 
 
-@unittest.skipIf(ctf.bt2 is None, "the Babeltrace 2 Python bindings are unavailable")
+@unittest.skipIf(trace_source.bt2 is None, "the Babeltrace 2 Python bindings are unavailable")
 class VerifyTests(unittest.TestCase):
     """Check decoded captures, so the checks read what the decoder produces."""
 

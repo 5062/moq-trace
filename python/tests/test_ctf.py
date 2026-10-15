@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import pathlib
 import unittest
-from unittest import mock
+from itertools import chain
 
 import trace_source
 from trace_source import Clock, Enum, Event
@@ -26,7 +27,7 @@ def socket_start(
     return Event("quic_trace:udp_socket_start", payload, timestamp=timestamp, vpid=vpid, vtid=vtid)
 
 
-@unittest.skipIf(ctf.bt2 is None, "the Babeltrace 2 Python bindings are unavailable")
+@unittest.skipIf(trace_source.bt2 is None, "the Babeltrace 2 Python bindings are unavailable")
 class CtfDecodeTests(unittest.TestCase):
     """Decode real Babeltrace trace IR, so the native field reads are exercised."""
 
@@ -161,10 +162,47 @@ class CtfDecodeTests(unittest.TestCase):
             list(range(5)),
         )
 
-    def test_missing_babeltrace_bindings_have_an_actionable_error(self) -> None:
-        with mock.patch.object(ctf, "bt2", None):
-            with self.assertRaisesRegex(ctf.CtfError, "requires the Babeltrace 2.1 Python bindings"):
-                list(ctf.batches(pathlib.Path("unused.ctf")))
+    def test_file_reader_rejects_missing_capture(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "trace directory does not exist"):
+            list(ctf.batches(pathlib.Path("unused.ctf")))
+
+    def test_rejects_nonpositive_batch_size(self) -> None:
+        with self.assertRaisesRegex(ctf.CtfError, "batch_size must be positive"):
+            self.decode([socket_start()], batch_size=0)
+
+    def test_capture_identity_and_declared_outcomes_are_retained(self) -> None:
+        ((_, batch),) = ctf._batches(trace_source.messages([socket_start()]), None, 10)
+        self.assertEqual(batch.schema.metadata[b"capture"], b"00000000-0000-0000-0000-000000000001")
+        self.assertEqual(batch.schema.metadata[b"hostname"], b"test-host")
+        events = [
+            Event(
+                "moq_trace:moq_object_end",
+                {
+                    "timestamp_ns": 1,
+                    "trace_id": i,
+                    "stream_offset_end": 16,
+                    "payload_bytes": 16,
+                    "outcome": Enum(outcome),
+                },
+            )
+            for i, outcome in enumerate(("success", "dropped"))
+        ]
+        batches = list(ctf._batches(trace_source.messages(events), None, 1))
+        self.assertEqual(json.loads(batches[0][1].schema.metadata[b"outcomes"]), ["dropped", "success"])
+
+    def test_batches_combine_streams_with_the_same_source_and_event(self) -> None:
+        messages = chain(
+            trace_source.messages([socket_start(0)]),
+            trace_source.messages([socket_start(1)]),
+        )
+        batches = list(ctf._batches(messages, None, 2))
+        self.assertEqual([batch.num_rows for _, batch in batches], [2])
+        self.assertEqual(batches[0][1].column("trace_id").to_pylist(), [0, 1])
+
+    def test_rejects_missing_capture_identity(self) -> None:
+        for options in ({"uid": None}, {"hostname": None}):
+            with self.subTest(options=options), self.assertRaisesRegex(ctf.CtfError, "UUID and hostname"):
+                list(ctf._batches(trace_source.messages([socket_start()], **options), None, 10))
 
 
 if __name__ == "__main__":

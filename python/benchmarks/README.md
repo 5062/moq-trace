@@ -1,5 +1,7 @@
 # Analysis benchmark
 
+Build the native reader with `nix develop --command just decoder` first.
+
 Use a retained CTF capture and its current-release run artifact to benchmark
 the same workload, process, window, and transport profile across changes:
 

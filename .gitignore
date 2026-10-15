@@ -6,3 +6,10 @@
 **/CMakeFiles/
 *.duckdb
 /artifacts/
+
+/python/src/moq_trace/_native_ctf*.so
+/python/build/
+/python/dist/
+/python/src/*.egg-info/
+
+/python/native/target/

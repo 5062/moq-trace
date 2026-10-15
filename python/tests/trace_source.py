@@ -72,10 +72,16 @@ class Clock:
     offset_seconds: int = 0
 
 
-def messages(items: list[Event | Discarded], clock: Clock = Clock()):
+def messages(
+    items: list[Event | Discarded],
+    clock: Clock = Clock(),
+    *,
+    uid: str | None = "00000000-0000-0000-0000-000000000001",
+    hostname: str | None = "test-host",
+):
     """Return a Babeltrace message iterator over the given items, in order."""
 
-    return bt2.TraceCollectionMessageIterator(bt2.ComponentSpec(_Source, obj=(items, clock)))
+    return bt2.TraceCollectionMessageIterator(bt2.ComponentSpec(_Source, obj=(items, clock, uid, hostname)))
 
 
 def _labels(items: list[Event | Discarded]) -> dict[tuple[str, str], dict[str, int]]:
@@ -140,7 +146,7 @@ if bt2 is not None:
             return [[1, 1]]
 
         def __init__(self, config, params, source) -> None:
-            items, clock = source
+            items, clock, uid, hostname = source
             trace_class = self._create_trace_class()
             clock_class = self._create_clock_class(
                 name=clock.name, frequency=clock.frequency, offset=bt2.ClockClassOffset(clock.offset_seconds)
@@ -178,6 +184,6 @@ if bt2 is not None:
                 event_classes[(item.name, key)] = stream_classes[key].create_event_class(
                     name=item.name, payload_field_class=payload
                 )
-            trace = trace_class(uid="00000000-0000-0000-0000-000000000001", environment={"hostname": "test-host"})
+            trace = trace_class(uid=uid, environment={} if hostname is None else {"hostname": hostname})
             streams = {key: trace.create_stream(stream_class) for key, stream_class in stream_classes.items()}
             self._add_output_port("out", (streams, event_classes, labels, items))
