@@ -7,8 +7,8 @@ run needs is built on those in `Host` itself. Both kinds of host therefore run
 the same scripts: a process reports its own PID as its first line of output, a
 file is hashed with `sha256sum`, and the clocks are read by the same probe.
 
-`local.py` runs roles on this machine and `ssh.py` reaches other hosts through
-asyncssh, with one connection per destination kept in an `SshPool`.
+`local.py` runs commands on this machine. The workspace supplies the SSH
+adapter used by distributed experiments.
 """
 
 from __future__ import annotations
@@ -25,8 +25,7 @@ import re
 import shlex
 import signal
 from collections.abc import Callable, Mapping, Sequence
-
-import asyncssh
+from typing import Protocol
 
 from ..errors import CaptureError
 
@@ -97,11 +96,21 @@ class Completed:
     stderr: str
 
 
+class OutputReader(Protocol):
+    """The byte-stream operations a process log reader needs."""
+
+    async def read(self, size: int) -> bytes: ...
+
+    async def readline(self) -> bytes: ...
+
+
 class Channel(abc.ABC):
     """The running script behind one `Process`, as a host started it."""
 
     #: Standard output and standard error of the script, merged, as bytes.
-    output: asyncio.StreamReader | asyncssh.SSHReader
+    output: OutputReader
+    #: I/O failures that end output collection after a connection closes.
+    output_errors: tuple[type[Exception], ...] = (OSError, ValueError)
 
     @abc.abstractmethod
     async def wait(self) -> int:
@@ -172,7 +181,7 @@ class Process:
                 self._append(complete)
             if pending:
                 self._append([pending])
-        except (OSError, ValueError, asyncssh.Error):
+        except self._channel.output_errors:
             pass
         finally:
             self._log_handle.close()

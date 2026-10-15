@@ -5,11 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "moq-trace"
 version = "0.1.0"
-description = "Capture and analyze MoQ relay latency experiments."
+description = "Decode, analyze, and verify MoQ and QUIC traces."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "asyncssh>=2.14",
     "cryptography>=42",
     "dpkt>=1.9.8",
     "duckdb>=1.4",

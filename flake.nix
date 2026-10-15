@@ -29,7 +29,6 @@
         };
         python = pkgs.python3.withPackages (
           packages: with packages; [
-            asyncssh
             babeltrace2
             cryptography
             dpkt

@@ -38,20 +38,18 @@ in their MoQ and QUIC code.
   a relay and a peer can never be paired with each other.
 - The Python package has four layers, and a lower layer never imports a higher
   one: `decode` (CTF, pcap, QUIC parsers), `analysis` (the DuckDB pipeline and its
-  `sql/<stage>/` files at the package root), `plot`, and `run` (hosts, capture, relay profiles).
+  `sql/<stage>/` files at the package root), `plot`, and `run` (toolkit commands,
+  local process helpers, and LTTng capture).
   `errors`, `manifest`, and `metadata` are the shared contract. Analyzing a
   capture must never need SSH or host code. `python/tests/test_layering.py`
   enforces the direction.
 - Keep implementation-specific types and control flow outside this repository.
 
-The relay launch profiles, the `moq-bench` reference peers, and the protocol
-version every implementation negotiates live in the moq-workspace repository,
-whose `moq-trace.toml` names them for `moq-trace bench`. A profile is data only:
-where the relay's checkout lives, its binary, its arguments, and how to wait for
-and stop it. `bench.LAUNCH_KEYS` lists the keys a profile may set, and it excludes
-every workload key so that one invocation cannot run relays under different
-workloads. Relay-specific behavior belongs in a profile's keys, never in branches
-on a relay's name in the runner or the analysis.
+The moq-workspace repository owns experiment orchestration in `bench/`, relay
+launch profiles, reference peers, workload settings, and distributed hosts. Its
+runner uses this toolkit's analysis, plotting, metadata, and local capture
+interfaces. Standalone `moq-trace` owns `analyze`, `verify`, and `plot`; keep its
+imports and package dependencies independent of the workspace runner and SSH.
 
 Provider event names, enum values, fields, and units are one contract shared by
 the providers, both facades, and the analyzer, and all of them change together

@@ -1,4 +1,4 @@
-"""Command-line interface for MoQ relay trace experiments."""
+"""Analyze, verify, and plot MoQ and QUIC traces."""
 
 from __future__ import annotations
 
@@ -7,147 +7,15 @@ import asyncio
 import logging
 import pathlib
 import sys
-import tomllib
-import typing
 
-from pydantic import ValidationError
-
-from ..errors import ExperimentError, MoqTraceError
-from .config import ExperimentConfig, Hosts
-from .suite import FILE as SUITE_FILE
-from .tcpdump import take_sudo_password
-
-
-def _model(path: pathlib.Path, model):
-    try:
-        return model.model_validate(tomllib.loads(path.read_text()))
-    except (OSError, tomllib.TOMLDecodeError, ValidationError) as error:
-        raise ValueError(f"failed to load {path}: {error}") from error
-
-
-def _relays(value: str) -> tuple[str, ...]:
-    # Checked against the suite's profiles once the suite is loaded, which needs `--suite`.
-    names = tuple(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
-    if not names:
-        raise argparse.ArgumentTypeError("name at least one relay")
-    return names
-
-
-def _sweep(value: str):
-    from .bench import parse_sweep
-
-    try:
-        return parse_sweep(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from None
-
-
-def _checkout(value: str) -> tuple[str, pathlib.Path]:
-    name, separator, path = value.partition("=")
-    if not separator or not name or not path:
-        raise argparse.ArgumentTypeError("expected RELAY=PATH")
-    return name, pathlib.Path(path)
-
-
-# `bench` flags that map one-to-one onto `ExperimentConfig` fields. Each takes its
-# type, help, and default from the field, and a flag left unset keeps the
-# configuration default, so all three live in one place.
-_BENCH_SETTINGS = (
-    "subscribers",
-    "object_size",
-    "fps",
-    "objects_per_group",
-    "warmup_seconds",
-    "duration_seconds",
-    "cooldown_seconds",
-    "port",
-    "relay_cpu",
-    "bench_bin",
-)
-
-
-def _add_setting(parser: argparse.ArgumentParser, name: str) -> None:
-    field = ExperimentConfig.model_fields[name]
-    kind = next(kind for kind in typing.get_args(field.annotation) or (field.annotation,) if kind is not type(None))
-    # Defaults that validators rewrite, such as the resolved peer path, are shown
-    # as written in the configuration model.
-    default = "unpinned" if field.default is None else field.default
-    parser.add_argument(f"--{name.replace('_', '-')}", type=kind, help=f"{field.description} (default: {default})")
+from ..errors import MoqTraceError
 
 
 def parser() -> argparse.ArgumentParser:
-    """Build the complete command parser."""
+    """Build the toolkit command parser."""
 
     root = argparse.ArgumentParser(prog="moq-trace", description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-
-    run = commands.add_parser("run", help="Run one experiment from TOML configuration.")
-    run.add_argument("config", type=pathlib.Path)
-    run.add_argument("--output", type=pathlib.Path, help="Override the configured output directory.")
-
-    bench = commands.add_parser("bench", help="Run one workload against one or more relay implementations.")
-    bench.add_argument(
-        "--relay",
-        type=_relays,
-        required=True,
-        help="Comma-separated relay profiles from the suite, run in order.",
-    )
-    bench.add_argument(
-        "--suite",
-        type=pathlib.Path,
-        metavar="TOML",
-        help=f"The relay profiles, protocol, and peers to bench with (default: ./{SUITE_FILE}).",
-    )
-    bench.add_argument(
-        "--trace",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Capture and analyze LTTng traces. --no-trace keeps only the peers' logs (default: on).",
-    )
-    bench.add_argument(
-        "--output",
-        type=pathlib.Path,
-        help="Directory holding one subdirectory per relay (default: artifacts/bench-<UTC time>).",
-    )
-    bench.add_argument(
-        "--checkout",
-        type=_checkout,
-        action="append",
-        default=[],
-        metavar="RELAY=PATH",
-        help="Use this checkout instead of the profile's. Repeatable.",
-    )
-    for name in _BENCH_SETTINGS:
-        _add_setting(bench, name)
-    bench.add_argument(
-        "--sweep",
-        type=_sweep,
-        metavar="DIMENSION=V1,V2,...",
-        help="Run every relay at each value of subscribers, object_size, or objects_per_group, "
-        "and compare each relay's values instead of the relays.",
-    )
-    bench.add_argument(
-        "--hosts",
-        type=pathlib.Path,
-        metavar="TOML",
-        help="Place the relay, publisher, and subscriber on ssh hosts; see README (default: all local).",
-    )
-    bench.add_argument(
-        "--capture-packets",
-        action=argparse.BooleanOptionalAction,
-        help="Record a header-only tcpdump of the relay's port for throughput; needs passwordless sudo (default: off).",
-    )
-    bench.add_argument(
-        "--qlog",
-        action=argparse.BooleanOptionalAction,
-        help="Ask the relay for qlog through QLOGDIR, for RTT, loss, and congestion window. "
-        "Costs relay CPU, so latency is best measured without it (default: off).",
-    )
-    bench.add_argument(
-        "--render",
-        action=argparse.BooleanOptionalAction,
-        help="Render figures for each traced run (default: on).",
-    )
 
     analyze = commands.add_parser("analyze", help="Analyze one LTTng CTF trace.")
     analyze.add_argument("input", type=pathlib.Path)
@@ -240,62 +108,8 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
-async def _pooled(command, config):
-    """Run one experiment command with ssh connections that close when it finishes."""
-
-    from .ssh import SshPool
-
-    async with SshPool() as pool:
-        return await command(config, pool)
-
-
 def _run(args: argparse.Namespace) -> None:
-    if args.command == "run":
-        from .experiment import run
-
-        config = _model(args.config, ExperimentConfig)
-        if args.output is not None:
-            config = config.model_copy(update={"output": args.output})
-        print(asyncio.run(_pooled(run, config)))
-    elif args.command == "bench":
-        from .bench import bench, default_output
-        from .suite import load
-
-        names = [*_BENCH_SETTINGS, "capture_packets", "qlog", "render"]
-        settings = {name: getattr(args, name) for name in names if getattr(args, name) is not None}
-        if args.sweep is not None and args.sweep.dimension in settings:
-            flag = args.sweep.dimension.replace("_", "-")
-            raise ValueError(f"--sweep {args.sweep.dimension} cannot be combined with --{flag}")
-        settings["trace"] = args.trace
-        if args.hosts is not None:
-            settings["hosts"] = _model(args.hosts, Hosts)
-        try:
-            results = asyncio.run(
-                bench(
-                    load(args.suite),
-                    args.relay,
-                    args.output or default_output(),
-                    settings,
-                    dict(args.checkout),
-                    args.sweep,
-                )
-            )
-        except ValidationError as error:
-            raise ValueError(str(error)) from error
-        for result in results:
-            name = result.relay if result.value is None else f"{result.relay} {args.sweep.dimension}={result.value}"
-            if result.error is None:
-                print(f"{name}: {result.path}")
-            else:
-                print(f"{name}: error: {result.error}", file=sys.stderr)
-        failed = [
-            result.relay if result.value is None else f"{result.relay} {args.sweep.dimension}={result.value}"
-            for result in results
-            if result.error is not None
-        ]
-        if failed:
-            raise ExperimentError(f"{len(failed)} of {len(results)} relay runs failed: {', '.join(failed)}")
-    elif args.command == "analyze":
+    if args.command == "analyze":
         from ..analysis.analyze import run
         from ..metadata import Window, Workload
 
@@ -346,8 +160,6 @@ def main() -> None:
     # Progress goes to stderr, so stdout keeps only the paths a command reports.
     logging.basicConfig(format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=sys.stderr)
     logging.getLogger("moq_trace").setLevel(logging.INFO)
-    # Before any child process starts, so none of them inherits the password.
-    take_sudo_password()
     try:
         _run(parser().parse_args())
     except (OSError, MoqTraceError, ValueError) as error:

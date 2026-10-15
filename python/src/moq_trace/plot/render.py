@@ -105,7 +105,7 @@ def _render_comparison(
 def render(path: pathlib.Path) -> None:
     """Render figures from a run or comparison artifact, or from a bench output directory.
 
-    A directory is read as `moq-trace bench` output and renders its comparison
+    A directory holding run artifacts renders their comparison
     snapshot. Rendering only reads: building or refreshing a snapshot is
     `comparison.snapshot_bench`, which a caller runs first when it wants one.
     """

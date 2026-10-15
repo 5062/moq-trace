@@ -9,10 +9,6 @@ class CaptureError(MoqTraceError):
     """A host, process, or LTTng operation of a capture failed."""
 
 
-class ExperimentError(MoqTraceError):
-    """An experiment's configuration or workload was not met."""
-
-
 class TraceError(MoqTraceError):
     """A trace could not be analyzed, or an artifact read or rendered reliably."""
 

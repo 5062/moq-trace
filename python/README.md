@@ -1,7 +1,7 @@
 # MoQ trace Python package
 
-Capture relay workloads, decode CTF events into Arrow batches, and analyze them
-with DuckDB. The CTF reader is a Rust extension linked to Babeltrace 2.1.
+Decode CTF events into Arrow batches, verify transport fixtures, and analyze
+MoQ and QUIC captures with DuckDB. The CTF reader is a Rust extension linked to Babeltrace 2.1.
 
 Building from source requires Rust, libclang, pkg-config, and Babeltrace 2.1
 development files. Babeltrace and its standard plugins are required at runtime.

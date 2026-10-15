@@ -1,3 +1,0 @@
-checkout = "relays/beta"
-relay_bin = "bin/beta"
-relay_args = ["--port", "{port}", "--version", "{protocol}"]

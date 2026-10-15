@@ -1,1 +1,1 @@
-"""Running experiments: hosts, capture sessions, and relay launch profiles."""
+"""Toolkit commands and reusable local process and LTTng capture primitives."""
